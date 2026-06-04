@@ -250,46 +250,87 @@ int	col, row;
 	}
 }
 
+int read_stdin_with_timeout(char *buffer, int size, int timeout_sec)
+{
+fd_set readfds;
+struct timeval tv;
+int retval;
+
+	int err = 0;
+	FD_ZERO(&readfds);
+	FD_SET(STDIN_FILENO, &readfds);
+	tv.tv_sec = timeout_sec;
+	tv.tv_usec = 0;
+
+	retval = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &tv);
+	if(retval == -1)
+	{
+		// System error occurred
+		err =  -1;
+	}
+	else if(retval == 0)
+	{
+		// Timeout reached with no input
+		err =  1;
+	}
+	if(fgets(buffer, size, stdin) == NULL)
+	{
+		// EOF or read error
+		err = -1;
+	}
+	return(err);
+}
+
 int	communication_thread(ClockWindow *win)
 {
 char	buf[4096];
 int		loop;
 
 	int quit = 0;
+	int timeout = 10;
 	while(quit == 0)
 	{
-		fgets(buf, 4096, stdin);
-		strip_lf(buf);
-		if(strcmp(buf, "quit") == 0)
+		int err = read_stdin_with_timeout(buf, 4096, timeout);
+		if(err == 0)
+		{
+			strip_lf(buf);
+			if(strcmp(buf, "quit") == 0)
+			{
+				quit = 1;
+				win->hide();
+				Fl::delete_widget(win);
+			}
+			else if(strncmp(buf, "ndi notice:", strlen("ndi notice")) == 0)
+			{
+				win->ndi_notice = 1;
+			}
+			else if(strncmp(buf, "image:", strlen("image:")) == 0)
+			{
+				char *cp = buf + strlen("image:");
+				int sz = atoi(cp);
+				int nn = fileno(stdin);
+				win->image[win->image_cnt] = (char *)malloc(sz);
+				cp = win->image[win->image_cnt];
+				for(loop = 0;loop < sz;loop++)
+				{
+					char num_buf[256];
+					fgets(num_buf, 256, stdin);
+					*cp = atoi(num_buf);
+					cp++;
+				}
+				win->image_cnt++;
+			}
+			else
+			{
+				strcpy(win->message, buf);
+				win->redraw();
+			}
+		}
+		else if(err == -1)
 		{
 			quit = 1;
 			win->hide();
 			Fl::delete_widget(win);
-		}
-		else if(strncmp(buf, "ndi notice:", strlen("ndi notice")) == 0)
-		{
-			win->ndi_notice = 1;
-		}
-		else if(strncmp(buf, "image:", strlen("image:")) == 0)
-		{
-			char *cp = buf + strlen("image:");
-			int sz = atoi(cp);
-			int nn = fileno(stdin);
-			win->image[win->image_cnt] = (char *)malloc(sz);
-			cp = win->image[win->image_cnt];
-			for(loop = 0;loop < sz;loop++)
-			{
-				char num_buf[256];
-				fgets(num_buf, 256, stdin);
-				*cp = atoi(num_buf);
-				cp++;
-			}
-			win->image_cnt++;
-		}
-		else
-		{
-			strcpy(win->message, buf);
-			win->redraw();
 		}
 	}
 	return(0);

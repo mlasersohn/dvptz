@@ -11,6 +11,7 @@
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
 
+#include <pulse/pulseaudio.h>
 #include <pulse/error.h>
 #include <pulse/simple.h>
 
@@ -279,7 +280,6 @@ void apply_low_pass_filter(int16_t *buffer, size_t num_samples, int channels, LP
 void	PulseAudio::Filter(int band, float frequency)
 {
 	float use = (frequency * 800.0);
-printf("FILTERING: %f\n", use);
 	update_lpf_alpha(lpf_state, use, 44100);
 	apply_low_pass_filter(buffer, number_of_samples, ch, lpf_state);
 }
@@ -859,4 +859,53 @@ int	play_audio_process(char *device, int channels, int rate)
 	delete pa_play;
 
 	return(0);
+}
+
+// ************************************ TEST IF AVAILABLE ********************************
+
+int sinks = 0, sources = 0;
+
+void sink_cb(pa_context *c, const pa_sink_info *i, int eol, void *userdata) 
+{
+	if(!eol && i) sinks++;
+}
+
+void source_cb(pa_context *c, const pa_source_info *i, int eol, void *userdata)
+{
+	if(!eol && i) sources++;
+}
+
+void context_state_cb(pa_context *c, void *userdata) 
+{
+	pa_mainloop_api *api = (pa_mainloop_api *)userdata;
+	if(pa_context_get_state(c) == PA_CONTEXT_READY) 
+	{
+		pa_context_get_sink_info_list(c, sink_cb, NULL);
+		pa_context_get_source_info_list(c, source_cb, NULL);
+	} 
+	else if(pa_context_get_state(c) == PA_CONTEXT_FAILED) 
+	{
+		api->quit(api, 1);
+	}
+}
+
+int		test_if_pulse_devices_are_available(int& out_sinks, int& out_sources)
+{
+	pa_mainloop *ml = pa_mainloop_new();
+	pa_context *ctx = pa_context_new(pa_mainloop_get_api(ml), "DeviceTest");
+
+	pa_context_set_state_callback(ctx, context_state_cb, pa_mainloop_get_api(ml));
+	pa_context_connect(ctx, NULL, PA_CONTEXT_NOFLAGS, NULL);
+
+	for(int i = 0; i < 5000; i++)
+	{
+		pa_mainloop_iterate(ml, 0, NULL);
+	}
+	out_sinks = sinks;
+	out_sources = sources;
+	int total = sinks + sources;
+
+	pa_context_unref(ctx);
+	pa_mainloop_free(ml);
+	return(total);
 }

@@ -293,13 +293,15 @@ int ctr;
 				pa_simple *stream = pa_simple_new(NULL, "webcam", PA_STREAM_RECORD, pa_input_devicelist[ctr].name, "record", &pulse_ss, NULL, &ba, &error);
 				if(stream != NULL)
 				{
-					if(pa_simple_get_latency(stream, &error) < 100000)
+					int latency = pa_simple_get_latency(stream, &error);
+					if(latency < 100000)
 					{
 						list[cnt] = strdup(pa_input_devicelist[ctr].name);
 						description[cnt] = strdup(pa_input_devicelist[ctr].description);
 						index[cnt] = pa_input_devicelist[ctr].index;
 						channels[cnt] = pa_input_devicelist[ctr].channels;
 						rate[cnt] = pa_input_devicelist[ctr].rate;
+						usleep(100000);
 						cnt++;
 					}
 					pa_simple_free(stream);

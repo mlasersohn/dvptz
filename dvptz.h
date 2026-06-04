@@ -354,6 +354,7 @@
 #define	HORIZONTAL_GUIDELINE	0
 #define	VERTICAL_GUIDELINE		1
 
+#define	SHADE_MODE_UNUSED	-1
 #define	SHADE_MODE_DARK		0
 #define	SHADE_MODE_LIGHT	1
 
@@ -562,25 +563,20 @@ public:
 	MySlider	*blue_slider;
 };
 
-class	CowMeter : public Fl_Group
+class	CowMeter : public Fl_Box
 {
 public:
 					CowMeter(int xx, int yy, int ww, int hh, char *lbl = NULL);
-	void			box(Fl_Boxtype box_type);
-	void			color(Fl_Color col);
-	Fl_Color		color();
 
 	void			Value(double in_val);
 	double			Value();
 	void			UpdateInterval(double in_update_interval);
-	void			Image(char *filename, double px, double py);
 	void			Needle(Fl_Color col, double in_needle_length = 1.0, double in_needle_width = 0.01);
 	void			OnDraw(void (*on_draw)(CowMeter *ptr));
 	void			LinkMeter(CowMeter *source);
 	void			SynchWithSource();
 	void			Angles(double in_start_angle, double in_stop_angle);
 
-	CowImageFrame	*image_box;
 	double			val;
 	double			update_interval;
 	double			needle_length;
@@ -591,6 +587,9 @@ public:
 	double			start_angle;
 	double			stop_angle;
 	double			direction;
+
+	double			inc;
+	int				index;
 };
 
 class	CowVUMeter : public CowMeter
@@ -599,22 +598,13 @@ public:
 					CowVUMeter(int xx, int yy, int ww, int hh, char *lbl = NULL);
 	void			draw();
 
-	void			Offsets(double in_x_offset, double in_y_offset);
-	void			Axis(double in_x_axis, double in_y_axis);
-	void			Peak(Fl_Color in_peak_color, double in_peak_warning, int in_peak_x, int in_peak_y, int in_peak_radius, int in_peak_ring);
-
-	double			increment;
-	double			interval;
-	double			x_offset;
-	double			y_offset;
-	double			x_axis;
-	double			y_axis;
-	double			peak_warning;
-	Fl_Color		peak_color;
-	int				peak_x;
-	int				peak_y;
-	int				peak_radius;
-	int				peak_ring;
+	double			top_tick[13] = {2.605, 2.727, 2.821, 2.874, 2.924, 2.988, 3.061, 3.14, 3.234, 3.33, 3.455, 3.587, 3.718};
+	char			*top_label[13] = {"20", "10", "7", " ", "5", " ", "3", "2", "1", "0", "1", "2", "3"};
+	double			bottom_tick[6] = {2.57, 2.652, 2.781, 2.954, 3.157, 3.329};
+	char			*bottom_label[6] = {"0", "20", "40", "60", "80", "100"};
+	double			scale_factor_x;
+	double			scale_factor_y;
+	time_t			last_update;
 };
 
 class	ShortcutWindow : public Fl_Window
@@ -818,18 +808,20 @@ public:
 class	SimpleScroll : public Fl_Scroll
 {
 public:
-			SimpleScroll(int xx, int yy, int ww, int hh, char *lbl = NULL);
+			SimpleScroll(MyWin *in_my_window, int xx, int yy, int ww, int hh, char *lbl = NULL);
 			~SimpleScroll();
 
 	int		handle(int event);
 	void	end();
 	void	draw();
+
+	MyWin	*my_window;
 };
 
 class	MyScroll : public SimpleScroll
 {
 public:
-				MyScroll(int in_item_width, int in_row_height, int xx, int yy, int ww, int hh);
+				MyScroll(MyWin *in_my_window, int in_item_width, int in_row_height, int xx, int yy, int ww, int hh);
 				~MyScroll();
 
 	int			handle(int event);
@@ -1024,13 +1016,14 @@ public:
 class	Guideline
 {
 public:
-			Guideline(MyWin *in_win, int in_type, int in_pos);
-			~Guideline();
+				Guideline(MyWin *in_win, int in_type, int in_pos);
+				~Guideline();
 
-	MyWin	*my_window;
-	int		type;
-	int		pos;
-	int		hide;
+	MyWin		*my_window;
+	int			type;
+	int			pos;
+	int			old_pos;
+	Fl_Color	use_color;
 };
 
 class	PlayAudioButton : public MyButton
@@ -1850,6 +1843,7 @@ public:
 	MyGroup	*general_group;
 		MySlider			*grid_size_slider;
 		Fl_Output			*grid_size_output;
+		MyToggleButton		*snap_size_button;
 		LayerLabelButton	*layer_select_button[8];
 		MyToggleButton	*layer_visible_button[8];
 		MyButton			*layer_up_button[8];
@@ -1971,8 +1965,6 @@ public:
 	int			orig_w;
 	int			orig_h;
 
-	int			grid_size;
-	int			hide_grid;
 	double		gsf;
 
 	int		font_num;
@@ -2716,6 +2708,7 @@ public:
 
 	MyWin		*my_window;
 	
+	MyLightButton *fullscreen_button;
 	MyLightButton *hide_status_button;
 	MyLightButton *retain_commands_button;
 	MyLightButton *retain_cameras_button;
@@ -3234,8 +3227,8 @@ public:
 	void			AddImageWindow(Camera *cam);
 	void			OffsetPositionImageWindows(int off_x, int off_y);
 	void			OffsetScaleImageWindows(double factor_w, double factor_h);
-	void			RenderTextToMat(char *text, Mat *mat);
-	void			TextExtents(char *lit, Mat *mat, int& ext_w, int& ext_h);
+	void			RenderTextToMat(Mat *mat, char *text, int sx = -1, int sy = -1);
+	void			TextExtents(Mat *mat, char *lit, int& ext_w, int& ext_h);
 	void			CairoClock(Mat& mat, int show_digits, int xx, int yy, int ww, int hh, int in_hour, int in_min, int in_sec);
 	void			ScrollTextList(char *);
 	void			GrabSlideshow();
@@ -3287,6 +3280,7 @@ public:
 	int				ScheduleTrigger();
 	int				DarknessTrigger();
 	int				MotionTrigger();
+	int				Test4Motion();
 	int				ObjectTrigger();
 	void			PaintRecognizedObjects(int test_run);
 	void			CaptureLoop();
@@ -3409,6 +3403,7 @@ public:
 	Mat					reserve_mat;
 	Mat					literal_mat;
 	Mat					last_mat;
+	Mat					alt_record_mat;
 	unsigned long int	grab_window_id;
 	int					fullscreen_instance;
 	int					once;
@@ -3776,7 +3771,7 @@ public:
 class	PulseMicrophone : public PulseAudio
 {
 public:
-			PulseMicrophone(MyWin *in_win, char *device_name, int hz, int ch);
+			PulseMicrophone(MyWin *in_win, char *device_name, char *in_alias, int hz, int ch);
 			~PulseMicrophone();
 	void	RecvNDI(SAMPLE *audio_buffer);
 	void	Save(int fd);
@@ -3784,6 +3779,7 @@ public:
 
 	MyWin					*my_window;
 	char					name[4096];
+	char					*alias;
 	void					*filter_plugin[128];
 	char					*filter_plugin_name[128];
 	int						filter_plugin_cnt;
@@ -4017,6 +4013,8 @@ public:
 		~SelectX11Window();
 
 	MyWin	*my_window;
+	MyInput	*launch_path;
+	Fl_Box	*or_box;
 };
 
 class	NewSourceWindow : public Dialog
@@ -4328,7 +4326,7 @@ public:
 class	StartWindow : public Fl_Double_Window
 {
 public:
-			StartWindow(int in_message_delay, int xx, int yy, int ww, int hh, int in_argc, char *lbl);
+			StartWindow(int in_message_delay, int in_use_stderr, int xx, int yy, int ww, int hh, int in_argc, char *lbl);
 			~StartWindow();
 	void	draw();
 
@@ -4342,6 +4340,7 @@ public:
 	Mat		image_mat[128];
 	int		use_updates;
 	FILE	*intro_pipe_fp;
+	int		use_stderr;
 };
 
 class	StatusWindow : public Fl_Double_Window
@@ -4397,6 +4396,7 @@ public:
 			, int display_ww
 			, int display_hh
 			, int in_fps
+			, int in_load_state
 			, double in_interval
 			, int in_split
 			, int in_muxing
@@ -4406,6 +4406,8 @@ public:
 			, int in_use_old
 			, int in_no_scan
 			, int in_no_audio_scan
+			, int in_continuous_video_scan
+			, int in_continuous_audio_scan
 			, int in_record_all
 			, int in_record_desktop
 			, int in_desktop_x
@@ -4471,7 +4473,6 @@ public:
 			, char *use_joystick_path
 			, int use_borderless
 			, double use_cycle_cameras
-			, char *vu_meter_filename
 			, char *lbl);
 		~MyWin();
 	void	Shutdown();
@@ -4480,6 +4481,13 @@ public:
 	void    draw();
 	void    Draw();
 	int		handle(int);
+	int		OnHide();
+	int		OnPaste(Camera *cam);
+	int		OnKeyboard(int event, Camera *cam);
+	int		OnPush(int event, Camera *cam);
+	int		OnRelease(int event, Camera *cam);
+	int		OnDrag(int event, Camera *cam);
+	int		OnMousewheel(int event, Camera *cam);
 	void	resize(int x, int y, int w, int h);
 
 	int			MatchArea(int, int, int);
@@ -4520,8 +4528,12 @@ public:
 	void		HideObjects();
 	void		ShowObjects();
 	void		ScanForCameras();
+	void		ScanForNDI();
+	void		ScanForCamerasListing();
+	void		ScanForNDIListing();
 	void		ScanAudio(int use_audio);
 	void		ScanPulse(int use_sources);
+	void		ScanPulseListing();
 	void		OpenNamedPulse();
 	void		ReadClasses();
 	int			DrawPred(Camera *cam, int classId, float conf, int left, int top, int right, int bottom, Mat &frame);
@@ -4633,7 +4645,7 @@ public:
 	void		ShowVideoThumbs(int xx, int yy);
 	void		CompressAudioThumbnailList();
 	int			CountActiveMics();
-	void		BuildMainMenu();
+	void		BuildMainMenu(int audio_sinks, int audio_sources);
 	void		BuildEditOutputWindow();
 	void		BuildSelectOutputWindow();
 	void		LoadOutputPathList(char *filename);
@@ -4703,7 +4715,7 @@ public:
 	void				ParseJSONColorIt(cJSON *name, Camera *cam);
 	MatrixState			*ParseJSONMatrixState(cJSON *matrix_state);
 	ImageWindow			*ParseJSONImageWindow(cJSON *image_window, Camera *cam, int cnt);
-	PulseAudioButton	*ParseJSONMicrophone(cJSON *json);
+	PulseAudioButton	*ParseJSONMicrophone(cJSON *json, int started_here, char *default_name, char *list[128]);
 	void				SaveCamerasAsJSON(FILE *fp);
 	void				SaveMicrophonesAsJSON(FILE *fp);
 	void				SaveAsJSON(FILE *fp);
@@ -4753,7 +4765,15 @@ public:
 	void				ClearCollected();
 	void				RubberbandMode(int in_mode);
 	void				MoveSelectImmediate(Camera *cam, int xx, int yy);
-	void				MakeVUMeters(char *vu_meter_filename);
+	void				MakeVUMeters();
+	void				DefaultColors();
+	void				DeletePulseAudioBySource(char *source);
+	unsigned long int	SelectWindowByMouse();
+	unsigned long int	SelectWindowByLaunch(char *app_path);
+	int					DeleteGuideline();
+	int					PushGuideline(Camera *cam);
+	int					DragGuideline(Camera *cam);
+	void				SnapToGrid(int& xx, int& yy, int& ww, int& hh);
 
 	int			button_priority;
 	int			 command_set;
@@ -4798,6 +4818,9 @@ public:
 	int			split_rx[10];
 	int			split_ry[10];
 	Guideline	*guideline[1024];
+	Guideline	*dragging_guideline;
+	int			hide_guidelines;
+	int			sweeping_guidelines;
 	int			audio_display;
 	int			audio_display_timer;
 	int			audio_sample_rate;
@@ -4832,6 +4855,8 @@ public:
 	int			muxing;
 	int			no_scan;
 	int			no_audio_scan;
+	int			continuous_video_scan;
+	int			continuous_audio_scan;
 	int			mux_init;
 	int			selecting_colors;
 	int			animate_panels;
@@ -4930,6 +4955,8 @@ public:
 	double		pip_size;
 	int			multipip;
 	int			grid_size;
+	int			hide_grid;
+	int			snap_size_to_grid;
 	char		*desktop_monitor;
 	int			number_of_fonts;
 	int			actively_loading;
@@ -4953,6 +4980,7 @@ public:
 	int			retain_ptz;
 	int			lock_ptz_mouse_move;
 	int			hide_status;
+	int			full_screen;
 	int			auto_scale;
 	XImage				*shared_image;
 	XShmSegmentInfo		shminfo;
@@ -4984,6 +5012,7 @@ public:
 	int						rubberband_w;
 	int						rubberband_h;
 	int						rubberband_mode;
+	int						old_rubberband_mode;
 	int						guideline_mode;
 	ResizeFrame				*resize_frame;
 	PopupMenu				*popup;
@@ -5029,6 +5058,7 @@ public:
 
 	MainMenu 			*button_group;
 	Fl_Pack				*button_group_pack;
+	Fl_Pack				*audio_pack;
 	SimpleScroll		*button_group_scroll;
 	EncodeSpeedWindow	*encode_speed_window;
 
@@ -5194,7 +5224,6 @@ public:
 	int		crop_output_x;
 	int		crop_output_y;
 	int		resizing_detail;
-	int		grid_sz;
 	int		detail_x;
 	int		detail_y;
 	int		detail_width;
@@ -5214,7 +5243,6 @@ public:
 	int		encoding_frame_cnt;
 	int		redraw_cnt;
 	Net		net;
-	int		use_vu_meters;
 
 	double				transition_cnt;
 	Camera				*last_cam;
@@ -5324,6 +5352,16 @@ public:
 
 	CowVUMeter		*meterL;
 	CowVUMeter		*meterR;
+
+	char			*available_camera[128];
+	int				available_camera_cnt;
+	int				ongoing_camera_scan_stop;
+	char			*available_audio[128];
+	int				available_audio_cnt;
+	int				ongoing_audio_scan_stop;
+
+	int				pulse_audio_sinks;
+	int				pulse_audio_sources;
 };
 
 class	TitleBox : public Fl_Window
@@ -5503,12 +5541,15 @@ public:
 	void	Show();
 	void	ShowCollected();
 	void	Resize(int xx, int yy, int ww, int hh);
+	void	Maximize();
+	void	Minimize();
 
 	int			index;
 	Mat			mat;
 	MyWin		*my_window;
 	Camera		*camera;
 	Camera		*dest_camera;
+	char		*source_path;
 	int			layer;
 	int			dragging;
 	int			transform;
