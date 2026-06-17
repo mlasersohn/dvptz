@@ -113,16 +113,21 @@ int	loop;
 		fl_color(FL_WHITE);
 		fl_font(FL_HELVETICA, 64);
 		fl_draw("DVPTZ", 0, 0, w(), h() - 250, FL_ALIGN_CENTER);
-		fl_font(FL_HELVETICA, 24);
+
 		char buf[256];
+		sprintf(buf, "version %s", DVPTZ_VERSION_NUMBER);
+		fl_font(FL_HELVETICA, 16);
+		fl_draw(buf, 0, 0, w(), h() - 165, FL_ALIGN_CENTER);
+
+		fl_font(FL_HELVETICA, 24);
 		sprintf(buf, "Copyright %c%c %d, Mark Lasersohn", 0xC2, 0xA9, CURRENT_YEAR);
-		fl_draw(buf, 0, 0, w(), h() - 150, FL_ALIGN_CENTER);
+		fl_draw(buf, 0, 0, w(), h() - 60, FL_ALIGN_CENTER);
 		if(ndi_notice == 1)
 		{
 			char buf[256];
 			sprintf(buf, "NDI® is a registered trademark of Vizrt NDI AB");
 			fl_font(FL_HELVETICA, 16);
-			fl_draw(buf, 0, 0, w(), h() - 90, FL_ALIGN_CENTER);
+			fl_draw(buf, 0, 0, w(), h(), FL_ALIGN_CENTER);
 		}
 	}
 }

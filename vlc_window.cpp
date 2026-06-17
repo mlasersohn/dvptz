@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <semaphore.h>
 #include <pthread.h>
 
 #include <opencv2/opencv.hpp>
@@ -29,6 +30,10 @@ using namespace std;
 #include	"vlc_window.h"
 
 int	create_task(int (*funct)(int *), void *flag);
+
+void silent_log_callback(void *data, int level, const libvlc_log_t *ctx, const char *fmt, va_list args)
+{
+}
 
 VLC_Window::VLC_Window(char *in_path, int ww, int hh)
 {
@@ -68,13 +73,13 @@ int	loop;
 
 	char smem_options[1000];
 	sprintf(smem_options,
-	     ":sout=#transcode{vcodec=RV24,acodec=s16le}:smem{"
-	     "video-prerender-callback=%lld,"
-	     "video-postrender-callback=%lld,"
-	     "audio-prerender-callback=%lld,"
-	     "audio-postrender-callback=%lld,"
-	     "audio-data=%lld,"
-	     "video-data=%lld},"
+		 ":sout=#transcode{vcodec=RV24,acodec=s16le}:smem{"
+		 "video-prerender-callback=%lld,"
+		 "video-postrender-callback=%lld,"
+		 "audio-prerender-callback=%lld,"
+		 "audio-postrender-callback=%lld,"
+		 "audio-data=%lld,"
+		 "video-data=%lld},"
 	  , (long long int)(intptr_t)(void*)&cbVideoPrerender
 	  , (long long int)(intptr_t)(void*)&cbVideoPostrender
 	  , (long long int)(intptr_t)(void*)&cbAudioPrerender
@@ -82,15 +87,18 @@ int	loop;
 	  , (long long int)this
 	  , (long long int)this);
 
-	const char * const vlc_args[] = {
-	      "-I", "dummy", // Don't use any interface
-	      // COW - NOT SURE IF I NEED THIS: "--no-xlib",
-	      "--ignore-config", // Don't use VLC's config
-	      "--verbose=1", // Be verbose
-	       };
+    const char * const vlc_args[] = {
+          "-I", "dummy", // Don't use any interface
+          "--ignore-config", // Don't use VLC's config
+          "--quiet",
+          "--no-video-title-show",
+          "--no-xlib",
+          "--verbose=0" // Don't be verbose
+           };
 
 	// We launch VLC
 	vlcInstance = libvlc_new(sizeof(vlc_args) / sizeof(vlc_args[0]), vlc_args);
+	libvlc_log_set(vlcInstance, silent_log_callback, NULL);
 
 	media_player = libvlc_media_player_new(vlcInstance);
 
@@ -108,6 +116,7 @@ int	loop;
 		media = libvlc_media_new_location(vlcInstance, path);
 	}
 	libvlc_media_add_option(media, smem_options);
+	libvlc_media_add_option(media, ":smem-options=#transcode{vcodec=RV32}:smem{no-time-sync}");
 	libvlc_media_player_set_media(media_player, media);
 }
 
@@ -193,11 +202,23 @@ unsigned int local_w, local_h;
 	libvlc_video_get_size(media_player, 0, &local_w, &local_h);
 	int use_w = width;
 	int use_h = height;
+	int ran_loop = 0;
+	int cnt = 0;
+	while((video_frame[video_play_cnt] == NULL) && (cnt < 1024))
+	{
+		cnt++;
+		video_play_cnt++;
+		if(video_play_cnt >= BUFFER_LIMIT)
+		{
+			video_play_cnt = 0;
+		}
+	}
 	int start = video_play_cnt;
 	if(audio_tracks > 0)
 	{
 		while((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
 		{
+			ran_loop++;
 			if((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
 			{
 				free(video_frame[start]);
@@ -216,6 +237,7 @@ unsigned int local_w, local_h;
 			Mat src = Mat(local_h, local_w, CV_8UC3, video_frame[video_play_cnt]);
 			cv::cvtColor(src, mat, COLOR_RGB2RGBA);
 			cv::resize(mat, mat, Size(use_w, use_h));
+
 			free(video_frame[video_play_cnt]);
 			video_frame[video_play_cnt] = NULL;
 			video_play_cnt++;
@@ -258,6 +280,26 @@ unsigned int local_w, local_h;
 		{
 		}
 	}
+}
+
+void	VLC_Window::Despool()
+{
+	int start = video_play_cnt;
+	while((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
+	{
+		if((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
+		{
+			free(video_frame[start]);
+			video_frame[start] = NULL;
+		}
+		start++;
+		if(start >= BUFFER_LIMIT)
+		{
+			start = 0;
+		}
+		current_frame++;
+	}
+	video_play_cnt = start;
 }
 
 int	play_audio(int *v)
@@ -414,18 +456,21 @@ void cbVideoPostrender(void *p_video_data, uint8_t *p_pixel_buffer, int width, i
 		}
 		dw->video_sz = size;
 		dw->video_frame[dw->video_cnt] = (unsigned char *)malloc(size);
-		memcpy(dw->video_frame[dw->video_cnt], p_pixel_buffer, size);
-		dw->video_pts[dw->video_cnt] = pts;
-		dw->last_video_pts = pts;
-		if(dw->audio_tracks < 1)
+		if(dw->video_frame[dw->video_cnt] != NULL)
 		{
-			dw->audio_complete = 1;
-			usleep(13000);
-		}
-		dw->video_cnt++;
-		if(dw->video_cnt >= BUFFER_LIMIT)
-		{
-			dw->video_cnt = 0;
+			memcpy(dw->video_frame[dw->video_cnt], p_pixel_buffer, size);
+			dw->video_pts[dw->video_cnt] = pts;
+			dw->last_video_pts = pts;
+			if(dw->audio_tracks < 1)
+			{
+				dw->audio_complete = 1;
+				usleep(13000);
+			}
+			dw->video_cnt++;
+			if(dw->video_cnt >= BUFFER_LIMIT)
+			{
+				dw->video_cnt = 0;
+			}
 		}
 	}
 }
@@ -450,7 +495,7 @@ libvlc_time_t time;
 		break;
 		default:
 		break;
-	}    
+	}	
 }
 
 void	play_cb(void *v)
@@ -503,7 +548,7 @@ void	VLC_Window::Pause()
 void	VLC_Window::Resume()
 {
 	paused = 0;
-	libvlc_media_player_pause(media_player);
+	libvlc_media_player_play(media_player);
 }
 
 void	VLC_Window::Volume(double val)
@@ -532,10 +577,56 @@ double	VLC_Window::Position()
 	return(pos);
 }
 
-void	VLC_Window::Position(double pos)
+void VLC_Window::Position(double new_position) 
 {
-	ResetFrames();
-	libvlc_media_player_set_position(media_player, pos);
+	libvlc_media_player_t *mp = media_player;
+	libvlc_audio_set_mute(mp, 1);
+	int was_paused = 0;
+	if(libvlc_media_player_is_playing(mp)) 
+	{
+		libvlc_media_player_set_pause(mp, 1);
+		was_paused = 1;
+	}
+	libvlc_media_player_set_position(mp, new_position);
+	libvlc_media_player_next_frame(mp);
+	if(!libvlc_media_player_is_playing(mp))
+	{
+		libvlc_media_player_play(mp);
+		usleep(50000);
+	}
+	libvlc_media_player_set_pause(mp, 1);
+	libvlc_audio_set_mute(mp, 0);
+	int cnt = 0;
+	while((video_play_cnt != video_cnt) && (cnt < 1024))
+	{
+		Draw();
+		cnt++;
+	}
+	libvlc_media_player_set_pause(mp, 0);
+	libvlc_media_player_play(mp);
+}
+
+void VLC_Window::QuickPosition(double new_position) 
+{
+	libvlc_media_player_t *mp = media_player;
+	libvlc_audio_set_mute(mp, 1);
+	libvlc_media_player_set_position(mp, new_position);
+	if(!libvlc_media_player_is_playing(mp))
+	{
+		libvlc_media_player_play(mp);
+		usleep(100);
+	}
+	libvlc_media_player_set_pause(mp, 1);
+	libvlc_audio_set_mute(mp, 0);
+	int cnt = 0;
+	while((video_play_cnt != video_cnt) && (cnt < 1024))
+	{
+		Despool();
+		cnt++;
+	}
+	Draw();
+	libvlc_media_player_set_pause(mp, 0);
+	libvlc_media_player_play(mp);
 }
 
 void	VLC_Window::Stop()

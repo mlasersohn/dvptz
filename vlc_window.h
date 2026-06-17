@@ -24,6 +24,8 @@ public:
 	void	UnMute();
 	double	Position();
 	void	Position(double pos);
+	void	QuickPosition(double new_position);
+	void	Despool();
 
 	pa_simple	*simple;
 	Mat		mat;
@@ -61,5 +63,7 @@ public:
 	int		audio_sz;
 	long int	old_pts;
 	int		audio_complete;
+
+	sem_t	semaphore;
 };
 

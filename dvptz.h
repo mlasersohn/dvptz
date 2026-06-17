@@ -346,10 +346,13 @@
 #define	SIDE_RIGHT	0
 #define	SIDE_LEFT	1
 
-#define	SCROLL_MODE			0
-#define	RUBBERBAND_MODE		1
-#define	REPOSITION_MODE		2
-#define	GUIDELINE_MODE		3
+#define	SCROLL_MODE					0
+#define	RUBBERBAND_MODE				1
+#define	REPOSITION_MODE				2
+#define	GUIDELINE_MODE				3
+#define	INTEREST_MODE				4
+#define	IM_DRAWING_MODE				5
+#define	DYNAMIC_COLORING_MODE		6
 
 #define	HORIZONTAL_GUIDELINE	0
 #define	VERTICAL_GUIDELINE		1
@@ -515,6 +518,7 @@ class	ColorPanel;
 class	HoverMenu;
 class	NewPTZWindow;
 class	SampleBox;
+class	VideoWindow;
 
 class	Joystick
 {
@@ -595,8 +599,10 @@ public:
 class	CowVUMeter : public CowMeter
 {
 public:
-					CowVUMeter(int xx, int yy, int ww, int hh, char *lbl = NULL);
+					CowVUMeter(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl = NULL);
 	void			draw();
+
+	MyWin			*my_window;
 
 	double			top_tick[13] = {2.605, 2.727, 2.821, 2.874, 2.924, 2.988, 3.061, 3.14, 3.234, 3.33, 3.455, 3.587, 3.718};
 	char			*top_label[13] = {"20", "10", "7", " ", "5", " ", "3", "2", "1", "0", "1", "2", "3"};
@@ -1336,22 +1342,16 @@ public:
 	Fl_Float_Input		*end_z_in[128];
 };
 
-class	PopupMenu : public Fl_Window
+// COW - See common.h for GenericPopupMenu
+
+class	PopupMenu : public GenericPopupMenu
 {
 public:
 					PopupMenu(MyWin *in_win, int xx, int yy, int ww, int hh);
-					~PopupMenu();
-	int				handle(int event);
 	void			show();
 	void			hide();
 
-	void			Resize(int xx, int yy, int ww, int hh);
-	void			Fit();
-
-	Fl_Hold_Browser	*browser;
-
 	MyWin			*my_window;
-	time_t			start_time;
 };
 
 class	DragBox : public Fl_Box
@@ -2587,6 +2587,7 @@ public:
 	int	play_y1;
 	int	play_x2;
 	int	play_y2;
+	int dragging;
 };
 
 class	MyScrubber : public Fl_Window
@@ -2681,13 +2682,14 @@ public:
 class	FakeWindow : public Fl_Double_Window
 {
 public:
-		FakeWindow(MyWin *in_win, char *raw);
+		FakeWindow(MyWin *in_win, char *raw, char *msg = NULL);
 		~FakeWindow();
 	void	draw();
 	int	handle(int event);
 
 	MyWin	*my_window;
 	char	*raw_data;
+	char	message[1024];
 	int	start_x;
 	int	start_y;
 	int	end_x;
@@ -2697,6 +2699,8 @@ public:
 	int	final_ww;
 	int	final_hh;
 	int	dragging;
+	int display_message;
+	int display_cnt;
 };
 
 
@@ -4169,6 +4173,7 @@ public:
 	void	draw();
 	void	hide();
 	void	show();
+	void	resize(int xx, int yy, int ww, int hh);
 	void	ShowPopup();
 
 	int		AddInterfaceButton(int xx, int yy);
@@ -4197,6 +4202,10 @@ public:
 	int		DigitalZoomStatus();
 	int		AutoExposureStatus();
 	int		AutoFocusStatus();
+	void	SaveAsJSON(FILE *fp);
+	void	ParseJSON(cJSON *json);
+	void	Contract();
+	void	Expand();
 
 	MyWin		*my_window;
 	Camera		*bound_camera;
@@ -4240,6 +4249,7 @@ public:
 	int						ptz_tour_index;
 	char					*ptz_current_device_path;
 
+	double					ptz_speed_slider_value;
 	double					ptz_pan_speed;
 	double					ptz_tilt_speed;
 	double					ptz_target_pan_speed;
@@ -4349,10 +4359,13 @@ public:
 			StatusWindow(MyWin *in_win, int ww, int hh, char *lbl);
 			~StatusWindow();
 	int		handle(int event);
+	void	show();
 
 	MyWin	*my_window;
 	Fl_Box	*entry[24];
 	Fl_Box	*tally[24];
+	int		store_x;
+	int		store_y;
 };
 
 class	CodecCombo
@@ -4654,7 +4667,8 @@ public:
 	int			PushToSelectColors(Camera *cam);
 	FilterDialog	*MakeFilterDialog(char *name);
 	void			UpdateThumbButtons();
-	void			AltDisplay(int cam_index);
+	void			AltDisplayCamera(int cam_index);
+	void			AltDisplayCamera(Camera *cam_in);
 	void			AddImmediate(Immediate *in);
 	void			PasteImmediate(int in_x = -1, int in_y = -1);
 	void			ClearImmediate();
@@ -4715,7 +4729,7 @@ public:
 	void				ParseJSONColorIt(cJSON *name, Camera *cam);
 	MatrixState			*ParseJSONMatrixState(cJSON *matrix_state);
 	ImageWindow			*ParseJSONImageWindow(cJSON *image_window, Camera *cam, int cnt);
-	PulseAudioButton	*ParseJSONMicrophone(cJSON *json, int started_here, char *default_name, char *list[128]);
+	PulseAudioButton	*ParseJSONMicrophone(cJSON *json, char *default_name, char *list[128]);
 	void				SaveCamerasAsJSON(FILE *fp);
 	void				SaveMicrophonesAsJSON(FILE *fp);
 	void				SaveAsJSON(FILE *fp);
@@ -4774,6 +4788,8 @@ public:
 	int					PushGuideline(Camera *cam);
 	int					DragGuideline(Camera *cam);
 	void				SnapToGrid(int& xx, int& yy, int& ww, int& hh);
+	void				SavePTZ_WindowsAsJSON(FILE *fp);
+	void				ParseJSONPTZ_Windows(cJSON *json);
 
 	int			button_priority;
 	int			 command_set;
@@ -4819,6 +4835,7 @@ public:
 	int			split_ry[10];
 	Guideline	*guideline[1024];
 	Guideline	*dragging_guideline;
+	VideoWindow	*video_window;
 	int			hide_guidelines;
 	int			sweeping_guidelines;
 	int			audio_display;
@@ -4858,7 +4875,6 @@ public:
 	int			continuous_video_scan;
 	int			continuous_audio_scan;
 	int			mux_init;
-	int			selecting_colors;
 	int			animate_panels;
 	int			use_tooltips;
 	int			file_selector_layout;
@@ -5012,7 +5028,6 @@ public:
 	int						rubberband_w;
 	int						rubberband_h;
 	int						rubberband_mode;
-	int						old_rubberband_mode;
 	int						guideline_mode;
 	ResizeFrame				*resize_frame;
 	PopupMenu				*popup;
@@ -5088,10 +5103,6 @@ public:
 	MenuButton	*review_button;
 	MenuButton	*review_muxed_button;
 	MenuButton	*snapshot_button;
-	MenuButton	*set_interest_button;
-	MenuButton	*clear_interest_button;
-	MenuButton	*save_interest_button;
-	MenuButton	*load_interest_button;
 	MenuButton	*resize_detail_button;
 	MenuButton	*zoom_box_button;
 	MenuButton	*reset_button;
@@ -5128,8 +5139,6 @@ public:
 	MenuButton	*python_filter_button;
 	MenuButton	*python_output_filter_button;
 	MenuButton	*fltk_plugin_button;
-	MenuButton	*immediate_drawing_button;
-	MenuButton	*dynamic_coloring_button;
 	MenuButton	*toggle_camera_effects_button;
 	MenuButton	*save_camera_button;
 	MenuButton	*load_camera_button;
@@ -5200,7 +5209,6 @@ public:
 	int		interest_x[100];
 	int		interest_y[100];
 	int		interest_cnt;
-	int		mark_interest;
 	int		buttons_shown;
 	int		ready_to_average;
 	int		all_frames;

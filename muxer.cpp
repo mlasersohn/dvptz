@@ -136,6 +136,7 @@ using namespace std;
 #include "html_window.h"
 #include "embed_app.h"
 #include "osg.h"
+#include "common.h"
 #include "dvptz.h"
 #include "muxer.h"
 
@@ -1461,7 +1462,6 @@ int ret;
 AVDictionary *opt = NULL;
 int i;
 
-printf("INIT USE_AUDIO: %d\n", use_audio);
 	int using_video = 0;
 	int using_audio = 0;
 	current_frame = 0;

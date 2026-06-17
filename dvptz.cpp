@@ -74,6 +74,7 @@ extern "C"
 #include <pulse/error.h>
 
 #include <vlc/vlc.h>
+#include <alsa/asoundlib.h>
 
 #include <blend2d.h>
 
@@ -156,6 +157,9 @@ extern "C"
 
 #include	"folder.h"
 
+// COW - Enables NDI code that does not work
+// #define COW_NDI_USE_FOCUS_SPEED	1
+
 extern "C"
 {
 	void			merge_av(char *, char *, char *);
@@ -175,6 +179,7 @@ using namespace std;
 #include	"common.h"
 #include	"dvptz.h"
 #include	"muxer.h"
+#include	"video_player.h"
 
 #define READ 0
 #define WRITE 1
@@ -491,6 +496,31 @@ struct	NamedKeys named_key[] = {
 #endif
 
 // SECTION *********************************** UTILITY FUNCTIONS *******************************************
+
+void MaximizeWindow(Fl_Window *win)
+{
+    Display *display = fl_display;
+    Window xid = fl_xid(win);
+    if((display) && (xid))
+	{
+		XMapWindow(display, xid);
+		XClientMessageEvent ev;
+		memset(&ev, 0, sizeof(ev));
+
+		ev.type = ClientMessage;
+		ev.window = xid;
+		ev.message_type = XInternAtom(display, "_NET_ACTIVE_WINDOW", True);
+		ev.format = 32;
+		ev.data.l[0] = 1;
+		ev.data.l[1] = CurrentTime;
+		ev.data.l[2] = 0;
+		ev.data.l[3] = 0;
+		ev.data.l[4] = 0;
+
+		XSendEvent( display, DefaultRootWindow(display), False, SubstructureRedirectMask | SubstructureNotifyMask, (XEvent*)&ev);
+		XFlush(display);
+	}
+}
 
 void	split_at(char at, char *in, char *out1, char *out2)
 {
@@ -3593,12 +3623,15 @@ void	test_blend(int xx, int yy, int ww, int hh, int width, int height, int strid
 
 int	force_to_grid(int grid_sz, int use_x)
 {
-	int nx = use_x % grid_sz;
-	if(nx != 0)
+	if(grid_sz > 0)
 	{
-		double nx = (double)use_x / (double)grid_sz;
-		nx = round(nx);
-		use_x = nx * grid_sz;
+		int nx = use_x % grid_sz;
+		if(nx != 0)
+		{
+			double nx = (double)use_x / (double)grid_sz;
+			nx = round(nx);
+			use_x = nx * grid_sz;
+		}
 	}
 	return(use_x);
 }
@@ -6215,8 +6248,10 @@ void	CowMeter::Angles(double in_start_angle, double in_stop_angle)
 	stop_angle = in_stop_angle;
 }
 
-CowVUMeter::CowVUMeter(int xx, int yy, int ww, int hh, char *lbl) : CowMeter(xx, yy, ww, hh, lbl)
+CowVUMeter::CowVUMeter(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : CowMeter(xx, yy, ww, hh, lbl)
 {
+	my_window = in_win;
+
 	align(FL_ALIGN_CENTER | FL_ALIGN_TOP);
 	box(FL_NO_BOX);
 	color(BLACK);
@@ -6254,178 +6289,181 @@ int	loop;
 	double hh = h() * (1.0 / scale_factor_y);
 
 	cairo_t *cr = Fl::cairo_cc(); 
-	cairo_save(cr);
-
-	cairo_translate(cr, x(), y());
-	cairo_scale(cr, scale_factor_x, scale_factor_y);
-	double xc = ww / 2.0;
-	double yc = hh * 1.54;
-	double radius = ww * 0.65;
-
-	double start_angle = 1.32 * M_PI;  
-	double end_angle   = 1.682 * M_PI;  
-
-	cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-	cairo_set_line_width(cr, 4.0);
-
-	cairo_set_source_rgb(cr, d1r, d1g, d1b);
-	cairo_arc(cr, xc, yc, radius, start_angle, 1.558 * M_PI);
-	cairo_stroke(cr);
-	cairo_set_line_width(cr, 14.0);
-	cairo_set_source_rgb(cr, d2r, d2g, d2b);
-	cairo_arc(cr, xc, yc, radius + 2, 1.56 * M_PI, end_angle);
-	cairo_stroke(cr);
-	cairo_set_line_width(cr, 4.0);
-	cairo_set_source_rgb(cr, d1r, d1g, d1b);
-	cairo_translate(cr, xc, yc);
-
-	cairo_save(cr);
-	for(loop = 0;loop < 13;loop++)
+	if(cr != NULL)
 	{
-		if(loop == 0)
-		{
-			cairo_rotate(cr, top_tick[0]);
-		}
-		else
-		{
-			double diff = top_tick[loop] - top_tick[loop - 1];
-			cairo_rotate(cr, diff);
-		}
-		if(loop < 9)
-		{
-			cairo_set_source_rgb(cr, d1r, d1g, d1b);
-		}
-		else
-		{
-			cairo_set_source_rgb(cr, d2r, d2g, d2b);
-		}
-		cairo_move_to(cr, 0, radius - 2);
-		cairo_line_to(cr, 0, (radius + 35));
-		cairo_stroke(cr);
-
-		if(strlen(top_label[loop]) == 2)
-		{
-			cairo_move_to(cr, 22, (radius + 48));
-		}
-		else
-		{
-			cairo_move_to(cr, 10, (radius + 48));
-		}
 		cairo_save(cr);
-		if(loop < 9)
-		{
-			cairo_set_source_rgb(cr, d1r, d1g, d1b);
-		}
-		else
-		{
-			cairo_set_source_rgb(cr, d2r, d2g, d2b);
-		}
-		cairo_rotate(cr, M_PI);
-		cairo_set_font_size(cr, 31);
-		cairo_show_text(cr, top_label[loop]);
-		cairo_stroke(cr);
-		cairo_restore(cr);
-	}
-	cairo_restore(cr);
-	cairo_save(cr);
-	for(loop = 0;loop < 6;loop++)
-	{
-		if(loop == 0)
-		{
-			cairo_rotate(cr, bottom_tick[0]);
-		}
-		else
-		{
-			double diff = bottom_tick[loop] - bottom_tick[loop - 1];
-			cairo_rotate(cr, diff);
-		}
-		if(loop < 5)
-		{
-			cairo_set_source_rgb(cr, d1r, d1g, d1b);
-		}
-		else
-		{
-			cairo_set_source_rgb(cr, d2r, d2g, d2b);
-		}
-		cairo_move_to(cr, 0, radius + 2);
-		cairo_line_to(cr, 0, (radius - 15));
-		cairo_stroke(cr);
+
+		cairo_translate(cr, x(), y());
+		cairo_scale(cr, scale_factor_x, scale_factor_y);
+		double xc = ww / 2.0;
+		double yc = hh * 1.54;
+		double radius = ww * 0.65;
+
+		double start_angle = 1.32 * M_PI;  
+		double end_angle   = 1.682 * M_PI;  
+
+		cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+		cairo_set_line_width(cr, 4.0);
+
 		cairo_set_source_rgb(cr, d1r, d1g, d1b);
-		if(strlen(bottom_label[loop]) > 2)
-		{
-			cairo_move_to(cr, 25, (radius - 35));
-		}
-		else if(strlen(bottom_label[loop]) > 1)
-		{
-			cairo_move_to(cr, 15, (radius - 35));
-		}
-		else
-		{
-			cairo_move_to(cr, 8, (radius - 35));
-		}
+		cairo_arc(cr, xc, yc, radius, start_angle, 1.558 * M_PI);
+		cairo_stroke(cr);
+		cairo_set_line_width(cr, 14.0);
+		cairo_set_source_rgb(cr, d2r, d2g, d2b);
+		cairo_arc(cr, xc, yc, radius + 2, 1.56 * M_PI, end_angle);
+		cairo_stroke(cr);
+		cairo_set_line_width(cr, 4.0);
+		cairo_set_source_rgb(cr, d1r, d1g, d1b);
+		cairo_translate(cr, xc, yc);
+
 		cairo_save(cr);
-		cairo_rotate(cr, M_PI);
-		cairo_set_font_size(cr, 22);
-		cairo_show_text(cr, bottom_label[loop]);
+		for(loop = 0;loop < 13;loop++)
+		{
+			if(loop == 0)
+			{
+				cairo_rotate(cr, top_tick[0]);
+			}
+			else
+			{
+				double diff = top_tick[loop] - top_tick[loop - 1];
+				cairo_rotate(cr, diff);
+			}
+			if(loop < 9)
+			{
+				cairo_set_source_rgb(cr, d1r, d1g, d1b);
+			}
+			else
+			{
+				cairo_set_source_rgb(cr, d2r, d2g, d2b);
+			}
+			cairo_move_to(cr, 0, radius - 2);
+			cairo_line_to(cr, 0, (radius + 35));
+			cairo_stroke(cr);
+
+			if(strlen(top_label[loop]) == 2)
+			{
+				cairo_move_to(cr, 22, (radius + 48));
+			}
+			else
+			{
+				cairo_move_to(cr, 10, (radius + 48));
+			}
+			cairo_save(cr);
+			if(loop < 9)
+			{
+				cairo_set_source_rgb(cr, d1r, d1g, d1b);
+			}
+			else
+			{
+				cairo_set_source_rgb(cr, d2r, d2g, d2b);
+			}
+			cairo_rotate(cr, M_PI);
+			cairo_set_font_size(cr, 31);
+			cairo_show_text(cr, top_label[loop]);
+			cairo_stroke(cr);
+			cairo_restore(cr);
+		}
+		cairo_restore(cr);
+		cairo_save(cr);
+		for(loop = 0;loop < 6;loop++)
+		{
+			if(loop == 0)
+			{
+				cairo_rotate(cr, bottom_tick[0]);
+			}
+			else
+			{
+				double diff = bottom_tick[loop] - bottom_tick[loop - 1];
+				cairo_rotate(cr, diff);
+			}
+			if(loop < 5)
+			{
+				cairo_set_source_rgb(cr, d1r, d1g, d1b);
+			}
+			else
+			{
+				cairo_set_source_rgb(cr, d2r, d2g, d2b);
+			}
+			cairo_move_to(cr, 0, radius + 2);
+			cairo_line_to(cr, 0, (radius - 15));
+			cairo_stroke(cr);
+			cairo_set_source_rgb(cr, d1r, d1g, d1b);
+			if(strlen(bottom_label[loop]) > 2)
+			{
+				cairo_move_to(cr, 25, (radius - 35));
+			}
+			else if(strlen(bottom_label[loop]) > 1)
+			{
+				cairo_move_to(cr, 15, (radius - 35));
+			}
+			else
+			{
+				cairo_move_to(cr, 8, (radius - 35));
+			}
+			cairo_save(cr);
+			cairo_rotate(cr, M_PI);
+			cairo_set_font_size(cr, 22);
+			cairo_show_text(cr, bottom_label[loop]);
+			cairo_stroke(cr);
+			cairo_restore(cr);
+		}
+		cairo_restore(cr);
+		cairo_set_source_rgb(cr, d1r, d1g, d1b);
+		cairo_move_to(cr, -48.0, -265.0);
+		cairo_set_font_size(cr, 70);
+		cairo_show_text(cr, "VU");
+		cairo_stroke(cr);
+
+		cairo_move_to(cr, -255.0, -510.0);
+		cairo_set_font_size(cr, 64);
+		cairo_show_text(cr, "_");
+		cairo_stroke(cr);
+
+		cairo_set_source_rgb(cr, d2r, d2g, d2b);
+		cairo_move_to(cr, 220.0, -479.0);
+		cairo_set_font_size(cr, 56);
+		cairo_show_text(cr, "+");
+		cairo_stroke(cr);
+
+		cairo_set_source_rgb(cr, d1r, d1g, d1b);
+		cairo_move_to(cr, 205.0, -265.0);
+		cairo_set_font_size(cr, 18);
+		cairo_show_text(cr, "PEAK");
+		cairo_stroke(cr);
+
+		cairo_set_source_rgb(cr, d1r, d1g, d1b);
+		cairo_set_line_width(cr, 3.0);
+		cairo_arc(cr, 227, -240, 14.0, 0.0, 2 * M_PI);
+		cairo_stroke(cr);
+		if(val > 0.65)
+		{
+			cairo_set_source_rgb(cr, d2r, d2g, d2b);
+			cairo_arc(cr, 227, -240, 12.0, 0.0, 2 * M_PI);
+			cairo_fill(cr);
+		}
+		cairo_restore(cr);
+
+		double needle_start = -0.58;
+		double needle_end = 0.28;
+		cairo_save(cr);
+		cairo_set_source_rgb(cr, d1r, d1g, d1b);
+		cairo_rectangle(cr, x(), y(), w(), h() - (h() * 0.1));
+		cairo_clip(cr);
+		cairo_translate(cr, x(), y());
+		cairo_scale(cr, scale_factor_x, scale_factor_y);
+		cairo_translate(cr, xc, yc);
+		cairo_set_line_width(cr, 3.0);
+
+		double needle_range = fabs(needle_end - needle_start);
+		double rng = needle_end - needle_start;
+		double use_needle = needle_start + ((1.0 / needle_range) * val);
+		cairo_rotate(cr, use_needle);
+
+		cairo_move_to(cr, 0, 0);
+		cairo_line_to(cr, 0, -(radius + 40));
 		cairo_stroke(cr);
 		cairo_restore(cr);
 	}
-	cairo_restore(cr);
-	cairo_set_source_rgb(cr, d1r, d1g, d1b);
-	cairo_move_to(cr, -48.0, -265.0);
-	cairo_set_font_size(cr, 70);
-	cairo_show_text(cr, "VU");
-	cairo_stroke(cr);
-
-	cairo_move_to(cr, -255.0, -510.0);
-	cairo_set_font_size(cr, 64);
-	cairo_show_text(cr, "_");
-	cairo_stroke(cr);
-
-	cairo_set_source_rgb(cr, d2r, d2g, d2b);
-	cairo_move_to(cr, 220.0, -479.0);
-	cairo_set_font_size(cr, 56);
-	cairo_show_text(cr, "+");
-	cairo_stroke(cr);
-
-	cairo_set_source_rgb(cr, d1r, d1g, d1b);
-	cairo_move_to(cr, 205.0, -265.0);
-	cairo_set_font_size(cr, 18);
-	cairo_show_text(cr, "PEAK");
-	cairo_stroke(cr);
-
-	cairo_set_source_rgb(cr, d1r, d1g, d1b);
-	cairo_set_line_width(cr, 3.0);
-	cairo_arc(cr, 227, -240, 14.0, 0.0, 2 * M_PI);
-	cairo_stroke(cr);
-	if(val > 0.65)
-	{
-		cairo_set_source_rgb(cr, d2r, d2g, d2b);
-		cairo_arc(cr, 227, -240, 12.0, 0.0, 2 * M_PI);
-		cairo_fill(cr);
-	}
-	cairo_restore(cr);
-
-	double needle_start = -0.58;
-	double needle_end = 0.28;
-	cairo_save(cr);
-	cairo_set_source_rgb(cr, d1r, d1g, d1b);
-	cairo_rectangle(cr, x(), y(), w(), h() - (h() * 0.1));
-	cairo_clip(cr);
-	cairo_translate(cr, x(), y());
-	cairo_scale(cr, scale_factor_x, scale_factor_y);
-	cairo_translate(cr, xc, yc);
-	cairo_set_line_width(cr, 3.0);
-
-	double needle_range = fabs(needle_end - needle_start);
-	double rng = needle_end - needle_start;
-	double use_needle = needle_start + ((1.0 / needle_range) * val);
-	cairo_rotate(cr, use_needle);
-
-	cairo_move_to(cr, 0, 0);
-	cairo_line_to(cr, 0, -(radius + 40));
-	cairo_stroke(cr);
-	cairo_restore(cr);
 }
 
 
@@ -10292,9 +10330,8 @@ void	hide_popup_cb(void *v)
 	}
 }
 
-PopupMenu::PopupMenu(MyWin *in_win, int xx, int yy, int ww, int hh) : Fl_Window(xx, yy, ww, hh)
+GenericPopupMenu::GenericPopupMenu(int xx, int yy, int ww, int hh) : Fl_Window(xx, yy, ww, hh)
 {
-	my_window = in_win;
 	start_time = 0;
 	box(FL_FRAME_BOX);
 	color(BLACK);
@@ -10310,9 +10347,21 @@ PopupMenu::PopupMenu(MyWin *in_win, int xx, int yy, int ww, int hh) : Fl_Window(
 	end();
 }
 
-PopupMenu::~PopupMenu()
+PopupMenu::PopupMenu(MyWin *in_win, int xx, int yy, int ww, int hh) : GenericPopupMenu(xx, yy, ww, hh)
+{
+	my_window = in_win;
+}
+
+GenericPopupMenu::~GenericPopupMenu()
 {
 	Fl::remove_timeout(hide_popup_cb, this);
+}
+
+void	GenericPopupMenu::show()
+{
+	Fl_Window::show();
+	start_time = precise_time();
+	Fl::add_timeout(2.0, hide_popup_cb, this);
 }
 
 void	PopupMenu::show()
@@ -10321,20 +10370,23 @@ void	PopupMenu::show()
 	{
 		my_window->visible_popup_menu->hide();
 	}
-	Fl_Window::show();
+	GenericPopupMenu::show();
 	my_window->visible_popup_menu = this;
-	start_time = precise_time();
-	Fl::add_timeout(2.0, hide_popup_cb, this);
+}
+
+void	GenericPopupMenu::hide()
+{
+	Fl::remove_timeout(hide_popup_cb, this);
+	Fl_Window::hide();
 }
 
 void	PopupMenu::hide()
 {
-	Fl::remove_timeout(hide_popup_cb, this);
-	Fl_Window::hide();
+	GenericPopupMenu::hide();
 	my_window->visible_popup_menu = NULL;
 }
 
-int	PopupMenu::handle(int event)
+int	GenericPopupMenu::handle(int event)
 {
 	int flag = 0;
 	if(event == FL_ENTER)
@@ -10361,13 +10413,13 @@ int	PopupMenu::handle(int event)
 	return(flag);
 }
 
-void	PopupMenu::Resize(int xx, int yy, int ww, int hh)
+void	GenericPopupMenu::Resize(int xx, int yy, int ww, int hh)
 {
 	Fl_Window::resize(xx, yy, ww, hh);
 	browser->resize(0, 0, ww, hh);
 }
 
-void	PopupMenu::Fit()
+void	GenericPopupMenu::Fit()
 {
 	int nn = browser->size();
 	fl_font(FL_HELVETICA, 9);
@@ -13753,14 +13805,11 @@ int	ImmediateDrawingWindow::handle(int event)
 				paste_button->hide();
 				clear_copy_buffer_button->hide();
 			}
-			my_window->old_rubberband_mode = my_window->rubberband_mode;
-			my_window->rubberband_mode = SCROLL_MODE;
 		}
 	}
 	else if(event == FL_HIDE)
 	{
 		my_window->frame_immediate = 0;
-		my_window->rubberband_mode = my_window->old_rubberband_mode;
 	}
 	else if(event == FL_PASTE)
 	{
@@ -14171,7 +14220,7 @@ void	ColorDialog::hide()
 
 // SECTION *********************************** FAKE WINDOW *******************************************
 
-FakeWindow::FakeWindow(MyWin *in_win, char *raw) : Fl_Double_Window(0, 0, Fl::w(), Fl::h())
+FakeWindow::FakeWindow(MyWin *in_win, char *raw, char *in_msg) : Fl_Double_Window(0, 0, Fl::w(), Fl::h())
 {
 	my_window = in_win;
 	border(0);
@@ -14187,6 +14236,13 @@ FakeWindow::FakeWindow(MyWin *in_win, char *raw) : Fl_Double_Window(0, 0, Fl::w(
 	final_ww = -1;
 	final_hh = -1;
 	dragging = 0;
+	display_message = 0;
+	display_cnt = 0;
+	if(in_msg != NULL)
+	{
+		strncpy(message, in_msg, 1024);
+		display_message = 1;
+	}
 	end();
 	show();
 }
@@ -14237,6 +14293,20 @@ void	FakeWindow::draw()
 			final_ww = ww;
 			final_hh = hh;
 		}
+		if(display_message == 1)
+		{
+			fl_font(FL_HELVETICA, 32);
+			int ex = 0;
+			int ey = 0;
+			fl_measure(message, ex, ey);
+			int xx = (w() / 2) - (ex / 2);
+			int yy = (h() / 2) - (ey / 2);
+			fl_color(BLACK);
+			fl_rectf(xx - 20, yy - 20, ex + 40, ey + 40);
+			fl_color(WHITE);
+			fl_rect(xx - 20, yy - 20, ex + 40, ey + 40);
+			fl_draw(message, 2, 2, w(), h(), FL_ALIGN_CENTER);
+		}
 	}
 }
 
@@ -14280,13 +14350,13 @@ int	FakeWindow::handle(int event)
 							}
 						}
 					}
-					my_window->show();
-					my_window->new_source_window->show();
-					my_window->set_non_modal();
 				}
-				hide();
 			}
 			dragging = 0;
+			my_window->show();
+			my_window->new_source_window->show();
+			my_window->set_non_modal();
+			hide();
 		}
 		flag = 1;
 	}
@@ -14307,6 +14377,15 @@ int	FakeWindow::handle(int event)
 		dragging = 0;
 		redraw();
 		flag = 1;
+	}
+	else if(event == FL_MOVE)
+	{
+		if(display_cnt > 10)
+		{
+			display_message = 0;
+			redraw();
+		}
+		display_cnt++;
 	}
 	if(flag == 0)
 	{
@@ -28311,7 +28390,11 @@ void	iconize_cb(void *v);
 
 	MyWin *win = (MyWin *)v;
 	win->iconize();
-	Fl::add_timeout(1.0, iconize_cb, win);
+	while(win->visible())
+	{
+		Fl::wait(1);
+	}
+	Fl::add_timeout(0.5, iconize_cb, win);
 }
 
 void	select_window_to_monitor_cb(Fl_Widget *w, void *v)
@@ -30566,7 +30649,7 @@ int	loop;
 						if(cam->object_index[loop] == 0)
 						{
 							cam->object_index[loop] = 1;
-							w->labelcolor(WHITE);
+							w->labelcolor(CYAN);
 						}
 						else
 						{
@@ -32405,7 +32488,15 @@ int	inner;
 	{
 		win->ptz_interface_index = nn;
 		win->ptz_current_interface = &my_win->iface[nn];
-		win->ptz_current_device_path = my_win->ptz_device_path[nn];
+		if(my_win->ptz_device_path[nn] != NULL)
+		{
+			if(win->ptz_current_device_path != NULL)
+			{
+				free(win->ptz_current_device_path);
+				win->ptz_current_device_path = NULL;
+			}
+			win->ptz_current_device_path = strdup(my_win->ptz_device_path[nn]);
+		}
 		int cam_idx = win->ptz_remember_camera[win->ptz_interface_index];
 		if(cam_idx > -1)
 		{
@@ -33193,6 +33284,7 @@ void	ptz_set_speed_cb(Fl_Widget *w, void *v)
 	MyVISCACamera *local_cam = win->ptz_current_camera;
 	if(local_cam != NULL)
 	{
+		win->ptz_speed_slider_value = val;
 		if(win->ptz_adjust_speed_for_zoom == 0)
 		{
 			if(win->accelerate == 0)
@@ -33301,27 +33393,11 @@ void	ptz_contract_cb(Fl_Widget *w, void *v)
 	PTZ_Window *win = (PTZ_Window *)v;
 	if(win->ptz_contract_group->visible())
 	{
-		win->ptz_contract_group->hide();
-		win->resize(win->x(), win->my_window->h() - 24, win->w(), 24);
-		win->ptz_alias_button->resize(win->x() + 2, win->y() + 2, win->w() - 24, 20);
-		win->ptz_contract_button->resize(win->x() + (win->w() - 20), win->y() + 2, 20, 20);
-		win->ptz_contract_button->copy_label("@8>");
-		win->ptz_contract_button->copy_tooltip("Expand this window");
-		win->ptz_alias_button->callback(ptz_contract_cb, win);
-		win->ptz_alias_button->copy_tooltip("Expand this window");
-		win->ptz_alias_input->hide();
-		win->contracted = 1;
+		win->Contract();
 	}
 	else
 	{
-		win->ptz_contract_group->show();
-		win->resize(win->x(), win->my_window->h() - 330, win->w(), 330);
-		win->ptz_contract_button->copy_label("@2>");
-		win->ptz_contract_button->copy_tooltip("Contract this window");
-		win->ptz_alias_button->callback(ptz_alias_button_cb, win);
-		win->ptz_alias_button->copy_tooltip("Set the PTZ alias");
-		win->ptz_alias_input->hide();
-		win->contracted = 0;
+		win->Expand();
 	}
 	win->redraw();
 }
@@ -33336,7 +33412,7 @@ int	aa, ab, ac;
 	my_window = in_win;
 	popup = NULL;
 	bound_camera = NULL;
-	contracted = 0;
+	contracted = 1;
 	hovering = 0;
 	key_table[MY_KEY_DOWN] = 0;
 	key_table[MY_KEY_UP] = 0;
@@ -33376,6 +33452,7 @@ int	aa, ab, ac;
 	instance = in_instance;
 	showing = 0;
 	pinned = 0;
+	ptz_speed_slider_value = 0.25;
 	ptz_current_camera_idx = 0;
 	ptz_pan_speed = 24.0 * 0.25;
 	ptz_tilt_speed = 20.0 * 0.25;
@@ -33477,6 +33554,267 @@ void	PTZ_Window::show()
 void	PTZ_Window::hide()
 {
 	Fl_Group::hide();
+}
+
+void	PTZ_Window::Contract()
+{
+	ptz_contract_group->hide();
+	resize(x(), my_window->h() - 24, w(), 24);
+	ptz_alias_button->resize(x() + 2, y() + 2, w() - 24, 20);
+	ptz_contract_button->resize(x() + (w() - 20), y() + 2, 20, 20);
+	ptz_contract_button->copy_label("@8>");
+	ptz_contract_button->copy_tooltip("Expand this window");
+	ptz_alias_button->callback(ptz_contract_cb, this);
+	ptz_alias_button->copy_tooltip("Expand this window");
+	ptz_alias_input->hide();
+	contracted = 1;
+}
+
+void	PTZ_Window::Expand()
+{
+	ptz_contract_group->show();
+	resize(x(), my_window->h() - 330, w(), 330);
+	ptz_contract_button->copy_label("@2>");
+	ptz_contract_button->copy_tooltip("Contract this window");
+	ptz_alias_button->callback(ptz_alias_button_cb, this);
+	ptz_alias_button->copy_tooltip("Set the PTZ alias");
+	ptz_alias_input->hide();
+	contracted = 0;
+}
+
+void	PTZ_Window::resize(int xx, int yy, int ww, int hh)
+{
+	SlidingElement::resize(xx, yy, ww, hh);
+}
+
+void	MyWin::SavePTZ_WindowsAsJSON(FILE *fp)
+{
+int		loop;
+
+	fprintf(fp, ",\n");
+	fprintf(fp, "\"ptz windows\": [\n");
+	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+	{
+		PTZ_Window *ptz_win = ptz_window[loop];
+		if(ptz_win != NULL)
+		{
+			ptz_win->SaveAsJSON(fp);
+			if(loop < PTZ_WINDOW_LIMIT - 1)
+			{
+				fprintf(fp, ",\n");
+			}
+			else
+			{
+				fprintf(fp, "\n");
+			}
+		}
+	}
+	fprintf(fp, "]\n");
+}
+
+void	MyWin::ParseJSONPTZ_Windows(cJSON *json)
+{
+	cJSON *ptz_win = NULL;
+	cJSON *ptz_wins = json_parse_array(json, "ptz windows");
+	if(ptz_wins != NULL)
+	{
+		int cnt = 0;
+		cJSON_ArrayForEach(ptz_win, ptz_wins)
+		{
+			PTZ_Window *pw = ptz_window[cnt];
+			if(pw != NULL)
+			{
+				pw->ParseJSON(ptz_win);
+			}
+			cnt++;
+		}
+	}
+}
+
+void	PTZ_Window::ParseJSON(cJSON *json)
+{
+	int success = json_parse_int(json, "instance", instance);
+	success = json_parse_int(json, "showing", showing);
+	success = json_parse_int(json, "pinned", pinned);
+	char *str = json_parse_string(json, "alias");
+	if(str != NULL)
+	{
+		strcpy(alias, str);
+	}
+	success = json_parse_int(json, "contracted", contracted);
+	success = json_parse_int(json, "hovering", hovering);
+	cJSON *key_table_item = NULL;
+	cJSON *key_table_items = json_parse_array(json, "key table");
+	if(key_table_items != NULL)
+	{
+		int cnt = 0;
+		cJSON_ArrayForEach(key_table_item, key_table_items)
+		{
+			key_table[cnt] = key_table_item->valueint;
+			cnt++;
+		}
+	}
+	success = json_parse_int(json, "pan tilt style", pan_tilt_style);
+	success = json_parse_int(json, "prefer ndi", prefer_ndi);
+	success = json_parse_int(json, "prefer v4l", prefer_v4l);
+	success = json_parse_int(json, "auto focus", auto_focus);
+	success = json_parse_int(json, "auto exposure", auto_exposure);
+	success = json_parse_int(json, "accelerate", accelerate);
+	success = json_parse_int(json, "click pt", click_pt);
+	success = json_parse_int(json, "auto focus state", auto_focus_status);
+	success = json_parse_int(json, "auto exposure status", auto_exposure_status);
+	success = json_parse_int(json, "digital zoom status", digital_zoom_status);
+	success = json_parse_int(json, "backlight status", backlight_status);
+	success = json_parse_int(json, "follow", follow);
+	success = json_parse_int(json, "soft memory", soft_memory);
+	success = json_parse_int(json, "reverse horizontal", reverse_horizontal);
+	success = json_parse_int(json, "reverse vertical", reverse_vertical);
+	success = json_parse_double(json, "ndi focus", ndi_focus);
+	success = json_parse_double(json, "ndi focus accel", ndi_focus_accel);
+	success = json_parse_int(json, "ptz interface index", ptz_interface_index);
+	success = json_parse_int(json, "ptz current camera idx", ptz_current_camera_idx);
+	cJSON *ptz_remember_camera_item = NULL;
+	cJSON *ptz_remember_camera_items = json_parse_array(json, "ptz remember camera");
+	if(ptz_remember_camera_items != NULL)
+	{
+		int cnt = 0;
+		cJSON_ArrayForEach(ptz_remember_camera_item, ptz_remember_camera_items)
+		{
+			ptz_remember_camera[cnt] = ptz_remember_camera_item->valueint;
+			cnt++;
+		}
+	}
+	if(ptz_current_device_path != NULL)
+	{
+		free(ptz_current_device_path);
+		ptz_current_device_path = NULL;
+	}
+	str = json_parse_string(json, "ptz current device path");
+	if(str != NULL)
+	{
+		ptz_current_device_path = strdup(str);
+	}
+	success = json_parse_double(json, "ptz speed slider value", ptz_speed_slider_value);
+	ptz_speed_slider->value(ptz_speed_slider_value);
+	ptz_set_speed_cb(ptz_speed_slider, this);
+
+	success = json_parse_double(json, "ptz pan speed", ptz_pan_speed);
+	success = json_parse_double(json, "ptz tilt speed", ptz_tilt_speed);
+	success = json_parse_double(json, "ptz target pan speed", ptz_target_pan_speed);
+	success = json_parse_double(json, "ptz target tilt speed", ptz_target_tilt_speed);
+	success = json_parse_int(json, "ptz focus speed", ptz_focus_speed);
+	success = json_parse_int(json, "ptz zoom speed", ptz_zoom_speed);
+	success = json_parse_int(json, "ptz zoomer speed", ptz_zoomer_speed);
+	success = json_parse_int(json, "ptz adjust speed for zoom", ptz_adjust_speed_for_zoom);
+
+	cJSON *grid = json_parse_array(json, "ptz soft memory");
+	int rows = cJSON_GetArraySize(grid);
+	for(int i = 0; i < rows; i++) 
+	{
+		cJSON *row = cJSON_GetArrayItem(grid, i);
+		if(cJSON_IsArray(row)) 
+		{
+			int cols = cJSON_GetArraySize(row);
+			for(int j = 0; j < cols; j++) 
+			{
+				cJSON *cell = cJSON_GetArrayItem(row, j);
+				if(cJSON_IsNumber(cell)) 
+				{
+					ptz_soft_memory[i][j] = cell->valueint;
+				}
+			}
+		}
+	}
+}
+
+void	PTZ_Window::SaveAsJSON(FILE *fp)
+{
+int		loop;
+int		outer;
+int		inner;
+
+	fprintf(fp, "{\n");
+	fprintf(fp, "\t\"instance\": %d,\n", instance);
+	fprintf(fp, "\t\"showing\": %d,\n", showing);
+	fprintf(fp, "\t\"pinned\": %d,\n", pinned);
+	fprintf(fp, "\t\"alias\": \"%s\",\n", alias);
+	fprintf(fp, "\t\"contracted\": %d,\n", contracted);
+	fprintf(fp, "\t\"hovering\": %d,\n", hovering);
+	fprintf(fp, "\t\"key table\": [");
+	for(loop = 0;loop < 4;loop++)
+	{
+		fprintf(fp, "\"%d\"", key_table[loop]);
+		if(loop != 3)
+		{
+			fprintf(fp, ",");
+		}
+		else
+		{
+			fprintf(fp, "],\n");
+		}
+	}
+	fprintf(fp, "\t\"pan tilt style\": %d,\n", pan_tilt_style);
+	fprintf(fp, "\t\"prefer ndi\": %d,\n", prefer_ndi);
+	fprintf(fp, "\t\"prefer v4l\": %d,\n", prefer_v4l);
+	fprintf(fp, "\t\"auto focus\": %d,\n", auto_focus);
+	fprintf(fp, "\t\"auto exposure\": %d,\n", auto_exposure);
+	fprintf(fp, "\t\"accelerate\": %d,\n", accelerate);
+	fprintf(fp, "\t\"click pt\": %d,\n", click_pt);
+	fprintf(fp, "\t\"auto focus status\": %d,\n", auto_focus_status);
+	fprintf(fp, "\t\"auto exposure status\": %d,\n", auto_exposure_status);
+	fprintf(fp, "\t\"digital zoom status\": %d,\n", digital_zoom_status);
+	fprintf(fp, "\t\"backlight status\": %d,\n", backlight_status);
+	fprintf(fp, "\t\"follow\": %d,\n", follow);
+	fprintf(fp, "\t\"soft memory\": %d,\n", soft_memory);
+	fprintf(fp, "\t\"reverse horizontal\": %d,\n", reverse_horizontal);
+	fprintf(fp, "\t\"reverse vertical\": %d,\n", reverse_vertical);
+	fprintf(fp, "\t\"ndi focus\": %f,\n", ndi_focus);
+	fprintf(fp, "\t\"ndi focus accel\": %f,\n", ndi_focus_accel);
+	fprintf(fp, "\t\"ptz interface index\": %d,\n", ptz_interface_index);
+	fprintf(fp, "\t\"ptz current camera idx\": %d,\n", ptz_current_camera_idx);
+	fprintf(fp, "\t\"ptz remember camera\": [");
+	for(loop = 0;loop < NUMBER_OF_CAMERAS;loop++)
+	{
+		fprintf(fp, "\"%d\"", ptz_remember_camera[loop]);
+		if(loop != NUMBER_OF_CAMERAS - 1)
+		{
+			fprintf(fp, ",");
+		}
+		else
+		{
+			fprintf(fp, "],\n");
+		}
+	}
+	fprintf(fp, "\t\"ptz current device path\": \"%s\",\n", ptz_current_device_path);
+	fprintf(fp, "\t\"ptz speed slider value\": %f,\n", ptz_speed_slider_value);
+	fprintf(fp, "\t\"ptz pan speed\": %f,\n", ptz_pan_speed);
+	fprintf(fp, "\t\"ptz tilt speed\": %f,\n", ptz_tilt_speed);
+	fprintf(fp, "\t\"ptz target pan speed\": %f,\n", ptz_target_pan_speed);
+	fprintf(fp, "\t\"ptz target tilt speed\": %f,\n", ptz_target_tilt_speed);
+	fprintf(fp, "\t\"ptz focus speed\": %d,\n", ptz_focus_speed);
+	fprintf(fp, "\t\"ptz zoom speed\": %d,\n", ptz_zoom_speed);
+	fprintf(fp, "\t\"ptz zoomer speed\": %d,\n", ptz_zoomer_speed);
+	fprintf(fp, "\t\"ptz adjust speed for zoom\": %d,\n", ptz_adjust_speed_for_zoom);
+	fprintf(fp, "\t\"ptz soft memory\": [");
+	for(outer = 0;outer < NUMBER_OF_INTERFACES;outer++)
+	{
+		if(outer > 0) 
+		{
+			fprintf(fp, ",");
+		}
+		fprintf(fp, "[");
+		for(inner = 0;inner < NUMBER_OF_CAMERAS;inner++)
+		{
+			if(inner > 0)
+			{
+				fprintf(fp, ",");
+			}
+			fprintf(fp, "%d", ptz_soft_memory[outer][inner]);
+		}
+		fprintf(fp, "]");
+	}
+	fprintf(fp, "]\n");
+	fprintf(fp, "}\n");
 }
 
 int	PTZ_Window::AddCameraControlButtons(int start_x, int start_y)
@@ -33800,7 +34138,7 @@ int	PTZ_Window::AddSpeedSlider(int start_x, int start_y)
 	ptz_speed_slider->labelsize(9);
 	ptz_speed_slider->labelcolor(YELLOW);
 	ptz_speed_slider->align(FL_ALIGN_CENTER | FL_ALIGN_TOP);
-	ptz_speed_slider->value(0.25);
+	ptz_speed_slider->value(0.24);
 	ptz_speed_slider->bounds(0.01, 1.0);
 	ptz_speed_slider->copy_tooltip("Set the PTZ speed");
 	ptz_speed_slider->callback(ptz_set_speed_cb, this);
@@ -34325,7 +34663,15 @@ int	inner;
 			if(ptz_current_interface == NULL)
 			{
 				ptz_current_interface = &my_window->iface[loop];
-				ptz_current_device_path = my_window->ptz_device_path[loop];
+				if(my_window->ptz_device_path[loop] != NULL)
+				{
+					if(ptz_current_device_path != NULL)
+					{
+						free(ptz_current_device_path);
+						ptz_current_device_path = NULL;
+					}
+					ptz_current_device_path = strdup(my_window->ptz_device_path[loop]);
+				}
 				ptz_interface_index = loop;
 			}
 			if(my_window->ptz_lock_alias[loop] != NULL)
@@ -34441,6 +34787,11 @@ int	loop;
 			}
 		}
 	}
+	if(ptz_current_device_path != NULL)
+	{
+		free(ptz_current_device_path);
+		ptz_current_device_path = NULL;
+	}
 }
 
 void	ptz_popup_cb(Fl_Widget *w, void *v)
@@ -34512,6 +34863,14 @@ int	loop;
 				ptz_select_interface_cb(NULL, this);
 			}
 		}
+		if(contracted == 0)
+		{
+			Expand();
+		}
+		else
+		{
+			Contract();
+		}
 	}
 	else if(event == FL_PUSH)
 	{
@@ -34526,11 +34885,24 @@ int	loop;
 				if((!Fl::event_inside(ptz_alias_button))
 				&& (!Fl::event_inside(ptz_contract_button)))
 				{
-					if(bound_camera != my_window->DisplayedCamera())
+					int child_cnt = ptz_contract_group->children();
+					int no_go = 0;
+					for(loop = 0;loop < child_cnt;loop++)
 					{
-						if(my_window->alt_displayed_source == -1)
+						Fl_Widget *chld = ptz_contract_group->child(loop);
+						if(Fl::event_inside(chld))
 						{
-							my_window->DisplayCamera(bound_camera);
+							no_go = 1;
+						}
+					}
+					if(no_go == 0)
+					{
+						if(bound_camera != my_window->DisplayedCamera())
+						{
+							if(my_window->alt_displayed_source == -1)
+							{
+								my_window->DisplayCamera(bound_camera);
+							}
 						}
 					}
 				}
@@ -38568,30 +38940,6 @@ void	show_motion_debug_button_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	clear_interest_button_cb(Fl_Widget *w, void *v)
-{
-	MyWin *win = (MyWin *)v;
-	win->interest_cnt = 0;
-}
-
-void	set_interest_button_cb(Fl_Widget *w, void *v)
-{
-	MyWin *win = (MyWin *)v;
-	if(win->mark_interest == 0)
-	{
-		win->HideButtons();
-		w->show();
-		w->copy_label("Done Setting Interest");
-		win->mark_interest = 1;
-	}
-	else
-	{
-		win->mark_interest = 0;
-		win->ShowButtons();
-		w->copy_label("Set Interest");
-	}
-}
-
 void	snapshot_button_cb(Fl_Widget *w, void *v)
 {
 	MyWin *win = (MyWin *)v;
@@ -38609,8 +38957,17 @@ void	review_muxed_button_cb(Fl_Widget *w, void *v)
 	{
 		if(win->last_muxed_list[0] != NULL)
 		{
-			win->review_muxed = new MuxPreviewWindow(win, win->requested_w, win->requested_h, "Muxed Preview");
-			win->review_muxed->show();
+			if(win->video_window != NULL)
+			{
+				win->video_window->hide();
+				Fl::delete_widget(win->video_window);
+				win->video_window = NULL;
+			}
+			VideoWindow *vw = new VideoWindow(win->last_muxed_list, 800, 500, "VideoWindow");
+			win->video_window = vw;
+			win->video_window->set_non_modal();
+			win->video_window->show();
+			win->video_window->Play();
 		}
 	}
 }
@@ -39313,9 +39670,8 @@ void	immediate_drawing_button_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	dynamic_coloring_button_cb(Fl_Widget *w, void *v)
+void	dynamic_coloring(MyWin *win)
 {
-	MyWin *win = (MyWin *)v;
 	if(!win->color_it_window->visible())
 	{
 		win->color_it_window->set_non_modal();
@@ -39949,18 +40305,6 @@ int	loop;
 	}
 }
 
-void	save_interest_button_cb(Fl_Widget *w, void *v)
-{
-	MyWin *win = (MyWin *)v;
-	win->SaveInterest();
-}
-
-void	load_interest_button_cb(Fl_Widget *w, void *v)
-{
-	MyWin *win = (MyWin *)v;
-	win->LoadInterest();
-}
-
 void	zoom_box_button_cb(Fl_Widget *w, void *v)
 {
 	MyWin *win = (MyWin *)v;
@@ -40373,7 +40717,6 @@ char	update_buf[256];
 	hide_status = use_hide_status;
 	image_origin_x = 0;
 	image_origin_y = 0;
-	selecting_colors = 0;
 	ptz_lock_window = NULL;
 
 	if((disregard_settings & 2) != 2)
@@ -40382,7 +40725,6 @@ char	update_buf[256];
 		ReadGUISettings();
 	}
 	rubberband_mode = SCROLL_MODE;
-	old_rubberband_mode = SCROLL_MODE;
 	rubberband_x = -1;
 	rubberband_y = -1;
 	rubberband_w = -1;
@@ -40576,7 +40918,6 @@ char	update_buf[256];
 	nominal_interest_x = -1;
 	nominal_interest_y = -1;
 	interest_cnt = 0;
-	mark_interest = 0;
 	review = NULL;
 	buttons_shown = 0;
 	all_frames = 0;
@@ -41347,12 +41688,12 @@ void	MyWin::MakeVUMeters()
 	meterL = NULL;
 	meterR = NULL;
 
-	meterL = new CowVUMeter(0, 0, VU_METER_W, VU_METER_H, "Meter");
+	meterL = new CowVUMeter(this, 0, 0, VU_METER_W, VU_METER_H, "Meter");
 	meterL->color(BLACK);
 	meterL->labelcolor(WHITE);
 	meterL->labelsize(24);
 
-	meterR = new CowVUMeter(300, 0, VU_METER_W, VU_METER_H, "Meter");
+	meterR = new CowVUMeter(this, 300, 0, VU_METER_W, VU_METER_H, "Meter");
 	meterR->color(BLACK);
 	meterR->labelcolor(WHITE);
 	meterR->labelsize(24);
@@ -41835,6 +42176,7 @@ void	MyWin::InitializeVariables()
 int	loop;
 int	outer, inner;
 
+	video_window = NULL;
 	resize_grp = NULL;
 	audio_source = NULL;
 	recording_camera = NULL;
@@ -41891,10 +42233,6 @@ int	outer, inner;
 	review_button = NULL;
 	review_muxed_button = NULL;
 	snapshot_button = NULL;
-	set_interest_button = NULL;
-	clear_interest_button = NULL;
-	save_interest_button = NULL;
-	load_interest_button = NULL;
 	resize_detail_button = NULL;
 	zoom_box_button = NULL;
 	reset_button = NULL;
@@ -41931,8 +42269,6 @@ int	outer, inner;
 	python_filter_button = NULL;
 	python_output_filter_button = NULL;
 	fltk_plugin_button = NULL;
-	immediate_drawing_button = NULL;
-	dynamic_coloring_button = NULL;
 	toggle_camera_effects_button = NULL;
 	save_camera_button = NULL;
 	load_camera_button = NULL;
@@ -42163,7 +42499,6 @@ int	outer, inner;
 	no_scan = 0;
 	no_audio_scan = 0;
 	mux_init = 0;
-	selecting_colors = 0;
 	animate_panels = 0;
 	use_tooltips = 0;
 	file_selector_layout = 0;
@@ -42252,7 +42587,6 @@ int	outer, inner;
 	rubberband_w = 0;
 	rubberband_h = 0;
 	rubberband_mode = 0;
-	old_rubberband_mode = 0;
 	guideline_mode = 0;
 	misc_copy_cnt = 0;
 	editing_misc_outer = 0;
@@ -42290,7 +42624,6 @@ int	outer, inner;
 	nominal_interest_x = 0;
 	nominal_interest_y = 0;
 	interest_cnt = 0;
-	mark_interest = 0;
 	buttons_shown = 0;
 	ready_to_average = 0;
 	all_frames = 0;
@@ -43051,10 +43384,10 @@ int	inner;
 	{
 		int nn = interest_cnt - 1;
 		fprintf(fp, "\t\"interest x\": [");
-		for(loop = 0;loop < output_path_cnt;loop++)
+		for(loop = 0;loop < interest_cnt;loop++)
 		{
 			fprintf(fp, "%d", interest_x[loop]);
-			if(loop != nn)
+			if(loop < (interest_cnt - 1))
 			{
 				fprintf(fp, ",");
 			}
@@ -43064,10 +43397,10 @@ int	inner;
 			}
 		}
 		fprintf(fp, "\t\"interest y\": [");
-		for(loop = 0;loop < output_path_cnt;loop++)
+		for(loop = 0;loop < interest_cnt;loop++)
 		{
 			fprintf(fp, "%d", interest_y[loop]);
-			if(loop != nn)
+			if(loop < (interest_cnt - 1))
 			{
 				fprintf(fp, ",");
 			}
@@ -43186,6 +43519,7 @@ int	inner;
 	fprintf(fp, "\t\"render mouse\": %d,\n", render_mouse);
 	fprintf(fp, "\t\"tutorial mode\": %d,\n", tutorial_mode);
 	SaveCamerasAsJSON(fp);
+	SavePTZ_WindowsAsJSON(fp);
 	fprintf(fp, "}");
 }
 
@@ -43214,7 +43548,7 @@ int	loop;
 
 void	MyWin::SaveCamerasAsJSON(FILE *fp)
 {
-int	loop;
+int		loop;
 
 	fprintf(fp, "\"Cameras\": [\n");
 	for(loop = 0;loop < source_cnt;loop++)
@@ -43257,7 +43591,6 @@ int		outer;
 	{
 		Cleanup();
 		ParseJSONSystem(json);
-		cJSON_Delete(json);
 		recognize_class_cnt = 0;
 		ReadClasses();
 		if(init_detect == 1)
@@ -43289,6 +43622,9 @@ int		outer;
 				add(ptz_window[loop]);
 			}
 		}
+		ParseJSONPTZ_Windows(json);
+		cJSON_Delete(json);
+
 		HideButtons();
 		ShowButtons();
 		Fl::remove_timeout(my_window_cb, this);
@@ -43759,8 +44095,11 @@ int		outer;
 			int cnt = 0;
 			cJSON_ArrayForEach(item, items)
 			{
-				interest_x[cnt] = item->valueint;
-				cnt++;
+				if(cnt < 100)
+				{
+					interest_x[cnt] = item->valueint;
+					cnt++;
+				}
 			}
 		}
 		item = NULL;
@@ -43770,8 +44109,11 @@ int		outer;
 			int cnt = 0;
 			cJSON_ArrayForEach(item, items)
 			{
-				interest_y[cnt] = item->valueint;
-				cnt++;
+				if(cnt < 100)
+				{
+					interest_y[cnt] = item->valueint;
+					cnt++;
+				}
 			}
 		}
 	}
@@ -44028,11 +44370,9 @@ char	def_sink[4096];
 		cJSON *mics = json_parse_array(json, "Microphones");
 		if(mics != NULL)
 		{
-			int started_here = 1;
 			cJSON_ArrayForEach(mic, mics)
 			{
-				ParseJSONMicrophone(mic, started_here, def_source, list);
-				started_here = 0;
+				PulseAudioButton *out = ParseJSONMicrophone(mic, def_source, list);
 			}
 		}
 		for(loop = 0;loop < nn;loop++)
@@ -44049,7 +44389,7 @@ char	def_sink[4096];
 	}
 }
 
-PulseAudioButton	*MyWin::ParseJSONMicrophone(cJSON *json, int started_here, char *default_name, char *list[128])
+PulseAudioButton	*MyWin::ParseJSONMicrophone(cJSON *json, char *default_name, char *list[128])
 {
 int		loop;
 
@@ -44078,12 +44418,15 @@ int		loop;
 			}
 			if(go == 1)
 			{
-				PulseAudioButton *b = AddAudioSource(started_here, strdup(name), strdup(use_alias));
-				if(strcmp(name, default_name) == 0)
+				PulseAudioButton *b = AddAudioSource(0, strdup(name), strdup(use_alias));
+				if(b != NULL)
 				{
-					b->select_button->value(1);
+					if(strcmp(name, default_name) == 0)
+					{
+						b->select_button->value(1);
+					}
+					out = b;
 				}
-				out = b;
 			}
 		}
 	}
@@ -45042,6 +45385,12 @@ void	sliding_element_close_cb(void *v);
 
 	Fl::remove_timeout(sliding_element_close_cb);
 	Fl::remove_timeout(my_window_cb);
+	if(video_window != NULL)
+	{
+		video_window->hide();
+		Fl::delete_widget(video_window);
+		video_window = NULL;
+	}
 	if(joystick_fd > -1)
 	{
 		close(joystick_fd);
@@ -46350,7 +46699,8 @@ char	*sorted_list[1024];
 					{
 						if(cam->object_index[inner] == 1)
 						{
-							object_menu->object_name_button[loop]->labelcolor(WHITE);
+							// COW COW object_menu->object_name_button[loop]->labelcolor(WHITE);
+							object_menu->object_name_button[loop]->labelcolor(CYAN);
 						}
 						else
 						{
@@ -46719,6 +47069,9 @@ void	ndi_focus_far_cb(void *v)
 	if(win->ndi_focus > 1.0) win->ndi_focus = 1.0;
 	win->ndi_focus_accel *= 0.99;
 	int err = NDILib->recv_ptz_focus(win->bound_camera->ndi_recv, win->ndi_focus);
+	char use[256];
+	sprintf(use, "%.3g", win->ndi_focus);
+	win->ptz_focus_value_label->copy_label(use);
 	Fl::repeat_timeout(win->ndi_focus_accel, ndi_focus_far_cb, win);
 }
 
@@ -46729,6 +47082,9 @@ void	ndi_focus_near_cb(void *v)
 	if(win->ndi_focus < 0.0) win->ndi_focus = 0.0;
 	win->ndi_focus_accel *= 0.99;
 	int err = NDILib->recv_ptz_focus(win->bound_camera->ndi_recv, win->ndi_focus);
+	char use[256];
+	sprintf(use, "%.3g", win->ndi_focus);
+	win->ptz_focus_value_label->copy_label(use);
 	Fl::repeat_timeout(win->ndi_focus_accel, ndi_focus_near_cb, win);
 }
 
@@ -46811,7 +47167,7 @@ static char	buf2[256];
 	}
 	if(button == PTZ_UP_LEFT)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, ps, ts);
 		}
@@ -46841,7 +47197,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_UP_RIGHT)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, -ps, ts);
 		}
@@ -46871,7 +47227,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_DOWN_RIGHT)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, -ps, -ts);
 		}
@@ -46901,7 +47257,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_DOWN_LEFT)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, ps, -ts);
 		}
@@ -46931,7 +47287,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_UP)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, 0.0, ts);
 		}
@@ -46961,7 +47317,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_DOWN)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, 0.0, -ts);
 		}
@@ -46991,7 +47347,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_RIGHT)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, -ps, 0.0);
 		}
@@ -47021,7 +47377,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_LEFT)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, ps, 0.0);
 		}
@@ -47051,9 +47407,9 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_ZOOM_IN)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
-			NDILib->recv_ptz_zoom_speed(bound_cam->ndi_recv, zs);
+			int err = NDILib->recv_ptz_zoom_speed(bound_cam->ndi_recv, zs);
 		}
 		else if(bound_cam->prefer_v4l == 1)
 		{
@@ -47081,9 +47437,9 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_ZOOM_OUT)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
-			NDILib->recv_ptz_zoom_speed(bound_cam->ndi_recv, -zs);
+			int err = NDILib->recv_ptz_zoom_speed(bound_cam->ndi_recv, -zs);
 		}
 		else if(bound_cam->prefer_v4l == 1)
 		{
@@ -47138,12 +47494,12 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_FOCUS_FAR)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 #ifdef COW_NDI_USE_FOCUS_SPEED
 			int err = NDILib->recv_ptz_focus_speed(bound_cam->ndi_recv, fs);
 #else
-			Fl::add_timeout(0.1, ndi_focus_far_cb, win);
+			Fl::add_timeout(0.0, ndi_focus_far_cb, win);
 #endif
 		}
 		else if(bound_cam->prefer_v4l == 1)
@@ -47172,12 +47528,12 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_FOCUS_NEAR)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 #ifdef COW_NDI_USE_FOCUS_SPEED
 			int err = NDILib->recv_ptz_focus_speed(bound_cam->ndi_recv, -fs);
 #else
-			Fl::add_timeout(0.1, ndi_focus_near_cb, win);
+			Fl::add_timeout(0.0, ndi_focus_near_cb, win);
 #endif
 		}
 		else if(bound_cam->prefer_v4l == 1)
@@ -47206,7 +47562,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_APERTURE_OPEN)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			bound_cam->ndi_exposure += 0.01;
 			if(bound_cam->ndi_exposure > 1.0) bound_cam->ndi_exposure = 1.0;
@@ -47224,7 +47580,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_APERTURE_CLOSE)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			bound_cam->ndi_exposure -= 0.01;
 			if(bound_cam->ndi_exposure < 0.0) bound_cam->ndi_exposure = 0.0;
@@ -47242,7 +47598,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_HOME)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt(bound_cam->ndi_recv, 0.0, 0.0);
 		}
@@ -47260,7 +47616,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_PAN_STOP)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_pan_tilt_speed(bound_cam->ndi_recv, 0.0, 0.0);
 		}
@@ -47293,7 +47649,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_ZOOM_STOP)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 			NDILib->recv_ptz_zoom_speed(bound_cam->ndi_recv, 0.0);
 		}
@@ -47330,7 +47686,7 @@ static char	buf2[256];
 	}
 	else if(button == PTZ_FOCUS_STOP)
 	{
-		if((bound_cam->ndi_ptz == 1) && (bound_cam->prefer_ndi == 1))
+		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
 #ifdef COW_NDI_USE_FOCUS_SPEED
 			NDILib->recv_ptz_focus_speed(bound_cam->ndi_recv, 0.0);
@@ -47817,9 +48173,24 @@ void	iconize_cb(void *v)
 	char *raw = (char *)grab_raw_desktop_image();
 	if(raw != NULL)
 	{
-		FakeWindow *fake = new FakeWindow(win, raw);
-		fake->show();
 		win->hide();
+		win->new_source_window->hide();
+		while(win->visible())
+		{
+			Fl::wait(1);
+		}
+		while(win->new_source_window->visible())
+		{
+			Fl::wait(1);
+		}
+		char *msg = "Select a rectangular area.\nWhen done, click the right mouse button.";
+		FakeWindow *fake = new FakeWindow(win, raw, msg);
+		fake->show();
+		while(!fake->visible())
+		{
+			Fl::wait(1);
+		}
+		MaximizeWindow(fake);
 		while(fake->visible())
 		{
 			Fl::wait(1);
@@ -47893,12 +48264,14 @@ int	loop;
 
 void	MyWin::ToggleRecord(Camera *cam)
 {
-	if(cam->record == 0)
+	if(cam->triggers_requested == 0)
 	{
+		RecordOn(cam);
 		cam->RecordOn();
 	}
 	else
 	{
+		RecordOff(cam);
 		cam->RecordOff();
 	}
 }
@@ -48655,54 +49028,57 @@ int	MyWin::HandleReleaseForSplit()
 int	loop;
 
 	int flag = 0;
-	int sz_w = w();
-	int sz_h = h();
-	int cols = 1;
-	if(source_cnt == 1)
+	if(Fl::event_button() == FL_LEFT_MOUSE)
 	{
-		sz_w = w();
-		sz_h = h();
-		cols = 1;
-	}
-	else if(source_cnt < 5)
-	{
-		sz_w = w() / 2;
-		sz_h = h() / 2;
-		cols = 2;
-	}
-	else if(source_cnt < 10)
-	{
-		sz_w = w() / 3;
-		sz_h = h() / 3;
-		cols = 3;
-	}
-	int actual_x = Fl::event_x();
-	int actual_y = Fl::event_y();
-	int xx = actual_x / sz_w;
-	int yy = actual_y / sz_h;
-	int position = (yy * cols) + xx;
-	if((position > -1) && (position < source_cnt))
-	{
-		if((actual_x > split_bx[position]) && (actual_x < split_bx[position] + 20)
-		&& (actual_y > split_by[position]) && (actual_y < split_by[position] + 20))
+		int sz_w = w();
+		int sz_h = h();
+		int cols = 1;
+		if(source_cnt == 1)
 		{
-			RemoveSource(position);
-			flag = 1;
+			sz_w = w();
+			sz_h = h();
+			cols = 1;
 		}
-		if((actual_x > split_rx[position]) && (actual_x < split_rx[position] + 14)
-		&& (actual_y > split_ry[position]) && (actual_y < split_ry[position] + 14))
+		else if(source_cnt < 5)
 		{
-			ToggleRecord(position);
-			flag = 1;
+			sz_w = w() / 2;
+			sz_h = h() / 2;
+			cols = 2;
 		}
-		else
+		else if(source_cnt < 10)
 		{
-			int no_go = EventInPTZWindow();
-			if(no_go == 0)
+			sz_w = w() / 3;
+			sz_h = h() / 3;
+			cols = 3;
+		}
+		int actual_x = Fl::event_x();
+		int actual_y = Fl::event_y();
+		int xx = actual_x / sz_w;
+		int yy = actual_y / sz_h;
+		int position = (yy * cols) + xx;
+		if((position > -1) && (position < source_cnt))
+		{
+			if((actual_x > split_bx[position]) && (actual_x < split_bx[position] + 20)
+			&& (actual_y > split_by[position]) && (actual_y < split_by[position] + 20))
 			{
-				DisplayCamera(position);
-				split = 0;
+				RemoveSource(position);
 				flag = 1;
+			}
+			if((actual_x > split_rx[position]) && (actual_x < split_rx[position] + 14)
+			&& (actual_y > split_ry[position]) && (actual_y < split_ry[position] + 14))
+			{
+				ToggleRecord(position);
+				flag = 1;
+			}
+			else
+			{
+				int no_go = EventInPTZWindow();
+				if(no_go == 0)
+				{
+					DisplayCamera(position);
+					split = 0;
+					flag = 1;
+				}
 			}
 		}
 	}
@@ -48777,9 +49153,8 @@ int	loop;
 	&& (xx < cam->image_sx + cam->width)
 	&& (yy < cam->image_sy + cam->height))
 	{
-		int grid_sz = grid_size;
-		xx = force_to_grid(grid_sz, xx - cam->image_sx);
-		yy = force_to_grid(grid_sz, yy - cam->image_sy);
+		xx = force_to_grid(grid_size, xx - cam->image_sx);
+		yy = force_to_grid(grid_size, yy - cam->image_sy);
 		xx += cam->image_sx;
 		yy += cam->image_sy;
 		if((immediate_drawing_window->mode == DRAWING_MODE_LINE)
@@ -49286,6 +49661,8 @@ void	MyWin::ImmediateNewlySelectedHighlight()
 int	MyWin::DoMarkInterest()
 {
 int	loop;
+int	local_x[100];
+int	local_y[100];
 
 	int flag = 0;
 	if(interest_cnt < 100)
@@ -49302,20 +49679,42 @@ int	loop;
 		{
 			int nx = (10.0 / (double)camera[current_source]->width) * (double)(xx - off_x);
 			int ny = (10.0 / (double)camera[current_source]->height) * (double)(yy - off_y);
-			int no_go = 0;
+			int no_go = -1;
 			for(loop = 0;loop < interest_cnt;loop++)
 			{
 				if((interest_x[loop] == nx)
 				&& (interest_y[loop] == ny))
 				{
-					no_go = 1;
+					no_go = loop;
 				}
 			}
-			if(no_go == 0)
+			if(no_go == -1)
 			{
-				interest_x[interest_cnt] = nx;
-				interest_y[interest_cnt] = ny;
-				interest_cnt++;
+				if(interest_cnt < 100)
+				{
+					interest_x[interest_cnt] = nx;
+					interest_y[interest_cnt] = ny;
+					interest_cnt++;
+				}
+			}
+			else
+			{
+				int cnt = 0;
+				for(loop = 0;loop < interest_cnt;loop++)
+				{
+					if(loop != no_go)
+					{
+						local_x[cnt] = interest_x[loop];
+						local_y[cnt] = interest_y[loop];
+						cnt++;
+					}
+				}
+				for(loop = 0;loop < cnt;loop++)
+				{
+					interest_x[loop] = local_x[loop];
+					interest_y[loop] = local_y[loop];
+				}
+				interest_cnt = cnt;
 			}
 			flag = 1;
 		}
@@ -49708,7 +50107,7 @@ int	MyWin::HandleRelease(Camera *cam)
 int	MyWin::HandleReleaseForPTZ(Camera *cam)
 {
 	int flag = 0;
-	if((mark_interest == 0) && (move_corner == 0) && (resize_corner == 0) && (restore_corner == 0))
+	if((rubberband_mode != INTEREST_MODE) && (move_corner == 0) && (resize_corner == 0) && (restore_corner == 0))
 	{
 		if(cam->ptz_lock_interface != -1)
 		{
@@ -50137,8 +50536,7 @@ int	loop;
 		highlight_image_windows = 0;
 		int xx = Fl::event_x();
 		int yy = Fl::event_y();
-
-		if(mark_interest == 1)
+		if(rubberband_mode == INTEREST_MODE)
 		{
 			int off_x = image_origin_x;
 			int off_y = image_origin_y;
@@ -50992,8 +51390,8 @@ static time_t	last_time = 0;
 	}
 	if(no_go == 0)
 	{
-		if(audio_source_cnt > 0)
-			{
+		if(audio_thumbnail_cnt > 0)
+		{
 			int xx = Fl::event_x();
 			int yy = Fl::event_y();
 			int cx1 = (w() / 2) - 500;
@@ -51214,7 +51612,6 @@ int	loop;
 
 void	MyWin::RubberbandMode(int in_mode)
 {
-	old_rubberband_mode = rubberband_mode;
 	rubberband_mode = in_mode;
 	im_drawing_mode = 0;
 	immediate_drawing_window->mode = DRAWING_MODE_NONE;
@@ -51223,7 +51620,8 @@ void	MyWin::RubberbandMode(int in_mode)
 
 void	rubberband_popup_cb(Fl_Widget *w, void *v)
 {
-int	loop;
+void	immediate_quick(ImmediateDrawingWindow *idw, char *command);
+int		loop;
 
 	MyWin *win = (MyWin *)v;
 	if(win != NULL)
@@ -51407,9 +51805,23 @@ int	loop;
 					win->rubberband_w = -1;
 					win->rubberband_h = -1;
 				}
+				else if(strcmp(str, "@C3Drawing Mode") == 0)
+				{
+					win->RubberbandMode(IM_DRAWING_MODE);
+					immediate_drawing_button_cb(NULL, win);
+				}
 				else if(strcmp(str, "@C3Layout Mode") == 0)
 				{
 					win->RubberbandMode(GUIDELINE_MODE);
+				}
+				else if(strcmp(str, "@C3Set Interest Mode") == 0)
+				{
+					win->RubberbandMode(INTEREST_MODE);
+				}
+				else if(strcmp(str, "@C3Dynamic Coloring") == 0)
+				{
+					win->RubberbandMode(DYNAMIC_COLORING_MODE);
+					dynamic_coloring(win);
 				}
 				else if(strcmp(str, "Horizontal") == 0)
 				{
@@ -51494,6 +51906,18 @@ int	loop;
 						}
 					}
 					win->guideline_cnt = 0;
+				}
+				else if(strcmp(str, "Clear Interest") == 0)
+				{
+					win->interest_cnt = 0;
+				}
+				else if(strcmp(str, "Save Interest") == 0)
+				{
+					win->SaveInterest();
+				}
+				else if(strcmp(str, "Load Interest") == 0)
+				{
+					win->LoadInterest();
 				}
 				else if(strcmp(str, "Move") == 0)
 				{
@@ -51613,6 +52037,23 @@ int	loop;
 							}
 						}
 					}
+				}
+				else if((strcmp(str, "IM Text") == 0)
+				|| (strcmp(str, "IM Line") == 0)
+				|| (strcmp(str, "IM Loop") == 0)
+				|| (strcmp(str, "IM Rectangle") == 0)
+				|| (strcmp(str, "IM Ellipse") == 0)
+				|| (strcmp(str, "IM Image") == 0)
+				|| (strcmp(str, "IM Polygon") == 0)
+				|| (strcmp(str, "IM Freehand") == 0)
+				|| (strcmp(str, "IM Pixelate/Blur") == 0)
+				|| (strcmp(str, "IM Delete") == 0)
+				|| (strcmp(str, "IM Delete All") == 0)
+				|| (strcmp(str, "IM Hide") == 0)
+				|| (strcmp(str, "IM Hide All") == 0)
+				|| (strcmp(str, "IM Show All") == 0))
+				{
+					immediate_quick(win->immediate_drawing_window, str);
 				}
 				else if(strcmp(str, "Remove All") == 0)
 				{
@@ -51791,6 +52232,7 @@ int	loop;
 							popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 60);
 							popup->browser->callback(rubberband_popup_cb, this);
 							popup->browser->clear();
+							if(guideline_mode == VERTICAL_GUIDELINE)
 							popup->browser->add("Dynamic Copy");
 							popup->browser->add("Static Copy");
 							popup->browser->add("Copy to Clipboard");
@@ -51820,9 +52262,16 @@ int	loop;
 							{
 								popup->browser->add("Clear Collection");
 							}
+							if(cam->type == CAMERA_TYPE_SPLIT)
+							{
+								popup->browser->add("Blank");
+							}
 							popup->browser->add("@C3Scroll Mode");
-							popup->browser->add("@C3Reposition Mode");
+							popup->browser->add("@C3Drawing Mode");
 							popup->browser->add("@C3Layout Mode");
+							popup->browser->add("@C3Set Interest Mode");
+							popup->browser->add("@C3Dynamic Coloring");
+							popup->browser->add("@C3Reposition Mode");
 							popup->set_non_modal();
 							popup->Fit();
 							popup->show();
@@ -51883,9 +52332,16 @@ int	loop;
 							}
 							popup->browser->add("Load Image");
 							popup->browser->add("Select All");
+							if(cam->type == CAMERA_TYPE_SPLIT)
+							{
+								popup->browser->add("Blank");
+							}
 							popup->browser->add("@C3Scroll Mode");
-							popup->browser->add("@C3Reposition Mode");
+							popup->browser->add("@C3Drawing Mode");
 							popup->browser->add("@C3Layout Mode");
+							popup->browser->add("@C3Set Interest Mode");
+							popup->browser->add("@C3Dynamic Coloring");
+							popup->browser->add("@C3Reposition Mode");
 							popup->set_non_modal();
 							popup->Fit();
 							popup->show();
@@ -51910,13 +52366,96 @@ int	loop;
 						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
 						popup->browser->callback(rubberband_popup_cb, this);
 						popup->browser->clear();
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Layout Mode");
-						popup->browser->add("@C3Scroll Mode");
 						if(cam->type == CAMERA_TYPE_SPLIT)
 						{
 							popup->browser->add("Blank");
 						}
+						popup->browser->add("@C3Scroll Mode");
+						popup->browser->add("@C3Drawing Mode");
+						popup->browser->add("@C3Rubberband Mode");
+						popup->browser->add("@C3Layout Mode");
+						popup->browser->add("@C3Set Interest Mode");
+						popup->browser->add("@C3Dynamic Coloring");
+						popup->set_non_modal();
+						popup->Fit();
+						popup->show();
+						flag = 1;
+					}
+				}
+			}
+			else if(rubberband_mode == IM_DRAWING_MODE)
+			{
+				if(Fl::event_button() == FL_RIGHT_MOUSE)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					if((xx > cam->image_sx) && (yy > cam->image_sy)
+					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
+					{
+						if(popup != NULL)
+						{
+							Fl::delete_widget(popup);
+						}
+						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+						popup->browser->callback(rubberband_popup_cb, this);
+						popup->browser->clear();
+						popup->browser->add("IM Text");
+						popup->browser->add("IM Line");
+						popup->browser->add("IM Loop");
+						popup->browser->add("IM Rectangle");
+						popup->browser->add("IM Ellipse");
+						popup->browser->add("IM Image");
+						popup->browser->add("IM Polygon");
+						popup->browser->add("IM Freehand");
+						popup->browser->add("IM Pixelate/Blur");
+						popup->browser->add("IM Delete");
+						popup->browser->add("IM Delete All");
+						popup->browser->add("IM Hide");
+						popup->browser->add("IM Hide All");
+						popup->browser->add("IM Show All");
+						if(cam->type == CAMERA_TYPE_SPLIT)
+						{
+							popup->browser->add("Blank");
+						}
+						popup->browser->add("@C3Scroll Mode");
+						popup->browser->add("@C3Rubberband Mode");
+						popup->browser->add("@C3Layout Mode");
+						popup->browser->add("@C3Set Interest Mode");
+						popup->browser->add("@C3Dynamic Coloring");
+						popup->browser->add("@C3Reposition Mode");
+						popup->set_non_modal();
+						popup->Fit();
+						popup->show();
+						flag = 1;
+					}
+				}
+			}
+			else if(rubberband_mode == DYNAMIC_COLORING_MODE)
+			{
+				if(Fl::event_button() == FL_RIGHT_MOUSE)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					if((xx > cam->image_sx) && (yy > cam->image_sy)
+					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
+					{
+						if(popup != NULL)
+						{
+							Fl::delete_widget(popup);
+						}
+						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+						popup->browser->callback(rubberband_popup_cb, this);
+						popup->browser->clear();
+						if(cam->type == CAMERA_TYPE_SPLIT)
+						{
+							popup->browser->add("Blank");
+						}
+						popup->browser->add("@C3Scroll Mode");
+						popup->browser->add("@C3Drawing Mode");
+						popup->browser->add("@C3Rubberband Mode");
+						popup->browser->add("@C3Layout Mode");
+						popup->browser->add("@C3Set Interest Mode");
+						popup->browser->add("@C3Reposition Mode");
 						popup->set_non_modal();
 						popup->Fit();
 						popup->show();
@@ -51984,13 +52523,55 @@ int	loop;
 							popup->browser->add("Arrange Vertically");
 							popup->browser->add("Arrange Horizontally");
 						}
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Reposition Mode");
-						popup->browser->add("@C3Scroll Mode");
 						if(cam->type == CAMERA_TYPE_SPLIT)
 						{
 							popup->browser->add("Blank");
 						}
+						popup->browser->add("@C3Scroll Mode");
+						popup->browser->add("@C3Drawing Mode");
+						popup->browser->add("@C3Rubberband Mode");
+						popup->browser->add("@C3Set Interest Mode");
+						popup->browser->add("@C3Dynamic Coloring");
+						popup->browser->add("@C3Reposition Mode");
+						popup->set_non_modal();
+						popup->Fit();
+						popup->show();
+						flag = 1;
+					}
+				}
+			}
+			else if(rubberband_mode == INTEREST_MODE)
+			{
+				if(Fl::event_button() == FL_RIGHT_MOUSE)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					if((xx > cam->image_sx) && (yy > cam->image_sy)
+					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
+					{
+						if(popup != NULL)
+						{
+							Fl::delete_widget(popup);
+						}
+						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+						popup->browser->callback(rubberband_popup_cb, this);
+						popup->browser->clear();
+						if(interest_cnt > 0)
+						{
+							popup->browser->add("Clear Interest");
+							popup->browser->add("Save Interest");
+						}
+						if(cam->type == CAMERA_TYPE_SPLIT)
+						{
+							popup->browser->add("Blank");
+						}
+						popup->browser->add("Load Interest");
+						popup->browser->add("@C3Scroll Mode");
+						popup->browser->add("@C3Drawing Mode");
+						popup->browser->add("@C3Rubberband Mode");
+						popup->browser->add("@C3Layout Mode");
+						popup->browser->add("@C3Dynamic Coloring");
+						popup->browser->add("@C3Reposition Mode");
 						popup->set_non_modal();
 						popup->Fit();
 						popup->show();
@@ -52014,9 +52595,6 @@ int	loop;
 						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
 						popup->browser->callback(rubberband_popup_cb, this);
 						popup->browser->clear();
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Layout Mode");
-						popup->browser->add("@C3Reposition Mode");
 						if(ptz_mode != 0)
 						{
 							if(lock_ptz_mouse_move == 0)
@@ -52054,6 +52632,12 @@ int	loop;
 						{
 							popup->browser->add("Blank");
 						}
+						popup->browser->add("@C3Drawing Mode");
+						popup->browser->add("@C3Rubberband Mode");
+						popup->browser->add("@C3Layout Mode");
+						popup->browser->add("@C3Set Interest Mode");
+						popup->browser->add("@C3Dynamic Coloring");
+						popup->browser->add("@C3Reposition Mode");
 						popup->set_non_modal();
 						popup->Fit();
 						popup->show();
@@ -52347,7 +52931,7 @@ int	loop;
 			}
 			else
 			{
-				pw->resize(pw->x(), h() - 300, pw->w(), pw->h());
+				pw->resize(pw->x(), h() - 330, pw->w(), pw->h());
 			}
 		}
 	}
@@ -52631,9 +53215,12 @@ int	MyWin::OnPush(int event, Camera *cam)
 						{
 							flag = HandleMenuPopup(last_push_x, last_push_y);
 						}
-						if((mark_interest == 1) && (!button_group->visible()))
+						if(rubberband_mode == INTEREST_MODE)
 						{
-							flag = DoMarkInterest();
+							if(Fl::event_button() == FL_LEFT_MOUSE)
+							{
+								flag = DoMarkInterest();
+							}
 						}
 						else if(cam->type == CAMERA_TYPE_AV)
 						{
@@ -52666,7 +53253,7 @@ int	MyWin::OnPush(int event, Camera *cam)
 							initial_video_out_x = -1000000;
 							initial_video_out_y = -1000000;
 						}
-						else if(selecting_colors == 1)
+						else if(rubberband_mode == DYNAMIC_COLORING_MODE)
 						{
 							flag = PushToSelectColors(cam);
 						}
@@ -52726,7 +53313,7 @@ int	MyWin::OnRelease(int event, Camera *cam)
 					flag = MyWin::HandleReleaseForImmediate(cam);
 				}
 			}
-			else if(selecting_colors != 1)
+			else if(rubberband_mode != DYNAMIC_COLORING_MODE)
 			{
 				if(cam->type == CAMERA_TYPE_AV)
 				{
@@ -55347,11 +55934,14 @@ int			outer;
 								{
 									cam->HighlightImageWindows();
 								}
-								if(grid_size > 1)
+								if((rubberband_mode == IM_DRAWING_MODE) || (moving_element == 1))
 								{
-									if((moving_element == 1) || (hide_grid == 0))
+									if(grid_size > 1)
 									{
-										cam->DrawImageWindowGrid(grid_size);
+										if(hide_grid == 0)
+										{
+											cam->DrawImageWindowGrid(grid_size);
+										}
 									}
 								}
 							}
@@ -55394,7 +55984,7 @@ int			outer;
 								}
 							}
 						}
-						if(mark_interest == 1)
+						if(rubberband_mode == INTEREST_MODE)
 						{
 							if(split == 0)
 							{
@@ -55405,7 +55995,7 @@ int			outer;
 						{
 							if(zoom_boxing == 0)
 							{
-								if(audio_source_cnt > 0)
+								if(audio_thumbnail_cnt > 0)
 								{
 									if(pulse_mixer != NULL)
 									{
@@ -55480,7 +56070,7 @@ int			outer;
 				fl_color(YELLOW);
 				fl_rect(sx, sy, 100, 100);
 			}
-			if(mark_interest == 1)
+			if(rubberband_mode == INTEREST_MODE)
 			{
 				MarkInterest();
 			}
@@ -55732,6 +56322,9 @@ int			outer;
 			if(rubberband_mode == RUBBERBAND_MODE) mode2 = "Rubberband";
 			else if(rubberband_mode == REPOSITION_MODE) mode2 = "Reposition";
 			else if(rubberband_mode == GUIDELINE_MODE) mode2 = "Layout";
+			else if(rubberband_mode == INTEREST_MODE) mode2 = "Set Interest";
+			else if(rubberband_mode == IM_DRAWING_MODE) mode2 = "Drawing";
+			else if(rubberband_mode == DYNAMIC_COLORING_MODE) mode2 = "Dynamic Coloring";
 			sprintf(buf, "Editing Layer: %d Mode: %s (%s)\n", cam->edit_layer, mode1, mode2);
 			fl_color(WHITE);
 			fl_font(FL_HELVETICA, 12);
@@ -57294,7 +57887,7 @@ void	MyWin::ToggleRecord(int camera_index)
 	}
 }
 
-void	MyWin::AltDisplay(int camera_index)
+void	MyWin::AltDisplayCamera(int camera_index)
 {
 	if((camera_index > -1) && (camera_index < source_cnt))
 	{
@@ -57305,6 +57898,25 @@ void	MyWin::AltDisplay(int camera_index)
 		else
 		{
 			alt_displayed_source = -1;
+		}
+	}
+}
+
+void	MyWin::AltDisplayCamera(Camera *cam_in)
+{
+	if(cam_in != NULL)
+	{
+		int camera_index = cam_in->id;
+		if((camera_index > -1) && (camera_index < source_cnt))
+		{
+			if(camera_index != displayed_source)
+			{
+				alt_displayed_source = camera_index;
+			}
+			else
+			{
+				alt_displayed_source = -1;
+			}
 		}
 	}
 }
@@ -57459,6 +58071,7 @@ int	loop;
 			else
 			{
 				int success = json_parse_int(json, "interest cnt", interest_cnt);
+				if(interest_cnt > 99) interest_cnt = 99;
 				cJSON *item = NULL;
 				cJSON *items = json_parse_array(json, "interest");
 				if(items != NULL)
@@ -57467,16 +58080,19 @@ int	loop;
 					int a_cnt = 0;
 					cJSON_ArrayForEach(item, items)
 					{
-						if((cnt % 2) == 0)
+						if(a_cnt < 100)
 						{
-							interest_x[a_cnt] = (uchar)item->valueint;
+							if((cnt % 2) == 0)
+							{
+								interest_x[a_cnt] = (uchar)item->valueint;
+							}
+							else
+							{
+								interest_y[a_cnt] = (uchar)item->valueint;
+								a_cnt++;
+							}
+							cnt++;
 						}
-						else
-						{
-							interest_y[a_cnt] = (uchar)item->valueint;
-							a_cnt++;
-						}
-						cnt++;
 					}
 				}
 				cJSON_Delete(json);
@@ -57519,10 +58135,6 @@ void	MyWin::HideButtons()
 		review_button->hide();
 		reset_button->hide();
 		review_muxed_button->hide();
-		set_interest_button->hide();
-		clear_interest_button->hide();
-		save_interest_button->hide();
-		load_interest_button->hide();
 		zoom_box_button->hide();
 		split_button->hide();
 		open_standalone_button->hide();
@@ -57559,8 +58171,6 @@ void	MyWin::HideButtons()
 		}
 		python_filter_button->hide();
 		python_output_filter_button->hide();
-		immediate_drawing_button->hide();
-		dynamic_coloring_button->hide();
 		save_camera_button->hide();
 		load_camera_button->hide();
 		codecs_button->hide();
@@ -57618,113 +58228,23 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 
 	if(record_button != NULL)
 	{
-		if(mark_interest == 0)
+		Camera *cam = NULL;
+		cam = DisplayedCamera();
+		if(cam != NULL)
 		{
-			Camera *cam = NULL;
-			cam = DisplayedCamera();
-			if(cam != NULL)
+			load_setup_button->show();
+			video_settings_button->show();
+			if(global_my_format_cnt > 0)
 			{
-				load_setup_button->show();
-				video_settings_button->show();
-				if(global_my_format_cnt > 0)
+				codecs_button->show();
+			}
+			if((power_all == 1) && (cam->power == 1))
+			{
+				camera_settings_button->show();
+				if(cam->triggers_requested == 1)
 				{
-					codecs_button->show();
-				}
-				if((power_all == 1) && (cam->power == 1))
-				{
-					camera_settings_button->show();
-					if(cam->triggers_requested == 1)
-					{
-						record_button->copy_label("Stop");
-						record_all_button->copy_label("All Stop");
-						if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
-						{
-							record_all_button->show();
-						}
-						else
-						{
-							record_all_button->hide();
-						}
-						encode_speed_window->show();
-						reset_camera_button->hide();
-						reset_cameras_button->hide();
-						load_setup_button->hide();
-						video_settings_button->hide();
-						if(global_my_format_cnt > 0)
-						{
-							codecs_button->hide();
-						}
-						if(audio == 1)
-						{
-							audio_mute_button->show();
-							monitor_audio_button->show();
-							audio_library_button->show();
-							audio_library_list_button->show();
-							play_audio_file_button->show();
-							audio_filter_plugins_button->show();
-							if(active_audio_playback == 1)
-							{
-								stop_playing_audio_button->show();
-								pause_playing_audio_button->show();
-							}
-							audio_settings_button->show();
-							audio_bind_to_camera_button->show();
-							audio_save_button->show();
-							audio_load_button->show();
-						}
-					}
-					else
-					{
-						record_button->copy_label("Record");
-						record_all_button->copy_label("All Record");
-						if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
-						{
-							record_all_button->show();
-						}
-						else
-						{
-							record_all_button->hide();
-						}
-						encode_speed_window->hide();
-						reset_camera_button->show();
-						reset_cameras_button->show();
-						load_setup_button->show();
-						video_settings_button->show();
-						if(global_my_format_cnt > 0)
-						{
-							codecs_button->show();
-						}
-						audio_mute_button->hide();
-						audio_settings_button->hide();
-						audio_bind_to_camera_button->hide();
-						audio_save_button->hide();
-						audio_load_button->hide();
-						monitor_audio_button->hide();
-						audio_library_button->hide();
-						audio_library_list_button->hide();
-						play_audio_file_button->hide();
-						audio_filter_plugins_button->hide();
-						stop_playing_audio_button->hide();
-						pause_playing_audio_button->hide();
-					}
-				}
-				if(audio_filter_plugins_button != NULL)
-				{
-					if(audio == 1)
-					{
-						audio_filter_plugins_button->show();
-					}
-				}
-				if(use_old == 0)
-				{
-					if((power_all == 1) && (cam->power == 1))
-					{
-						record_button->show();
-						if(cam->record_trigger != 0)
-						{
-							override_button->show();
-						}
-					}
+					record_button->copy_label("Stop");
+					record_all_button->copy_label("All Stop");
 					if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
 					{
 						record_all_button->show();
@@ -57733,435 +58253,494 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 					{
 						record_all_button->hide();
 					}
-				}
-				save_setup_button->show();
-				if(encoding == 0)
-				{
-					if(muxing == 0)
+					encode_speed_window->show();
+					reset_camera_button->hide();
+					reset_cameras_button->hide();
+					load_setup_button->hide();
+					video_settings_button->hide();
+					if(global_my_format_cnt > 0)
 					{
-						if(recorded_frames > 0)
-						{
-							encode_button->show();
-						}
+						codecs_button->hide();
 					}
-				}
-				if(recorded_frames > 0)
-				{
-					dump_button->show();
-				}
-				else
-				{
-					dump_button->hide();
-				}
-				show_debug_button->show();
-				test_recognition_button->show();
-				if(review == NULL)
-				{
-					review_button->show();
-				}
-				else
-				{
-					review_button->hide();
-				}
-				if(last_muxed_list[0] != NULL)
-				{
-					if(recording == 0)
-					{
-						review_muxed_button->show();
-					}
-				}
-				if(interest_cnt > 0)
-				{
-					clear_interest_button->show();
-					save_interest_button->show();
-				}
-				load_interest_button->show();
-				if(cam->zoom_box_display == 1)
-				{
-					zoom_box_button->copy_label("Cease Box Zoom");
-				}
-				else
-				{
-					zoom_box_button->copy_label("Box Zoom");
-				}
-				zoom_box_button->show();
-				if(source_cnt > 1)
-				{
-					split_button->show();
-					open_standalone_button->show();
-				}
-				new_source_button->show();
-				if(cam != NULL)
-				{
-					edit_source_button->show();
-				}
-				else
-				{
-					edit_source_button->hide();
-				}
-				if(recording == 0)
-				{
-					edit_output_button->show();
-					select_output_button->show();
-				}
-				else
-				{
-					edit_output_button->hide();
-					select_output_button->hide();
-				}
-				if(showing_alias_window == 0)
-				{
-					alias_button->show();
-				}
-				if((power_all == 1) && (cam->power == 1))
-				{
-					flip_horizontal_button->show();
-					flip_vertical_button->show();
-					rotate_clockwise_button->show();
-					if(cam->clockwise_rotation != 0)
-					{
-						clear_rotate_button->show();
-					}
-					else
-					{
-						clear_rotate_button->hide();
-					}
-					snapshot_settings_button->show();
-					transitions_button->show();
-					create_python_button->show();
-					if(python_button_cnt > 0)
-					{
-						python_buttons->show();
-					}
-					else
-					{
-						python_buttons->hide();
-					}
-					if((cam->width != cam->display_width) || (cam->height != cam->display_height))
-					{
-						native_resolution_button->show();
-					}
-				}
-				filter_built_in_button->show();
-				python_filter_button->show();
-				python_output_filter_button->show();
-				if(cam->python_filter_function != NULL)
-				{
-					python_filter_button->copy_label("Stop Python Filter");
-					python_filter_button->callback(cancel_python_filter_cb, this);
-				}
-				else
-				{
-					python_filter_button->copy_label("Python Filter");
-					python_filter_button->callback(camera_python_filter_button_cb, this);
-				}
-				if(python_filter_function != NULL)
-				{
-					python_output_filter_button->copy_label("Stop Python Filter");
-					python_output_filter_button->callback(cancel_python_filter_cb, this);
-				}
-				else
-				{
-					python_output_filter_button->copy_label("Python Filter Output");
-					python_output_filter_button->callback(output_python_filter_button_cb, this);
-				}
-				if(global_potential_filter_cnt > 0)
-				{
-					filter_plugins_button->show();
-				}
-				if(external_pgm_button != NULL)
-				{
-					external_pgm_button->show();
-				}
-				if(fltk_plugin_button != NULL)
-				{
-					fltk_plugin_button->show();
-				}
-				if((power_all == 1) && (cam->power == 1))
-				{
-					immediate_drawing_button->show();
-					dynamic_coloring_button->show();
-				}
-				if(ptz_mode == 1)
-				{
-					ptz_lock_window_button->show();
-					new_ptz_window_button->show();
-				}
-				keyboard_settings_button->show();
-				gui_settings_button->show();
-				save_camera_button->show();
-				load_camera_button->show();
-				timestamp_button->show();
-				if((power_all == 1) && (cam->power == 1))
-				{
-					snapshot_button->show();
-				}
-				if(jpeg_streaming != NULL)
-				{
-					jpeg_streaming_button->show();
-				}
-				reset_button->show();
-				resize_capture_button->show();
-				show_motion_debug_button->show();
-				quit_button->show();
-				if(cam->power == 1)
-				{
-					power_button->copy_label("Turn Off");
-				}
-				else
-				{
-					power_button->copy_label("Turn On");
-				}
-				power_button->show();
-				if(power_all == 1)
-				{
-					power_all_button->copy_label("Turn All Off");
-				}
-				else
-				{
-					power_all_button->copy_label("Turn All On");
-				}
-				power_all_button->show();
-				if(cycle_cameras > 0.0)
-				{
-					cycle_cameras_button->copy_label("Stop Cycling Cameras");
-				}
-				else
-				{
-					cycle_cameras_button->copy_label("Cycle Cameras");
-				}
-				cycle_cameras_button->show();
-				if((power_all == 1) && (cam->power == 1))
-				{
-					if(cam->mute_video == 1)
-					{
-						mute_video_button->copy_label("Unmute Video");
-					}
-					else
-					{
-						mute_video_button->copy_label("Mute Video");
-					}
-					mute_video_button->show();
-					if(cam->freeze_video == 1)
-					{
-						freeze_button->copy_label("Defrost");
-					}
-					else
-					{
-						freeze_button->copy_label("Freeze");
-					}
-					freeze_button->show();
-				}
-				save_setup_button->show();
-				if((power_all == 1) && (cam->power == 1))
-				{
-					trigger_button->show();
-				}
-				if(audio == 1)
-				{
-					audio_mute_button->show();
-					audio_settings_button->show();
-					audio_bind_to_camera_button->show();
-					audio_save_button->show();
-					audio_load_button->show();
-					monitor_audio_button->show();
-					audio_library_button->show();
-					audio_library_list_button->show();
-					play_audio_file_button->show();
-					audio_filter_plugins_button->show();
-					if(active_audio_playback == 1)
-					{
-						stop_playing_audio_button->show();
-						pause_playing_audio_button->show();
-					}
-				}
-				if(init_detect == 1)
-				{
-					if(!net.empty()) 
-					{
-						toggle_objects_button->show();
-					}
-				}
-				set_interest_button->show();
-				if(audio_filter_plugins_button != NULL)
-				{
 					if(audio == 1)
 					{
+						audio_mute_button->show();
+						monitor_audio_button->show();
+						audio_library_button->show();
+						audio_library_list_button->show();
+						play_audio_file_button->show();
 						audio_filter_plugins_button->show();
+						if(active_audio_playback == 1)
+						{
+							stop_playing_audio_button->show();
+							pause_playing_audio_button->show();
+						}
+						audio_settings_button->show();
+						audio_bind_to_camera_button->show();
+						audio_save_button->show();
+						audio_load_button->show();
 					}
 				}
-				filter_built_in_button->show();
-				python_filter_button->show();
-				python_output_filter_button->show();
-				monitor_video_button->show();
-				toggle_camera_effects_button->show();
+				else
+				{
+					record_button->copy_label("Record");
+					record_all_button->copy_label("All Record");
+					if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+					{
+						record_all_button->show();
+					}
+					else
+					{
+						record_all_button->hide();
+					}
+					encode_speed_window->hide();
+					reset_camera_button->show();
+					reset_cameras_button->show();
+					load_setup_button->show();
+					video_settings_button->show();
+					if(global_my_format_cnt > 0)
+					{
+						codecs_button->show();
+					}
+					audio_mute_button->hide();
+					audio_settings_button->hide();
+					audio_bind_to_camera_button->hide();
+					audio_save_button->hide();
+					audio_load_button->hide();
+					monitor_audio_button->hide();
+					audio_library_button->hide();
+					audio_library_list_button->hide();
+					play_audio_file_button->hide();
+					audio_filter_plugins_button->hide();
+					stop_playing_audio_button->hide();
+					pause_playing_audio_button->hide();
+				}
+			}
+			if(audio_filter_plugins_button != NULL)
+			{
+				if(audio == 1)
+				{
+					audio_filter_plugins_button->show();
+				}
+			}
+			if(use_old == 0)
+			{
+				if((power_all == 1) && (cam->power == 1))
+				{
+					record_button->show();
+					if(cam->record_trigger != 0)
+					{
+						override_button->show();
+					}
+				}
+				if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+				{
+					record_all_button->show();
+				}
+				else
+				{
+					record_all_button->hide();
+				}
+			}
+			save_setup_button->show();
+			if(encoding == 0)
+			{
+				if(muxing == 0)
+				{
+					if(recorded_frames > 0)
+					{
+						encode_button->show();
+					}
+				}
+			}
+			if(recorded_frames > 0)
+			{
+				dump_button->show();
 			}
 			else
 			{
-				if(record_button != NULL)
-					record_button->hide();
-				if(record_all_button != NULL)
-					record_all_button->hide();
-				if(audio_mute_button != NULL)
-					audio_mute_button->hide();
-				if(audio_settings_button != NULL)
-					audio_settings_button->hide();
-				if(audio_bind_to_camera_button != NULL)
-					audio_bind_to_camera_button->hide();
-				if(audio_save_button != NULL)
-					audio_save_button->hide();
-				if(audio_load_button != NULL)
-					audio_load_button->hide();
-				if(monitor_video_button != NULL)
-					monitor_video_button->hide();
-				if(monitor_audio_button != NULL)
-					monitor_audio_button->hide();
-				if(audio_library_button != NULL)
-					audio_library_button->hide();
-				if(audio_library_list_button != NULL)
-					audio_library_list_button->hide();
-				if(play_audio_file_button != NULL)
-					play_audio_file_button->hide();
-				if(stop_playing_audio_button != NULL)
-					stop_playing_audio_button->hide();
-				if(pause_playing_audio_button != NULL)
-					pause_playing_audio_button->hide();
-				if(audio_filter_plugins_button != NULL)
-					audio_filter_plugins_button->hide();
-				if(override_button != NULL)
-					override_button->hide();
-				if(encode_button != NULL)
-					encode_button->hide();
-				if(show_debug_button != NULL)
-					show_debug_button->hide();
-				if(test_recognition_button != NULL)
-					test_recognition_button->hide();
-				if(review_button != NULL)
-					review_button->hide();
-				if(reset_button != NULL)
-					reset_button->hide();
-				if(review_muxed_button != NULL)
-					review_muxed_button->hide();
-				if(clear_interest_button != NULL)
-					clear_interest_button->hide();
-				if(save_interest_button != NULL)
-					save_interest_button->hide();
-				if(load_interest_button != NULL)
-					load_interest_button->hide();
-				if(zoom_box_button != NULL)
-					zoom_box_button->hide();
-				if(split_button != NULL)
-					split_button->hide();
-				if(open_standalone_button != NULL)
-					open_standalone_button->hide();
-				if(new_source_button != NULL)
-					new_source_button->show();
-				if(edit_source_button != NULL)
-					edit_source_button->hide();
-				if(edit_output_button != NULL)
-					edit_output_button->hide();
-				if(select_output_button != NULL)
-					select_output_button->hide();
-				if(alias_button != NULL)
-					alias_button->hide();
-				if(reset_camera_button != NULL)
-					reset_camera_button->hide();
-				if(flip_horizontal_button != NULL)
-					flip_horizontal_button->hide();
-				if(flip_vertical_button != NULL)
-					flip_vertical_button->hide();
-				if(rotate_clockwise_button != NULL)
-					rotate_clockwise_button->hide();
-				if(clear_rotate_button != NULL)
-					clear_rotate_button->hide();
-				if(ptz_lock_window_button != NULL)
-					ptz_lock_window_button->hide();
-				if(new_ptz_window_button != NULL)
-					new_ptz_window_button->hide();
-				if(video_settings_button != NULL)
-					video_settings_button->show();
-				if(camera_settings_button != NULL)
-					camera_settings_button->hide();
-				if(snapshot_settings_button != NULL)
-					snapshot_settings_button->hide();
-				if(native_resolution_button != NULL)
-					native_resolution_button->hide();
-				if(transitions_button != NULL)
-					transitions_button->hide();
-				if(create_python_button != NULL)
-					create_python_button->hide();
-				if(python_buttons != NULL)
-					python_buttons->hide();
-				if(filter_plugins_button != NULL)
-					filter_plugins_button->hide();
-				if(filter_built_in_button != NULL)
-					filter_built_in_button->hide();
-				if(python_filter_button != NULL)
-					python_filter_button->hide();
-				if(python_output_filter_button != NULL)
-					python_output_filter_button->hide();
-				if(external_pgm_button != NULL)
-					external_pgm_button->hide();
-				if(fltk_plugin_button != NULL)
-					fltk_plugin_button->hide();
-				if(immediate_drawing_button != NULL)
-					immediate_drawing_button->hide();
-				if(dynamic_coloring_button != NULL)
-					dynamic_coloring_button->hide();
-				if(save_camera_button != NULL)
-					save_camera_button->hide();
-				if(load_camera_button != NULL)
-					load_camera_button->hide();
-				if(codecs_button != NULL)
-					codecs_button->show();
-				if(timestamp_button != NULL)
-					timestamp_button->hide();
-				if(snapshot_button != NULL)
-					snapshot_button->hide();
-				if(jpeg_streaming_button != NULL)
-					jpeg_streaming_button->hide();
-				if(reset_button != NULL)
-					reset_button->hide();
-				if(reset_cameras_button != NULL)
-					reset_cameras_button->hide();
-				if(resize_capture_button != NULL)
-					resize_capture_button->hide();
-				if(show_motion_debug_button != NULL)
-					show_motion_debug_button->hide();
-				if(quit_button != NULL)
-					quit_button->show();
-				if(power_button != NULL)
-					power_button->hide();
-				if(power_all_button != NULL)
-					power_all_button->hide();
-				if(cycle_cameras_button != NULL)
-					cycle_cameras_button->hide();
-				if(mute_video_button != NULL)
-					mute_video_button->hide();
-				if(freeze_button != NULL)
-					freeze_button->hide();
-				if(hide_video_button != NULL)
-					hide_video_button->hide();
-				if(load_setup_button != NULL)
-					load_setup_button->show();
-				if(save_setup_button != NULL)
-					save_setup_button->hide();
-				if(trigger_button != NULL)
-					trigger_button->hide();
-				if(dump_button != NULL)
-					dump_button->hide();
-				if(toggle_objects_button != NULL)
-					toggle_objects_button->hide();
-				if(set_interest_button != NULL)
-					set_interest_button->hide();
-				if(toggle_camera_effects_button != NULL)
-					toggle_camera_effects_button->hide();
+				dump_button->hide();
 			}
+			show_debug_button->show();
+			test_recognition_button->show();
+			if(review == NULL)
+			{
+				review_button->show();
+			}
+			else
+			{
+				review_button->hide();
+			}
+			if(recording == 0)
+			{
+				review_muxed_button->show();
+			}
+			else
+			{
+				review_muxed_button->hide();
+			}
+			if(cam->zoom_box_display == 1)
+			{
+				zoom_box_button->copy_label("Cease Box Zoom");
+			}
+			else
+			{
+				zoom_box_button->copy_label("Box Zoom");
+			}
+			zoom_box_button->show();
+			if(source_cnt > 1)
+			{
+				split_button->show();
+				open_standalone_button->show();
+			}
+			new_source_button->show();
+			if(cam != NULL)
+			{
+				edit_source_button->show();
+			}
+			else
+			{
+				edit_source_button->hide();
+			}
+			if(recording == 0)
+			{
+				edit_output_button->show();
+				select_output_button->show();
+			}
+			else
+			{
+				edit_output_button->hide();
+				select_output_button->hide();
+			}
+			if(showing_alias_window == 0)
+			{
+				alias_button->show();
+			}
+			if((power_all == 1) && (cam->power == 1))
+			{
+				flip_horizontal_button->show();
+				flip_vertical_button->show();
+				rotate_clockwise_button->show();
+				if(cam->clockwise_rotation != 0)
+				{
+					clear_rotate_button->show();
+				}
+				else
+				{
+					clear_rotate_button->hide();
+				}
+				snapshot_settings_button->show();
+				transitions_button->show();
+				create_python_button->show();
+				if(python_button_cnt > 0)
+				{
+					python_buttons->show();
+				}
+				else
+				{
+					python_buttons->hide();
+				}
+				if((cam->width != cam->display_width) || (cam->height != cam->display_height))
+				{
+					native_resolution_button->show();
+				}
+			}
+			filter_built_in_button->show();
+			python_filter_button->show();
+			python_output_filter_button->show();
+			if(cam->python_filter_function != NULL)
+			{
+				python_filter_button->copy_label("Stop Python Filter");
+				python_filter_button->callback(cancel_python_filter_cb, this);
+			}
+			else
+			{
+				python_filter_button->copy_label("Python Filter");
+				python_filter_button->callback(camera_python_filter_button_cb, this);
+			}
+			if(python_filter_function != NULL)
+			{
+				python_output_filter_button->copy_label("Stop Python Filter");
+				python_output_filter_button->callback(cancel_python_filter_cb, this);
+			}
+			else
+			{
+				python_output_filter_button->copy_label("Python Filter Output");
+				python_output_filter_button->callback(output_python_filter_button_cb, this);
+			}
+			if(global_potential_filter_cnt > 0)
+			{
+				filter_plugins_button->show();
+			}
+			if(external_pgm_button != NULL)
+			{
+				external_pgm_button->show();
+			}
+			if(fltk_plugin_button != NULL)
+			{
+				fltk_plugin_button->show();
+			}
+			if(ptz_mode == 1)
+			{
+				ptz_lock_window_button->show();
+				new_ptz_window_button->show();
+			}
+			keyboard_settings_button->show();
+			gui_settings_button->show();
+			save_camera_button->show();
+			load_camera_button->show();
+			timestamp_button->show();
+			if((power_all == 1) && (cam->power == 1))
+			{
+				snapshot_button->show();
+			}
+			if(jpeg_streaming != NULL)
+			{
+				jpeg_streaming_button->show();
+			}
+			reset_button->show();
+			resize_capture_button->show();
+			show_motion_debug_button->show();
+			quit_button->show();
+			if(cam->power == 1)
+			{
+				power_button->copy_label("Turn Off");
+			}
+			else
+			{
+				power_button->copy_label("Turn On");
+			}
+			power_button->show();
+			if(power_all == 1)
+			{
+				power_all_button->copy_label("Turn All Off");
+			}
+			else
+			{
+				power_all_button->copy_label("Turn All On");
+			}
+			power_all_button->show();
+			if(cycle_cameras > 0.0)
+			{
+				cycle_cameras_button->copy_label("Stop Cycling Cameras");
+			}
+			else
+			{
+				cycle_cameras_button->copy_label("Cycle Cameras");
+			}
+			cycle_cameras_button->show();
+			if((power_all == 1) && (cam->power == 1))
+			{
+				if(cam->mute_video == 1)
+				{
+					mute_video_button->copy_label("Unmute Video");
+				}
+				else
+				{
+					mute_video_button->copy_label("Mute Video");
+				}
+				mute_video_button->show();
+				if(cam->freeze_video == 1)
+				{
+					freeze_button->copy_label("Defrost");
+				}
+				else
+				{
+					freeze_button->copy_label("Freeze");
+				}
+				freeze_button->show();
+			}
+			save_setup_button->show();
+			if((power_all == 1) && (cam->power == 1))
+			{
+				trigger_button->show();
+			}
+			if(audio == 1)
+			{
+				audio_mute_button->show();
+				audio_settings_button->show();
+				audio_bind_to_camera_button->show();
+				audio_save_button->show();
+				audio_load_button->show();
+				monitor_audio_button->show();
+				audio_library_button->show();
+				audio_library_list_button->show();
+				play_audio_file_button->show();
+				audio_filter_plugins_button->show();
+				if(active_audio_playback == 1)
+				{
+					stop_playing_audio_button->show();
+					pause_playing_audio_button->show();
+				}
+			}
+			if(init_detect == 1)
+			{
+				if(!net.empty()) 
+				{
+					toggle_objects_button->show();
+				}
+			}
+			if(audio_filter_plugins_button != NULL)
+			{
+				if(audio == 1)
+				{
+					audio_filter_plugins_button->show();
+				}
+			}
+			filter_built_in_button->show();
+			python_filter_button->show();
+			python_output_filter_button->show();
+			monitor_video_button->show();
+			toggle_camera_effects_button->show();
 		}
 		else
 		{
-			if(set_interest_button != NULL)
-				set_interest_button->show();
+			if(record_button != NULL)
+				record_button->hide();
+			if(record_all_button != NULL)
+				record_all_button->hide();
+			if(audio_mute_button != NULL)
+				audio_mute_button->hide();
+			if(audio_settings_button != NULL)
+				audio_settings_button->hide();
+			if(audio_bind_to_camera_button != NULL)
+				audio_bind_to_camera_button->hide();
+			if(audio_save_button != NULL)
+				audio_save_button->hide();
+			if(audio_load_button != NULL)
+				audio_load_button->hide();
+			if(monitor_video_button != NULL)
+				monitor_video_button->hide();
+			if(monitor_audio_button != NULL)
+				monitor_audio_button->hide();
+			if(audio_library_button != NULL)
+				audio_library_button->hide();
+			if(audio_library_list_button != NULL)
+				audio_library_list_button->hide();
+			if(play_audio_file_button != NULL)
+				play_audio_file_button->hide();
+			if(stop_playing_audio_button != NULL)
+				stop_playing_audio_button->hide();
+			if(pause_playing_audio_button != NULL)
+				pause_playing_audio_button->hide();
+			if(audio_filter_plugins_button != NULL)
+				audio_filter_plugins_button->hide();
+			if(override_button != NULL)
+				override_button->hide();
+			if(encode_button != NULL)
+				encode_button->hide();
+			if(show_debug_button != NULL)
+				show_debug_button->hide();
+			if(test_recognition_button != NULL)
+				test_recognition_button->hide();
+			if(review_button != NULL)
+				review_button->hide();
+			if(reset_button != NULL)
+				reset_button->hide();
+			if(review_muxed_button != NULL)
+				review_muxed_button->hide();
+			if(zoom_box_button != NULL)
+				zoom_box_button->hide();
+			if(split_button != NULL)
+				split_button->hide();
+			if(open_standalone_button != NULL)
+				open_standalone_button->hide();
+			if(new_source_button != NULL)
+				new_source_button->show();
+			if(edit_source_button != NULL)
+				edit_source_button->hide();
+			if(edit_output_button != NULL)
+				edit_output_button->hide();
+			if(select_output_button != NULL)
+				select_output_button->hide();
+			if(alias_button != NULL)
+				alias_button->hide();
+			if(reset_camera_button != NULL)
+				reset_camera_button->hide();
+			if(flip_horizontal_button != NULL)
+				flip_horizontal_button->hide();
+			if(flip_vertical_button != NULL)
+				flip_vertical_button->hide();
+			if(rotate_clockwise_button != NULL)
+				rotate_clockwise_button->hide();
+			if(clear_rotate_button != NULL)
+				clear_rotate_button->hide();
+			if(ptz_lock_window_button != NULL)
+				ptz_lock_window_button->hide();
+			if(new_ptz_window_button != NULL)
+				new_ptz_window_button->hide();
+			if(video_settings_button != NULL)
+				video_settings_button->show();
+			if(camera_settings_button != NULL)
+				camera_settings_button->hide();
+			if(snapshot_settings_button != NULL)
+				snapshot_settings_button->hide();
+			if(native_resolution_button != NULL)
+				native_resolution_button->hide();
+			if(transitions_button != NULL)
+				transitions_button->hide();
+			if(create_python_button != NULL)
+				create_python_button->hide();
+			if(python_buttons != NULL)
+				python_buttons->hide();
+			if(filter_plugins_button != NULL)
+				filter_plugins_button->hide();
+			if(filter_built_in_button != NULL)
+				filter_built_in_button->hide();
+			if(python_filter_button != NULL)
+				python_filter_button->hide();
+			if(python_output_filter_button != NULL)
+				python_output_filter_button->hide();
+			if(external_pgm_button != NULL)
+				external_pgm_button->hide();
+			if(fltk_plugin_button != NULL)
+				fltk_plugin_button->hide();
+			if(save_camera_button != NULL)
+				save_camera_button->hide();
+			if(load_camera_button != NULL)
+				load_camera_button->hide();
+			if(codecs_button != NULL)
+				codecs_button->show();
+			if(timestamp_button != NULL)
+				timestamp_button->hide();
+			if(snapshot_button != NULL)
+				snapshot_button->hide();
+			if(jpeg_streaming_button != NULL)
+				jpeg_streaming_button->hide();
+			if(reset_button != NULL)
+				reset_button->hide();
+			if(reset_cameras_button != NULL)
+				reset_cameras_button->hide();
+			if(resize_capture_button != NULL)
+				resize_capture_button->hide();
+			if(show_motion_debug_button != NULL)
+				show_motion_debug_button->hide();
+			if(quit_button != NULL)
+				quit_button->show();
+			if(power_button != NULL)
+				power_button->hide();
+			if(power_all_button != NULL)
+				power_all_button->hide();
+			if(cycle_cameras_button != NULL)
+				cycle_cameras_button->hide();
+			if(mute_video_button != NULL)
+				mute_video_button->hide();
+			if(freeze_button != NULL)
+				freeze_button->hide();
+			if(hide_video_button != NULL)
+				hide_video_button->hide();
+			if(load_setup_button != NULL)
+				load_setup_button->show();
+			if(save_setup_button != NULL)
+				save_setup_button->hide();
+			if(trigger_button != NULL)
+				trigger_button->hide();
+			if(dump_button != NULL)
+				dump_button->hide();
+			if(toggle_objects_button != NULL)
+				toggle_objects_button->hide();
+			if(toggle_camera_effects_button != NULL)
+				toggle_camera_effects_button->hide();
 		}
 		FilterCommandButtons();
 	}
@@ -58572,7 +59151,7 @@ int	loop;
 			}
 		}
 	}
-	audio_thumbnail_cnt = at_cnt;
+	audio_thumbnail_cnt += at_cnt;
 	if((nn > 0) || (muxing == 1))
 	{
 		RunPulse(MODE_RECORD);
@@ -59258,113 +59837,174 @@ void	immediate_quick_cb(Fl_Widget *w, void *v)
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_TEXT;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Line") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_LINE;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Rectangle") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_RECTANGLE;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Ellipse") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_ELLIPSE;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Image") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_IMAGE;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Polygon") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_POLYGON;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Loop") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_LOOP;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Freehand") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_FREEHAND;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Pixelate/Blur") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_PIXELATE;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Delete") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_DELETE;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Hide") == 0)
 			{
 				win->im_drawing_mode = 1;
 				idw->mode = DRAWING_MODE_HIDE;
 				idw->quick_mode = 1;
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Delete All") == 0)
 			{
 				immediate_drawing_mode_cb(idw->delete_all_im, idw);
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Hide All") == 0)
 			{
 				immediate_drawing_mode_cb(idw->hide_all, idw);
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Show All") == 0)
 			{
 				immediate_drawing_mode_cb(idw->show_all, idw);
-				win->old_rubberband_mode = win->rubberband_mode;
-				win->rubberband_mode = SCROLL_MODE;
 			}
 			else if(strcmp(str, "Done") == 0)
 			{
 				win->im_drawing_mode = 0;
 				idw->mode = DRAWING_MODE_NONE;
 				idw->quick_mode = 0;
-				win->rubberband_mode = win->old_rubberband_mode;
+			}
+		}
+	}
+}
+
+void	immediate_quick(ImmediateDrawingWindow *idw, char *command)
+{
+	if(idw != NULL)
+	{
+		MyWin *win = idw->my_window;
+		char *str = command;
+		if(str != NULL)
+		{
+			if(strcmp(str, "IM Text") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_TEXT;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Line") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_LINE;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Rectangle") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_RECTANGLE;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Ellipse") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_ELLIPSE;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Image") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_IMAGE;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Polygon") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_POLYGON;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Loop") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_LOOP;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Freehand") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_FREEHAND;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Pixelate/Blur") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_PIXELATE;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Delete") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_DELETE;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Hide") == 0)
+			{
+				win->im_drawing_mode = 1;
+				idw->mode = DRAWING_MODE_HIDE;
+				idw->quick_mode = 1;
+			}
+			else if(strcmp(str, "IM Delete All") == 0)
+			{
+				immediate_drawing_mode_cb(idw->delete_all_im, idw);
+			}
+			else if(strcmp(str, "IM Hide All") == 0)
+			{
+				immediate_drawing_mode_cb(idw->hide_all, idw);
+			}
+			else if(strcmp(str, "IM Show All") == 0)
+			{
+				immediate_drawing_mode_cb(idw->show_all, idw);
 			}
 		}
 	}
@@ -59627,18 +60267,6 @@ int	loop;
 	fltk_plugin_button->priority = 2;
 	fltk_plugin_button->copy_tooltip("Apply a FLTK program to the GUI. The primary FLTK class is passed to the plugin. This allows the plugin to alter the primary GUI classes attached to the passed entry point.\n");
 	fltk_plugin_button->callback(fltk_plugin_button_cb, this);
-	y_pos += y_inc;
-
-	immediate_drawing_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Immediate Drawing");
-	immediate_drawing_button->priority = 1;
-	immediate_drawing_button->copy_tooltip("Apply selected drawing functions to the currently displayed camera.\n");
-	immediate_drawing_button->callback(immediate_drawing_button_cb, this);
-	y_pos += y_inc;
-
-	dynamic_coloring_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Dynamic Coloring");
-	dynamic_coloring_button->priority = 2;
-	dynamic_coloring_button->copy_tooltip("Apply a color change to a range of tones selected with the mouse from within the image.");
-	dynamic_coloring_button->callback(dynamic_coloring_button_cb, this);
 	y_pos += y_inc;
 
 	toggle_camera_effects_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Turn Off Effects");
@@ -59913,7 +60541,6 @@ int	loop;
 	review_muxed_button->priority = 1;
 	review_muxed_button->copy_tooltip("Review muxed footage in a simple video viewer.");
 	review_muxed_button->callback(review_muxed_button_cb, this);
-	review_muxed_button->hide();
 	y_pos += y_inc;
 
 	jpeg_streaming_button = NULL;
@@ -59925,30 +60552,6 @@ int	loop;
 	{
 		jpeg_streaming_button->hide();
 	}
-	y_pos += y_inc;
-
-	set_interest_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Set Interest");
-	set_interest_button->priority = 2;
-	set_interest_button->copy_tooltip("Set areas of interest when using motion detection.");
-	set_interest_button->callback(set_interest_button_cb, this);
-	y_pos += y_inc;
-
-	clear_interest_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Clear Interest");
-	clear_interest_button->priority = 2;
-	clear_interest_button->copy_tooltip("Clear all areas of interest when using motion detection.");
-	clear_interest_button->callback(clear_interest_button_cb, this);
-	y_pos += y_inc;
-
-	save_interest_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Save Interest");
-	save_interest_button->priority = 2;
-	clear_interest_button->copy_tooltip("Save areas of interest to a file.");
-	save_interest_button->callback(save_interest_button_cb, this);
-	y_pos += y_inc;
-
-	load_interest_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Load Interest");
-	load_interest_button->priority = 2;
-	clear_interest_button->copy_tooltip("Load saved areas of interest when using motion detection.");
-	load_interest_button->callback(load_interest_button_cb, this);
 	y_pos += y_inc;
 
 	reset_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Reset Recording");
@@ -60084,74 +60687,6 @@ int	loop;
 		button_group->resize(initial_button_group_x, initial_button_group_y, button_group->w(), button_group->h());
 	}
 	button_group->hide();
-
-	if(1)
-	{
-		HoverMenu *hover_win = new HoverMenu(this, 80, 120);
-		hover_win->color(WHITE);
-		if(transparent_interface == 0)
-		{
-			hover_win->box(FL_FLAT_BOX);
-		}
-		else
-		{
-			hover_win->box(FL_NO_BOX);
-		}
-		int yp = 0;
-		MyButton *button = new MyButton(this, 0, yp, 80, 20, "Text");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Line");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Loop");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Rectangle");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Ellipse");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Image");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Polygon");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Freehand");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Pixelate/Blur");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Delete");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Delete All");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Hide");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Hide All");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Show All");
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		button = new MyButton(this, 0, yp, 80, 20, "Done");
-		button->box(FL_FRAME_BOX);
-		button->callback(immediate_quick_cb, this);
-		yp += 20;
-		hover_win->end();
-		hover_win->resize(hover_win->x(), hover_win->y(), hover_win->w(), yp);
-		hover_win->hide();
-		if(immediate_drawing_button != NULL)
-		{
-			immediate_drawing_button->AttachHoverMenu(hover_win);
-		}
-	}
 	if(1)
 	{
 		HoverMenu *hover_win = new HoverMenu(this, 80, 120);
@@ -60739,6 +61274,8 @@ int		loop;
 	my_window = in_win;
 	box(FL_FLAT_BOX);
 	color(BLACK);
+	store_x = -1;
+	store_y = -1;
 	int y_pos = 0;
 	for(loop = 0;loop < 24;loop++)
 	{
@@ -60772,13 +61309,32 @@ int		StatusWindow::handle(int event)
 	}
 	else if(event == FL_HIDE)
 	{
+		store_x = x();
+		store_y = y();
 		Fl::remove_timeout(status_window_cb, this);
+	}
+	else if(event == FL_PUSH)
+	{
+		my_window->show();
+		my_window->maximize();
+		MaximizeWindow(my_window);
+		flag = 1;
 	}
 	if(flag == 0)
 	{
 		flag = Fl_Double_Window::handle(event);
 	}
 	return(flag);
+}
+
+void	StatusWindow::show()
+{
+	if((store_x > -1) && (store_y > -1))
+	{
+		resize(store_x, store_y, w(), h());
+		force_position(1);
+	}
+	Fl_Double_Window::show();
 }
 
 // SECTION ************************************** SLIDING ELEMENT **********************************************
@@ -66390,13 +66946,11 @@ int		ColorItWindow::handle(int event)
 
 void	ColorItWindow::hide()
 {
-	my_window->selecting_colors = 0;
 	Dialog::hide();
 }
 
 void	ColorItWindow::show()
 {
-	my_window->selecting_colors = 1;
 	Dialog::show();
 }
 
@@ -67328,6 +67882,7 @@ int	loop;
 	}
 	if((event == FL_PUSH)
 	|| (event == FL_RELEASE)
+	|| (event == FL_DRAG)
 	|| (event == FL_MOUSEWHEEL))
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
@@ -67775,7 +68330,6 @@ int	loop;
 	set_modal();
 
 	my_win->review_button->hide();
-	my_win->review_muxed_button->hide();
 	my_win->button_group->hide();
 	my_win->buttons_shown = 0;
 }
@@ -69549,7 +70103,7 @@ int	loop;
 				{
 					if(iw->my_win->alt_displayed_source != iw->index)
 					{
-						iw->my_win->AltDisplay(iw->index);
+						iw->my_win->AltDisplayCamera(iw->index);
 					}
 					else
 					{
@@ -70767,6 +71321,7 @@ ProgressScrubber::ProgressScrubber(MyWin *in_win, MuxPreviewWindow *mux, int xx,
 	play_y1 = 0;
 	play_x2 = 0;
 	play_y2 = 0;
+	dragging = 0;
 }
 
 ProgressScrubber::~ProgressScrubber()
@@ -70848,6 +71403,7 @@ int	ProgressScrubber::Handle(int event)
 					{
 						if(yy < (h() - 30))
 						{
+							dragging = 1;
 							double val = (1.0 / w()) * (double)xx;
 							cam->av_window->Position(val);
 							flag = 1;
@@ -70873,8 +71429,14 @@ int	ProgressScrubber::Handle(int event)
 			{
 				if(yy < (h() - 30))
 				{
+					dragging = 1;
 					double val = (1.0 / w()) * (double)xx;
 					mux_preview->vlc_window->Position(val);
+					if(mux_preview->vlc_window->paused != 0)
+					{
+						mux_preview->redraw();
+						Fl::check();
+					}
 					flag = 1;
 				}
 				else if((xx > play_x1) && (yy > play_y1)
@@ -70890,6 +71452,45 @@ int	ProgressScrubber::Handle(int event)
 						playing = 1;
 						mux_preview->vlc_window->Resume();
 					}
+				}
+			}
+		}
+	}
+	else if(event == FL_RELEASE)
+	{
+		dragging = 0;
+	}
+	else if(event == FL_DRAG)
+	{
+		if(dragging == 1)
+		{
+			int xx = Fl::event_x();
+			xx -= x();
+			if((xx > 0) && (xx < w()))
+			{
+				if(mux_preview == NULL)
+				{
+					Camera *cam = my_window->DisplayedCamera();
+					if(cam != NULL)
+					{
+						if(cam->type == CAMERA_TYPE_AV)
+						{
+							double val = (1.0 / w()) * (double)xx;
+							cam->av_window->Position(val);
+							flag = 1;
+						}
+					}
+				}
+				else
+				{
+					double val = (1.0 / w()) * (double)xx;
+					mux_preview->vlc_window->QuickPosition(val);
+					if(mux_preview->vlc_window->paused != 0)
+					{
+						mux_preview->redraw();
+						Fl::check();
+					}
+					flag = 1;
 				}
 			}
 		}
@@ -74576,7 +75177,7 @@ char	buf[256];
 				int yy = 0;
 				if(gsw->my_window->ptz_window[loop]->contracted == 1)
 				{
-					yy = gsw->my_window->ptz_window[loop]->y() - 300;
+					yy = gsw->my_window->ptz_window[loop]->y() - 330;
 				}
 				else
 				{
@@ -79515,7 +80116,15 @@ int	inner;
 									ptz_win->ptz_interface_button->SetCurrent(entry - 1);
 								}
 								ptz_win->ptz_current_interface = &npw->my_window->iface[nn];
-								ptz_win->ptz_current_device_path = npw->my_window->ptz_device_path[nn];
+								if(npw->my_window->ptz_device_path[nn] != NULL)
+								{
+									if(ptz_win->ptz_current_device_path != NULL)
+									{
+										free(ptz_win->ptz_current_device_path);
+										ptz_win->ptz_current_device_path = NULL;
+									}
+									ptz_win->ptz_current_device_path = strdup(npw->my_window->ptz_device_path[nn]);
+								}
 								ptz_win->ptz_interface_index = nn;
 
 								for(inner = 0;inner < npw->my_window->source_cnt;inner++)
@@ -79652,6 +80261,7 @@ NewPTZWindow::NewPTZWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, h
 	cancel->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
 	cancel->copy_tooltip("Cancel and close the dialog");
 	cancel->callback(hide_window_cb, this);
+	end();
 
 	Update();
 }
@@ -81946,9 +82556,10 @@ int	loop;
 
 		fl_color(WHITE);
 		fl_font(FL_HELVETICA, 64);
-		fl_draw("DVPTZ", 0, 0, w(), h() - 400, FL_ALIGN_CENTER);
-		fl_font(FL_HELVETICA, 24);
 		char buf[256];
+		sprintf(buf, "DVPTZ %s", DVPTZ_VERSION_NUMBER);
+		fl_draw(buf, 0, 0, w(), h() - 400, FL_ALIGN_CENTER);
+		fl_font(FL_HELVETICA, 24);
 		sprintf(buf, "Copyright %c%c %d, Mark Lasersohn", 0xC2, 0xA9, CURRENT_YEAR);
 		fl_draw(buf, 0, 0, w(), h() - 300, FL_ALIGN_CENTER);
 

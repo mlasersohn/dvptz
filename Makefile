@@ -17,7 +17,7 @@ EXAMPLES = dvptz intro
 MCXX=clang++
 MCC=clang
 
-INCS = folder.h argv_split.h dr_mp3.h embed_app.h html_window.h muxer.h PulseAudio.h dvptz.h dr_flac.h dr_wav.h image_memory.h osg.h render_html.h vlc_window.h
+INCS = folder.h argv_split.h dr_mp3.h embed_app.h html_window.h muxer.h PulseAudio.h dvptz.h dr_flac.h dr_wav.h image_memory.h osg.h render_html.h vlc_window.h video_player.h
 
 CFLAGS = $(DBUG) -fno-diagnostics-color -Wno-deprecated-declarations -Wno-unused-result -Wno-write-strings -c -DFLTK_HAVE_CAIRO -D_GNU_SOURCE -D_REENTRANT -DFLTK_1_1 -I. -I/usr/include/python3.10 -I/usr/local/include/opencv4 -I/usr/local/include -I/usr/X11R6/include -I/usr/include/cairo -I/usr/local/include/ndi -I/usr/local/include/lunasvg -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/harfbuzz -I/usr/include/pango-1.0
 
@@ -28,7 +28,7 @@ AR = lib
 
 CVLIBS = -lrt -ljpeg -lm -lxml2 -lfontconfig -lexpat -lfreetype -lpng -lz
 
-STDDYN = -lopencv_imgproc -lopencv_videoio -lopencv_core -lopencv_imgcodecs -lopencv_highgui -lopencv_dnn -lopencv_objdetect -lavformat -lavcodec -lavutil -lswresample -lswscale -lavfilter -lpulse -lpulse-simple -lvlc -lpython3.10 -lcurl -luuid -lblend2d -lcairo -lfltk -lfltk_images -llunasvg -lplutovg -lrt -ljpeg -lXcursor -lX11 -lxcb -lXdmcp -lXau -lXext -lXtst -lm -lXft -lXrender -lXfixes -lXinerama -lXrender -lXcomposite -lxml2 -lfontconfig -lexpat -lfreetype -lfftw3 -lz -llzma -lvisca_ip -lbz2 -lircclient -lcjson -lmagic -lFLAC -lpangocairo-1.0 -lgobject-2.0 -lpango-1.0 -lstdc++
+STDDYN = -lopencv_imgproc -lopencv_videoio -lopencv_core -lopencv_imgcodecs -lopencv_highgui -lopencv_dnn -lopencv_objdetect -lavformat -lavcodec -lavutil -lswresample -lswscale -lavfilter -lpulse -lpulse-simple -lvlc -lpython3.10 -lcurl -luuid -lblend2d -lcairo -lfltk -lfltk_images -llunasvg -lplutovg -lrt -ljpeg -lXcursor -lX11 -lxcb -lXdmcp -lXau -lXext -lXtst -lm -lXft -lXrender -lXfixes -lXinerama -lXrender -lXcomposite -lxml2 -lfontconfig -lexpat -lfreetype -lfftw3 -lz -llzma -lvisca_ip -lbz2 -lircclient -lcjson -lmagic -lFLAC -lpangocairo-1.0 -lgobject-2.0 -lpango-1.0 -lasound -lstdc++
 
 all: $(EXAMPLES)
 
@@ -94,6 +94,11 @@ vlc_window.o: vlc_window.cpp
 	@echo "Compile VLC Window"
 	$(MCXX) $(CFLAGS) vlc_window.cpp
 
+video_player.o: video_player.cpp
+	@echo
+	@echo "Compile Video Player"
+	$(MCXX) $(CFLAGS) video_player.cpp
+
 muxer.o: muxer.cpp $(INCS)
 	@echo
 	@echo "Compile Muxer Module"
@@ -124,10 +129,12 @@ networking.o: networking.cpp $(INCS)
 	@echo "Compile Networking Module"
 	$(MCC) $(CFLAGS) networking.cpp 
 
-dvptz: dvptz.o test_serial_ports.o embed_app.o networking.o pulse_devices.o PulseAudio.o muxer.o vlc_window.o extract_video.o extract_audio.o run_python.o curl.o cow_simple_pulse.o irc.o read_wave.o libhtml_window.so libosg_camera.so
+dvptz: dvptz.o test_serial_ports.o embed_app.o networking.o pulse_devices.o PulseAudio.o muxer.o vlc_window.o video_player.o extract_video.o extract_audio.o run_python.o curl.o cow_simple_pulse.o irc.o read_wave.o libhtml_window.so libosg_camera.so
 	@echo
 	@echo "Link dvptz"
-	$(LD) -o dvptz $(LDFLAGS) dvptz.o test_serial_ports.o embed_app.o networking.o pulse_devices.o PulseAudio.o muxer.o vlc_window.o extract_video.o extract_audio.o run_python.o curl.o cow_simple_pulse.o irc.o read_wave.o $(STDDYN)
+	$(LD) -o dvptz $(LDFLAGS) dvptz.o test_serial_ports.o embed_app.o networking.o pulse_devices.o PulseAudio.o muxer.o vlc_window.o video_player.o extract_video.o extract_audio.o run_python.o curl.o cow_simple_pulse.o irc.o read_wave.o $(STDDYN)
+	@echo "Copy dvptz"
+	cp -v dvptz ../dvptz
 
 intro: intro.cpp intro.h
 	@echo
