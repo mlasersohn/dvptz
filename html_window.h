@@ -16,6 +16,7 @@ public:
 	RenderHandler(int w, int h)
 	{
 		redraw_flag = 0;
+		// size_t
 		raw = (unsigned char *)malloc((size_t)w * (size_t)h  * 4);
 		use_w = w;
 		use_h = h;
