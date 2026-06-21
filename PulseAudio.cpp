@@ -103,8 +103,8 @@ int		loop;
 		}
 		if(channels != 0)
 		{
-			SAMPLE buf[number_of_samples * channels * sizeof(SAMPLE)];
-			int total_sz = 0;
+			SAMPLE buf[(size_t)number_of_samples * (size_t)channels * sizeof(SAMPLE)];
+			size_t total_sz = 0;
 			int done = 0;
 			while(done == 0)
 			{
@@ -126,7 +126,7 @@ int		loop;
 				}
 				if(n > 0)
 				{
-					int sz_in_bytes = n * channels * sizeof(SAMPLE);
+					size_t sz_in_bytes = (size_t)n * (size_t)channels * sizeof(SAMPLE);
 					total_sz += sz_in_bytes;
 					total_buf = (SAMPLE *)realloc(total_buf, total_sz);
 					if(total_buf != NULL)
