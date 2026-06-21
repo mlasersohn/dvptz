@@ -16,11 +16,28 @@
 #include <alsa/asoundlib.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #include	"common.h"
 #include	"video_player.h"
+
+int	is_url(char *in)
+{
+	int flag = 0;
+	char *cp = in;
+	while((*cp != '\0') && (flag == 0))
+	{
+		if(strncmp(cp, "://", strlen("://")) == 0)
+		{
+			flag = 1;
+		}
+		cp++;
+	}
+	return(flag);
+}
 
 unsigned video_format_setup_cb(void **opaque, char *chroma, unsigned *width, unsigned *height, unsigned *pitches, unsigned *lines)
 {
@@ -33,13 +50,14 @@ unsigned video_format_setup_cb(void **opaque, char *chroma, unsigned *width, uns
 	
 	pthread_mutex_lock(&ctx->video_mutex);
 	ctx->pixel_buffer = (unsigned char *)realloc(ctx->pixel_buffer, (*width) * (*height) * 3);
-	memset(ctx->pixel_buffer, 0, (*width) * (*height) * 3);
+	size_t sz = (size_t)(*width) * (size_t)(*height) * (size_t)3;
+	memset(ctx->pixel_buffer, 0, sz);
 	pthread_mutex_unlock(&ctx->video_mutex);
 	
 	int ww = ctx->video_width;
 	int hh = ctx->video_height;
 	if(ww > Fl::w()) ww = Fl::w();
-	if(hh > Fl::h()) hh = Fl::h();
+	if(hh > Fl::h() - 60) hh = Fl::h() - 60;
 	ctx->window->resize(ctx->window->x(), ctx->window->y(), ww, hh);
 
 	ctx->control_group->resize(10, ctx->window->h() - 50, ctx->window->w() - 20, 50);
@@ -121,7 +139,8 @@ void audio_play_cb(void *opaque, const void *samples, unsigned count, int64_t pt
 		snd_pcm_sframes_t written = snd_pcm_writei(ctx->alsa_handle, samples, count);
 		if(written < 0)
 		{
-			snd_pcm_prepare(ctx->alsa_handle);
+			// Handles recovery automatically and safely prepares the stream
+			snd_pcm_recover(ctx->alsa_handle, written, 0); 
 		}
 	}
 }
@@ -132,7 +151,11 @@ void audio_resume_cb(void *opaque, int64_t pts) { }
 void audio_flush_cb(void *opaque, int64_t pts)
 {
 	AppContext *ctx = (AppContext *)opaque;
-	snd_pcm_drop(ctx->alsa_handle); 
+	if (ctx->alsa_handle != NULL)
+	{
+		snd_pcm_drop(ctx->alsa_handle);
+		snd_pcm_prepare(ctx->alsa_handle); // Restores device to PREPARED state cleanly
+	}
 }
 
 void audio_drain_cb(void *opaque)
@@ -168,27 +191,48 @@ void tracking_timer_cb(void *userdata)
 	Fl::repeat_timeout(0.033, tracking_timer_cb, userdata);
 }
 
+void window_close_callback(Fl_Widget* widget, void* userdata) 
+{
+	AppContext* ctx = (AppContext*)userdata;
+	if(ctx->mp) 
+	{
+		// 1. Tell LibVLC to stop playing immediately
+		libvlc_media_player_stop(ctx->mp);
+	}
+	if(ctx->alsa_handle) 
+	{
+		// 2. Clear any remaining audio frames out of the hardware device
+		snd_pcm_drop(ctx->alsa_handle);
+	}
+	// 3. Hide the window so FLTK handles the closure
+	widget->hide();
+}
+
 void slider_scrub_cb(Fl_Widget *widget, void *userdata)
 {
+extern time_t precise_time();
+static time_t old = 0;
+
 	AppContext *ctx = (AppContext *)userdata;
 	Fl_Slider *slider = (Fl_Slider *)widget;
-	if(Fl::event() == FL_DRAG || Fl::event() == FL_PUSH)
+	switch(Fl::event()) 
 	{
-		ctx->is_user_scrubbing = 1;
-		if(ctx->alsa_handle != NULL)
+		case(FL_PUSH):
 		{
-			snd_pcm_drop(ctx->alsa_handle);
+			ctx->is_user_scrubbing = 1;
 		}
-		libvlc_media_player_set_position(ctx->mp, (float)slider->value());
-	}
-	if(Fl::event() == FL_RELEASE)
-	{
-		libvlc_media_player_set_position(ctx->mp, (float)slider->value());
-		if(ctx->alsa_handle != NULL)
+		break;
+		case(FL_DRAG):
 		{
-			snd_pcm_prepare(ctx->alsa_handle);
+			libvlc_media_player_set_position(ctx->mp, slider->value());
 		}
-		ctx->is_user_scrubbing = 0;
+		break;
+		case(FL_RELEASE):
+		{
+			ctx->is_user_scrubbing = 0;
+			libvlc_media_player_set_position(ctx->mp, slider->value());
+		}
+		break;
 	}
 }
 
@@ -297,10 +341,11 @@ void	hide_controls_cb(void *v)
 	Fl::repeat_timeout(0.1, hide_controls_cb, vw);
 }
 
-VideoWindow::VideoWindow(char *filenames[65], int ww, int hh, char *lbl) : Fl_Double_Window(ww, hh, lbl)
+VideoWindow::VideoWindow(void *in_win, char *filenames[65], int ww, int hh, char *lbl) : Fl_Double_Window(ww, hh, lbl)
 {
 int		loop;
 
+	my_window = in_win;
 	for(loop = 0;loop < 64;loop++)
 	{
 		filename[loop] = filenames[loop];
@@ -310,20 +355,28 @@ int		loop;
 	ctx->height = 0;
 	pthread_mutex_init(&ctx->video_mutex, NULL);
 
-    const char * const vlc_args[] = {
-          "-I", "dummy", // Don't use any interface
-          "--ignore-config", // Don't use VLC's config
-          "--quiet", 
+	const char * const vlc_args[] = {
+		  "-I", "dummy", // Don't use any interface
+		  "--ignore-config", // Don't use VLC's config
+		  "--quiet", 
 		  "--no-video-title-show",
 		  "--no-xlib",
-          "--verbose=0" // Don't be verbose
-           };
+		  "--verbose=0" // Don't be verbose
+		   };
 
-    // We launch VLC
-    ctx->vlc_inst = libvlc_new(sizeof(vlc_args) / sizeof(vlc_args[0]), vlc_args);
+	// We launch VLC
+	ctx->vlc_inst = libvlc_new(sizeof(vlc_args) / sizeof(vlc_args[0]), vlc_args);
 	libvlc_log_set(ctx->vlc_inst, log_callback, NULL);
 	
-	libvlc_media_t *media = libvlc_media_new_path(ctx->vlc_inst, filename[0]);
+	libvlc_media_t *media = NULL;
+	if(is_url(filename[0]))
+	{
+		media = libvlc_media_new_location(ctx->vlc_inst, filename[0]);
+	}
+	else
+	{
+		media = libvlc_media_new_path(ctx->vlc_inst, filename[0]);
+	}
 	ctx->mp = libvlc_media_player_new_from_media(media);
 
 	libvlc_event_manager_t *ev_manager = libvlc_media_player_event_manager(ctx->mp);
@@ -429,6 +482,7 @@ int		loop;
 	volume = 0.5;
 	Fl::add_timeout(0.033, tracking_timer_cb, ctx);
 	Fl::add_timeout(0.1, hide_controls_cb, this);
+	callback(window_close_callback, ctx);
 }
 
 VideoWindow::~VideoWindow()
@@ -480,12 +534,29 @@ void	VideoWindow::draw()
 
 void	new_file_popup_cb(Fl_Widget *w, void *v)
 {
+extern int	alt_file_chooser(void *in_win, char *prompt, char *filter, char *start_path, char *current_selection, int select_dir = 0, int new_file = 0);
+
 	VideoWindow *vw = (VideoWindow *)v;
 	Fl_Hold_Browser *browser = (Fl_Hold_Browser *)w;
 	char *str = (char *)browser->text(browser->value());
 	if(str != NULL)
 	{
-		vw->NewVideo(str);
+		if(strcmp(str, "File or URL") == 0)
+		{
+			char filename[4096];
+			int nn = alt_file_chooser(vw->my_window, "Select a video file or URL", "*", "./", filename);
+			if(nn > 0)
+			{
+				vw->NewVideo(filename);
+			}
+		}
+		else if(strcmp(str, "Cancel") == 0)
+		{
+		}
+		else
+		{
+			vw->NewVideo(str);
+		}
 	}
 	browser->window()->hide();
 }
@@ -536,6 +607,7 @@ int		loop;
 						}
 					}
 				}
+				popup->browser->add("File or URL");
 				popup->browser->add("Cancel");
 				popup->set_non_modal();
 				popup->Fit();
@@ -610,7 +682,18 @@ void	VideoWindow::NewVideo(char *in_filename)
 	{
 		was_paused = 1;
 	}
-	libvlc_media_t *new_media = libvlc_media_new_path(ctx->vlc_inst, in_filename);
+	libvlc_media_t *new_media = NULL;
+	if(is_url(in_filename))
+	{
+printf("URL: [%s]\n", in_filename);
+		new_media = libvlc_media_new_location(ctx->vlc_inst, in_filename);
+printf("MEDIA: %p\n", new_media);
+	}
+	else
+	{
+		new_media = libvlc_media_new_path(ctx->vlc_inst, in_filename);
+	}
+printf("ON OUR WAY\n");
 	libvlc_media_player_set_media(ctx->mp, new_media);
 	libvlc_media_player_set_position(ctx->mp, 0.0);
 	libvlc_media_player_play(ctx->mp);
@@ -621,6 +704,7 @@ void	VideoWindow::NewVideo(char *in_filename)
 		ctx->advance_frame_button->hide();
 		ctx->retreat_frame_button->hide();
 	}
+printf("ON OUR WAY 2\n");
 }
 
 void	VideoWindow::Times(double& total, double& current)
