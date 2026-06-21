@@ -16,7 +16,7 @@ public:
 	RenderHandler(int w, int h)
 	{
 		redraw_flag = 0;
-		raw = (unsigned char *)malloc(w * h  * 4);
+		raw = (unsigned char *)malloc((size_t)w * (size_t)h  * 4);
 		use_w = w;
 		use_h = h;
 		resize(w, h);
@@ -48,7 +48,7 @@ public:
 				free(raw);
 				raw = (unsigned char *)malloc(w * h * 4);
 			}
-			memcpy(raw, buffer, static_cast<size_t>(w * h * 4));
+			memcpy(raw, buffer, static_cast<size_t>((size_t)w * (size_t)h * 4));
 			use_w = w;
 			use_h = h;
 			redraw_flag = 1;
@@ -64,7 +64,7 @@ public:
 		if((w != use_w) || (h != use_h))
 		{
 			free(raw);
-			raw = (unsigned char *)malloc(w * h  * 4);
+			raw = (unsigned char *)malloc((size_t)w * (size_t)h  * 4);
 			use_w = w;
 			use_h = h;
 		}

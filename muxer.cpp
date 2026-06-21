@@ -179,7 +179,7 @@ int		type;
 	}
 }
 
-Muxer::Muxer(MyWin *in_win, ReviewWin *in_review, int from_raw)
+Muxer::Muxer(MyWin *in_win, Camera *in_cam, ReviewWin *in_review, int from_raw)
 {
 	my_window = in_win;
 	frame_ptr = NULL;
@@ -195,6 +195,8 @@ Muxer::Muxer(MyWin *in_win, ReviewWin *in_review, int from_raw)
 	in_simple_record = 0;
 	oc = NULL;
 	raw_frame = NULL;
+	strcpy(filename, "");
+	camera = in_cam;
 
 	encode_video = 0;
 	encode_audio = 0;
@@ -1316,7 +1318,7 @@ char	used_extension[256][24];
 						int audio_id = mf->audio_id[audio];
 						if(audio_id > 0)
 						{
-							Muxer *mux = new Muxer(NULL, NULL, 0);
+							Muxer *mux = new Muxer(NULL, NULL, NULL, 0);
 							char out_buf[32768];
 							char audio_result[4096];
 							int	nn2 = my_find_codec_by_id(1, audio_id, audio_result);
@@ -1456,7 +1458,6 @@ int i;
 int	Muxer::InitMux(int use_audio, char *in_container, enum AVCodecID video_codec_id, enum AVCodecID audio_codec_id, char *video_in, char *audio_in, char *output_filename, char *in_url, char *in_desktop_mon, PulseMixer *in_mixer, int audio_device, int in_width, int in_height, double in_fps, double in_rate, int in_channels, int in_frame_cnt, int *in_crop_x, int *in_crop_y)
 {
 const AVOutputFormat *fmt;
-const char *filename;
 const AVCodec *audio_codec, *video_codec;
 int ret;
 AVDictionary *opt = NULL;
@@ -1465,7 +1466,10 @@ int i;
 	int using_video = 0;
 	int using_audio = 0;
 	current_frame = 0;
-	filename = output_filename;
+	if(output_filename != NULL)
+	{
+		strcpy(filename, output_filename);
+	}
 	used_rate = in_rate;
 	used_channels = in_channels;
 	crop_x = in_crop_x;
@@ -1526,7 +1530,7 @@ int i;
 			in_height = uh;
 			raw_w = uw;
 			raw_h = uh;
-			raw_frame = malloc(raw_w * raw_h * depth);
+			raw_frame = malloc((size_t)raw_w * (size_t)raw_h * (size_t)depth);
 			raw_frame_sz = raw_w * raw_h * depth;
 			raw_depth = depth;
 			using_video = 1;
