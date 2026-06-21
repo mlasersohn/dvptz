@@ -49,8 +49,8 @@ unsigned video_format_setup_cb(void **opaque, char *chroma, unsigned *width, uns
 	*lines = *height;
 	
 	pthread_mutex_lock(&ctx->video_mutex);
-	ctx->pixel_buffer = (unsigned char *)realloc(ctx->pixel_buffer, (*width) * (*height) * 3);
-	size_t sz = (size_t)(*width) * (size_t)(*height) * (size_t)3;
+	size_t sz = (size_t)(*width) * (size_t)(*height) * 3;
+	ctx->pixel_buffer = (unsigned char *)realloc(ctx->pixel_buffer, sz);
 	memset(ctx->pixel_buffer, 0, sz);
 	pthread_mutex_unlock(&ctx->video_mutex);
 	
