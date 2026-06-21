@@ -46,6 +46,7 @@ public:
 			if((w != use_w) || (h != use_h))
 			{
 				free(raw);
+				// size_t
 				raw = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
 			}
 			memcpy(raw, buffer, static_cast<size_t>((size_t)w * (size_t)h * 4));
