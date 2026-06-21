@@ -35,6 +35,10 @@ include_directories(
     /usr/local/include/opencv4
     /usr/local/include
     /usr/X11R6/include
+    /usr/lib/x86_64-linux-gnu/glib-2.0/include
+    /usr/include/glib-2.0
+    /usr/include/pango-1.0
+    /usr/include/harfbuzz
     /usr/include/cairo
     /usr/local/include/ndi
     /usr/local/include/lunasvg
@@ -77,7 +81,7 @@ if(USE_OSG)
     )
 endif()
 
-# --- Main Executable: cowcam ---
+# --- Main Executable: dvptz ---
 set(COWCAM_SOURCES
     test_serial_ports.cpp
     cow_simple_pulse.c
@@ -93,16 +97,17 @@ set(COWCAM_SOURCES
     pulse_devices.cpp
     embed_app.cpp
     networking.cpp
-    cowcam.cpp
+    video_player.cpp
+    dvptz.cpp
 )
 
-add_executable(cowcam ${COWCAM_SOURCES})
-target_compile_definitions(cowcam PRIVATE __STDC_CONSTANT_MACROS)
+add_executable(dvptz ${COWCAM_SOURCES})
+target_compile_definitions(dvptz PRIVATE __STDC_CONSTANT_MACROS)
 
 # STDDYN and CVLIBS Translation
-target_link_libraries(cowcam PRIVATE 
+target_link_libraries(dvptz PRIVATE 
     opencv_imgproc opencv_videoio opencv_core opencv_imgcodecs opencv_highgui opencv_dnn opencv_objdetect
-    avformat avcodec avutil swresample swscale avfilter
+    avformat avcodec avutil swresample swscale avfilter gobject-2.0 pangocairo-1.0 pango-1.0 asound
     pulse pulse-simple vlc python3.10 curl uuid blend2d cairo 
     fltk fltk_images lunasvg plutovg rt jpeg Xcursor X11 xcb Xdmcp Xau Xext Xtst m 
     Xft Xrender Xfixes Xinerama Xcomposite xml2 fontconfig expat freetype fftw3 z lzma 
@@ -110,13 +115,13 @@ target_link_libraries(cowcam PRIVATE
 )
 
 if(USE_CEF)
-    add_dependencies(cowcam html_window)
-    target_link_libraries(cowcam PRIVATE html_window)
+    add_dependencies(dvptz html_window)
+    target_link_libraries(dvptz PRIVATE html_window)
 endif()
 
 if(USE_OSG)
-    add_dependencies(cowcam osg_camera)
-    target_link_libraries(cowcam PRIVATE osg_camera)
+    add_dependencies(dvptz osg_camera)
+    target_link_libraries(dvptz PRIVATE osg_camera)
 endif()
 
 # --- Secondary Executable: intro ---
