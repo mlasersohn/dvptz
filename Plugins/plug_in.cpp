@@ -131,7 +131,8 @@ using namespace std;
 #include "../Build/render_html.h"
 #include "../Build/html_window.h"
 #include "../Build/embed_app.h"
-#include "../Build/cowcam.h"
+#include "../Build/common.h"
+#include "../Build/dvptz.h"
 
 class Mine : public Fl_Box
 {
@@ -461,13 +462,99 @@ printf("ALSO number_of_samples: %d number_of_channels: %d sample_count: %d hz: %
 		Fl::add_timeout(1.0, repeat_fltk_cb, win);
 		my_win->resize_grp->add(win);
 	}
-	void	transition_simple1(int width, int height, int depth, unsigned char *ptr1, unsigned char *ptr2, double amount)
+	void	transition_simple1(int width, int height, int depth, unsigned char *ptr1, unsigned char *ptr2, unsigned char *ptr3, double amount)
 	{
 		if(depth == 4)
 		{
 			cv::Mat mat1 = cv::Mat(height, width, CV_8UC4, ptr1);
 			cv::Mat mat2 = cv::Mat(height, width, CV_8UC4, ptr2);
 			addWeighted(mat2, amount, mat1, 1.0 - amount, 0.0, mat2);
+		}
+	}
+	void	transition_random(int width, int height, int depth, unsigned char *ptr1, unsigned char *ptr2, unsigned char *ptr3, double amount)
+	{
+		int row = 0;
+		int col = 0;
+		if(depth == 4)
+		{
+			cv::Mat mat1 = cv::Mat(height, width, CV_8UC4, ptr1);
+			cv::Mat mat2 = cv::Mat(height, width, CV_8UC4, ptr2);
+			cv::Mat out = cv::Mat(height, width, CV_8UC4, ptr3);
+			for(row = 0;row < height;row++)
+			{
+				for(col = 0;col < width;col++)
+				{
+					double val = (drand48() * 8.0);
+					if(val < amount)
+					{
+						cv::Vec4b source_pixel = mat2.at<cv::Vec4b>(row, col);
+						out.at<cv::Vec4b>(row, col) = source_pixel;
+					}
+				}
+			}
+		}
+	}
+	void	transition_circular(int width, int height, int depth, unsigned char *ptr1, unsigned char *ptr2, unsigned char *ptr3, double amount)
+	{
+		int row = 0;
+		int col = 0;
+		if(depth == 4)
+		{
+			double wider = width;
+			if(height > width) wider = height;
+			double radius = wider / 2.0;
+			radius *= amount;
+			double center_x = width / 2.0;
+			double center_y = height / 2.0;
+
+			cv::Mat mat1 = cv::Mat(height, width, CV_8UC4, ptr1);
+			cv::Mat mat2 = cv::Mat(height, width, CV_8UC4, ptr2);
+			cv::Mat out = cv::Mat(height, width, CV_8UC4, ptr3);
+			for(row = 0;row < height;row++)
+			{
+				for(col = 0;col < width;col++)
+				{
+					double dx = abs(center_x - col);
+					double dy = abs(center_y - row);
+					double dist = sqrt((dx * dx) + (dy * dy));
+					if(dist < radius)
+					{
+						cv::Vec4b source_pixel = mat2.at<cv::Vec4b>(row, col);
+						out.at<cv::Vec4b>(row, col) = source_pixel;
+					}
+				}
+			}
+		}
+	}
+	void	transition_rectangular(int width, int height, int depth, unsigned char *ptr1, unsigned char *ptr2, unsigned char *ptr3, double amount)
+	{
+		int row = 0;
+		int col = 0;
+		if(depth == 4)
+		{
+			double wider = width;
+			if(height > width) wider = height;
+			double radius = wider / 2.0;
+			radius *= amount;
+			double center_x = width / 2.0;
+			double center_y = height / 2.0;
+
+			cv::Mat mat1 = cv::Mat(height, width, CV_8UC4, ptr1);
+			cv::Mat mat2 = cv::Mat(height, width, CV_8UC4, ptr2);
+			cv::Mat out = cv::Mat(height, width, CV_8UC4, ptr3);
+			for(row = 0;row < height;row++)
+			{
+				for(col = 0;col < width;col++)
+				{
+					double dx = abs(center_x - col);
+					double dy = abs(center_y - row);
+					if((dx < radius) && (dy < radius))
+					{
+						cv::Vec4b source_pixel = mat2.at<cv::Vec4b>(row, col);
+						out.at<cv::Vec4b>(row, col) = source_pixel;
+					}
+				}
+			}
 		}
 	}
 }
