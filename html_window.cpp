@@ -119,7 +119,8 @@ extern "C" {
 int initialize_cef(int html, int argc, char *argv[])
 {
 	CefMainArgs args(argc, argv);
-	int result = CefExecuteProcess(args, nullptr, nullptr);
+	CefRefPtr<MyApp> app(new MyApp());
+	int result = CefExecuteProcess(args, app.get(), nullptr);
 	if(result >= 0)
 	{
 		exit(result);
@@ -128,8 +129,9 @@ int initialize_cef(int html, int argc, char *argv[])
 	{
 		CefSettings settings;
 		settings.windowless_rendering_enabled = true;
+		settings.log_severity = LOGSEVERITY_FATAL;
 
-		if(!CefInitialize(args, settings, nullptr, nullptr))
+		if(!CefInitialize(args, settings, app.get(), nullptr))
 		{
 			return EXIT_FAILURE;
 		}

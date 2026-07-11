@@ -66,6 +66,7 @@ unsigned video_format_setup_cb(void **opaque, char *chroma, unsigned *width, uns
 	ctx->pause_button->resize((ctx->window->w() / 2) - 8, ctx->pause_button->y(), 14, 14);
 	ctx->advance_frame_button->resize((ctx->window->w() / 2) + 7, ctx->advance_frame_button->y(), 14, 14);
 	ctx->reset_button->resize((ctx->window->w() / 2) - 50, ctx->reset_button->y(), 14, 14);
+	ctx->snapshot_button->resize((ctx->window->w() / 2) + 25, ctx->snapshot_button->y(), 14, 14);
 	ctx->speed_slider->resize((ctx->window->w() / 2) + 100, ctx->speed_slider->y(), 150, 14);
 	ctx->volume_slider->resize((ctx->window->w() / 2) + 300, ctx->volume_slider->y(), 150, 14);
 	ctx->times_box->resize((ctx->window->w() / 2) - 200, ctx->times_box->y(), 120, 14);
@@ -267,12 +268,14 @@ void toggle_pause_cb(Fl_Widget *w, void *v)
 		b->label("@-4>");
 		ctx->advance_frame_button->show();
 		ctx->retreat_frame_button->show();
+		ctx->snapshot_button->show();
 	}
 	else
 	{
 		b->label("@#-4||");
 		ctx->advance_frame_button->hide();
 		ctx->retreat_frame_button->hide();
+		ctx->snapshot_button->hide();
 	}
 	libvlc_media_player_pause(ctx->mp);
 }
@@ -292,6 +295,15 @@ void vp_reset_button_cb(Fl_Widget *w, void *v)
 		libvlc_media_player_stop(ctx->mp);
 		libvlc_media_player_play(ctx->mp);
 		libvlc_media_player_set_pause(ctx->mp, 1);
+	}
+}
+
+void vp_snapshot_button_cb(Fl_Widget *w, void *v)
+{
+	AppContext *ctx = (AppContext *)v;
+	if(!libvlc_media_player_is_playing(ctx->mp))
+	{
+		ctx->snap = 1;
 	}
 }
 
@@ -411,18 +423,21 @@ int		loop;
 	ctx->retreat_frame_button->color(FL_BLACK);
 	ctx->retreat_frame_button->labelcolor(FL_WHITE);
 	ctx->retreat_frame_button->hide();
+	ctx->retreat_frame_button->tooltip("Retreat one frame");
 	ctx->retreat_frame_button->callback(retreat_frame_cb, ctx);
 
 	ctx->pause_button = new Fl_Button(10, 30, 15, 15, "@#-4||");
 	ctx->pause_button->box(FL_FRAME_BOX);
 	ctx->pause_button->color(FL_BLACK);
 	ctx->pause_button->labelcolor(FL_WHITE);
+	ctx->pause_button->tooltip("Toggle pause");
 	ctx->pause_button->callback(toggle_pause_cb, ctx);
 
 	ctx->advance_frame_button = new Fl_Repeat_Button(10, 30, 15, 15, "@#-4->");
 	ctx->advance_frame_button->box(FL_FRAME_BOX);
 	ctx->advance_frame_button->color(FL_BLACK);
 	ctx->advance_frame_button->labelcolor(FL_WHITE);
+	ctx->advance_frame_button->tooltip("Advance one frame");
 	ctx->advance_frame_button->hide();
 	ctx->advance_frame_button->callback(advance_frame_cb, ctx);
 
@@ -430,7 +445,16 @@ int		loop;
 	ctx->reset_button->box(FL_FRAME_BOX);
 	ctx->reset_button->color(FL_BLACK);
 	ctx->reset_button->labelcolor(FL_WHITE);
+	ctx->reset_button->tooltip("Reset to beginning");
 	ctx->reset_button->callback(vp_reset_button_cb, ctx);
+
+	ctx->snapshot_button = new Fl_Button(10, 30, 15, 15, "@#-4circle");
+	ctx->snapshot_button->box(FL_FRAME_BOX);
+	ctx->snapshot_button->color(FL_BLACK);
+	ctx->snapshot_button->labelcolor(FL_RED);
+	ctx->snapshot_button->tooltip("Save current frame to a PNG file");
+	ctx->snapshot_button->hide();
+	ctx->snapshot_button->callback(vp_snapshot_button_cb, ctx);
 
 	ctx->speed_slider = new Fl_Value_Slider(10, 30, 150, 20, "Speed");
 	ctx->speed_slider->box(FL_FRAME);
@@ -444,6 +468,7 @@ int		loop;
 	ctx->speed_slider->value(1.0);
 	ctx->speed_slider->type(FL_HOR_NICE_SLIDER);
 	ctx->speed_slider->align(FL_ALIGN_LEFT);
+	ctx->speed_slider->tooltip("Adjust playback speed");
 	ctx->speed_slider->callback(speed_slider_cb, ctx);
 
 	ctx->volume_slider = new Fl_Value_Slider(10, 30, 150, 20, "Volume");
@@ -457,6 +482,7 @@ int		loop;
 	ctx->volume_slider->value(0.5);
 	ctx->volume_slider->type(FL_HOR_NICE_SLIDER);
 	ctx->volume_slider->align(FL_ALIGN_LEFT);
+	ctx->volume_slider->tooltip("Adjust playback volume");
 	ctx->volume_slider->callback(volume_slider_cb, ctx);
 
 	ctx->times_box = new Fl_Box(10, 30, 120, 20, "");
@@ -685,15 +711,12 @@ void	VideoWindow::NewVideo(char *in_filename)
 	libvlc_media_t *new_media = NULL;
 	if(is_url(in_filename))
 	{
-printf("URL: [%s]\n", in_filename);
 		new_media = libvlc_media_new_location(ctx->vlc_inst, in_filename);
-printf("MEDIA: %p\n", new_media);
 	}
 	else
 	{
 		new_media = libvlc_media_new_path(ctx->vlc_inst, in_filename);
 	}
-printf("ON OUR WAY\n");
 	libvlc_media_player_set_media(ctx->mp, new_media);
 	libvlc_media_player_set_position(ctx->mp, 0.0);
 	libvlc_media_player_play(ctx->mp);
@@ -703,8 +726,8 @@ printf("ON OUR WAY\n");
 		ctx->pause_button->label("@#-4||");
 		ctx->advance_frame_button->hide();
 		ctx->retreat_frame_button->hide();
+		ctx->snapshot_button->hide();
 	}
-printf("ON OUR WAY 2\n");
 }
 
 void	VideoWindow::Times(double& total, double& current)

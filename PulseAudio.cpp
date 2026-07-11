@@ -460,15 +460,23 @@ int	loop;
 							int nn = pa->buffer_size / sizeof(SAMPLE);
 							if(nn > 0)
 							{
+								pa->local_peak = 0;
+								int max = 0;
 								for(loop = 0;loop < nn;loop++)
 								{
 									total += abs(pa->buffer[loop]);
+									int tst = abs(pa->buffer[loop]);
+									if(tst > max)
+									{
+										max = tst;
+									}
 								}
 								double avg = (double)(total / nn);
 								if(avg > 0.0)
 								{
 									pa->average = avg;
 								}
+								pa->local_peak = max;
 							}
 						}
 					}
@@ -508,9 +516,16 @@ int	loop;
 						int nn = pa->buffer_size / sizeof(SAMPLE);
 						if(nn > 0)
 						{
+							int max = 0;
+							pa->local_peak = 0;
 							for(loop = 0;loop < nn;loop++)
 							{
 								total += abs(pa->buffer[loop]);
+								int tst = abs(pa->buffer[loop]);
+								if(tst > max)
+								{
+									max = tst;
+								}
 							}
 							double avg = (double)(total / nn);
 							if(avg > 0.0)
@@ -518,6 +533,7 @@ int	loop;
 								pa->average = avg;
 							}
 							pa->average = pa->buffer[0];
+							pa->local_peak = max;
 						}
 					}
 					memset(pa->buffer, 0, pa->buffer_size);
@@ -614,6 +630,7 @@ long int precise_time(void);
 	volume1 = 0.0;
 	volume2 = 0.0;
 	average = 0.0;
+	local_peak = 0;
 	sample_rate = in_hz;
 	number_of_channels = in_number_of_channels;
 	number_of_samples = in_number_of_samples;
@@ -643,7 +660,7 @@ long int precise_time(void);
 	if(mode == MODE_RECORD)
 	{
 		int error = 0;
-		stream = pa_simple_new(NULL, "webcam", PA_STREAM_RECORD, device, "record", &pulse_ss, NULL, &ba, &error);
+		stream = pa_simple_new(NULL, "dvptz", PA_STREAM_RECORD, device, "record", &pulse_ss, NULL, &ba, &error);
 		if(stream != NULL)
 		{
 			unsigned char local_buffer[32];

@@ -1,3 +1,6 @@
+#ifndef	INTRO_H
+#define	INTRO_H	1
+
 class	IntroWindow : public Fl_Double_Window
 {
 public:
@@ -45,3 +48,5 @@ public:
 	double	angle;
 	double	dir;
 };
+
+#endif

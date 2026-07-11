@@ -158,7 +158,7 @@ extern "C"
 #include	"folder.h"
 
 // COW - Enables NDI code that does not work
-// #define COW_NDI_USE_FOCUS_SPEED	1
+// COW #define COW_NDI_USE_FOCUS_SPEED	1
 
 extern "C"
 {
@@ -180,6 +180,8 @@ using namespace std;
 #include	"dvptz.h"
 #include	"muxer.h"
 #include	"video_player.h"
+
+#include	<wordexp.h>
 
 #define READ 0
 #define WRITE 1
@@ -489,19 +491,190 @@ struct	NamedKeys named_key[] = {
 	{"", 0}
 };
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <wordexp.h>
-#endif
 
 // SECTION *********************************** UTILITY FUNCTIONS *******************************************
 
+namespace 
+{
+	std::vector<uchar> g_pngData;
+	Atom g_atomPng = 0;
+
+	int png_target_handler(void *ev, void*) 
+	{
+		XEvent *xevent = static_cast<XEvent*>(ev);
+		if(xevent->type != SelectionRequest) 
+		{
+			return(0);
+		}
+		XSelectionRequestEvent *req = &xevent->xselectionrequest;
+		Atom clipboardAtom = XInternAtom(fl_display, "CLIPBOARD", False);
+		if(req->selection != clipboardAtom || g_pngData.empty())
+		{
+			return(0); // not ours; let FLTK handle it
+		}
+		Atom targetsAtom = XInternAtom(fl_display, "TARGETS", False);
+		Atom bmpAtom = XInternAtom(fl_display, "image/bmp", False);
+
+		if(req->target == g_atomPng) 
+		{
+			XChangeProperty(fl_display, req->requestor, req->property, g_atomPng, 8, PropModeReplace, g_pngData.data(), (int)g_pngData.size());
+		} 
+		else if(req->target == targetsAtom) 
+		{
+			Atom targets[] = { targetsAtom, bmpAtom, g_atomPng };
+			XChangeProperty(fl_display, req->requestor, req->property, XA_ATOM, 32, PropModeReplace, reinterpret_cast<unsigned char*>(targets), 3);
+		} 
+		else 
+		{
+			return(0); // e.g. image/bmp itself — let FLTK answer as usual
+		}
+		XSelectionEvent notify{};
+		notify.type	= SelectionNotify;
+		notify.requestor = req->requestor;
+		notify.selection = req->selection;
+		notify.target = req->target;
+		notify.property = req->property;
+		notify.time	= req->time;
+		XSendEvent(fl_display, req->requestor, False, NoEventMask, (XEvent*)&notify);
+		XFlush(fl_display);
+		return(1);
+	}
+	bool handlerInstalled = false;
+}
+
+bool CopyMatToClipboard(const cv::Mat &mat) 
+{
+	if(mat.empty()) 
+	{
+		return(false);
+	}
+	// PNG bytes, for the one target FLTK won't advertise on its own
+	std::vector<uchar> pngBuf;
+	if(!cv::imencode(".png", mat, pngBuf, { cv::IMWRITE_PNG_COMPRESSION, 3 }))
+	{
+		return(false);
+	}
+	g_pngData = std::move(pngBuf);
+	g_atomPng = XInternAtom(fl_display, "image/png", False);
+	if(!handlerInstalled) 
+	{
+		Fl::add_system_handler(png_target_handler, nullptr);
+		handlerInstalled = true;
+	}
+	// Normal FLTK path — this claims ownership and handles image/bmp + TARGETS itself
+	cv::Mat rgb;
+	cv::cvtColor(mat, rgb, mat.channels() == 4 ? cv::COLOR_BGRA2RGB : cv::COLOR_BGR2RGB);
+	Fl_Copy_Surface *surf = new Fl_Copy_Surface(rgb.cols, rgb.rows);
+	Fl_Surface_Device::push_current(surf);
+	fl_color(FL_WHITE);
+	fl_rectf(0, 0, rgb.cols, rgb.rows);
+	fl_draw_image(rgb.data, 0, 0, rgb.cols, rgb.rows, 3, (int)rgb.step);
+	Fl_Surface_Device::pop_current();
+	delete surf;
+
+	return(true);
+}
+
+void	crosshair_box(int sx, int sy, int icx, int icy)
+{
+	int cx = sx + icx;
+	int cy = sy + icy;
+	fl_color(BLACK);
+	fl_rect(cx - 6, cy - 6, 12, 12);
+	fl_color(WHITE);
+	fl_rect(cx - 7, cy - 7, 14, 14);
+}
+
+void	crosshair_cross(int sx, int sy, int icx, int icy)
+{
+	int cx = sx + icx;
+	int cy = sy + icy;
+	fl_color(BLACK);
+	fl_line_style(FL_SOLID, 7);
+	fl_line(cx, cy - 10, cx, cy + 10);
+	fl_line(cx - 10, cy, cx + 10, cy);
+	fl_color(WHITE);
+	fl_line_style(FL_SOLID, 3);
+	fl_line(cx, cy - 8, cx, cy + 8);
+	fl_line(cx - 8, cy, cx + 8, cy);
+}
+
+void	crosshair_grid(int sx, int sy, int ww, int hh, int idiv)
+{
+int		loop;
+
+	int w_div = ww / idiv;
+	int h_div = hh / idiv;
+	fl_color(BLACK);
+	fl_line_style(FL_SOLID, 3);
+	for(loop = 0;loop <= ww;loop += w_div)
+	{
+		fl_line(sx + loop, sy, sx + loop, sy + hh);
+	}
+	fl_color(WHITE);
+	fl_line_style(FL_SOLID, 1);
+	for(loop = 0;loop <= ww;loop += w_div)
+	{
+		fl_line(sx + loop, sy, sx + loop, sy + hh);
+	}
+	fl_color(BLACK);
+	fl_line_style(FL_SOLID, 3);
+	for(loop = 0;loop <= hh;loop += h_div)
+	{
+		fl_line(sx, sy + loop, sx + ww, sy + loop);
+	}
+	fl_color(WHITE);
+	fl_line_style(FL_SOLID, 1);
+	for(loop = 0;loop <= hh;loop += h_div)
+	{
+		fl_line(sx, sy + loop, sx + ww, sy + loop);
+	}
+}
+
+void	crosshair_ruler(int sx, int sy, int ww, int hh)
+{
+int		loop;
+
+	int cx = sx + (ww / 2);
+	int cy = sy + (hh / 2);
+	int idiv = (ww / 2);
+	fl_color(BLACK);
+	fl_line_style(FL_SOLID, 3);
+	fl_line(cx - 250, cy + 10, cx + 251, cy + 10);
+	fl_color(WHITE);
+	fl_line_style(FL_SOLID, 1);
+	fl_line(cx - 250, cy + 10, cx + 251, cy + 10);
+	int cnt = 0;
+	for(loop = cx - 250;loop <= cx + 250;loop += 10)
+	{
+		int up = 0;
+		if((cnt % 10) == 0)
+		{
+			up = 10;
+		}
+		fl_color(BLACK);
+		fl_line_style(FL_SOLID, 3);
+		fl_line(loop, cy + 10, loop, cy - up);
+		fl_color(WHITE);
+		fl_line_style(FL_SOLID, 1);
+		fl_line(loop, cy + 10, loop, cy - up);
+
+		if(up == 10)
+		{
+			char buf[64];
+			sprintf(buf, "%d", cnt * 10);
+			fl_font(FL_HELVETICA, 7);
+			fl_draw(buf, loop - 15, cy + 10, 30, 20, FL_ALIGN_CENTER);
+		}
+		cnt++;
+	}
+}
+
 void MaximizeWindow(Fl_Window *win)
 {
-    Display *display = fl_display;
-    Window xid = fl_xid(win);
-    if((display) && (xid))
+	Display *display = fl_display;
+	Window xid = fl_xid(win);
+	if((display) && (xid))
 	{
 		XMapWindow(display, xid);
 		XClientMessageEvent ev;
@@ -704,14 +877,15 @@ struct timeval tv;
 	return(ts);
 }
 
-time_t	since()
+double	since()
 {
 static time_t start = 0;
 
 	time_t pt = precise_time();
 	time_t rr = pt - start;
+	double ff = ((double)rr / 1000000.0);
 	start = pt;
-	return(rr);
+	return(ff);
 }
 
 long int filelength(int fd)
@@ -1393,6 +1567,12 @@ char	cwd[4096];
 	fl_chdir(cwd);
 	int nn = strlen(current_selection);
 	return(nn);
+}
+
+int		alt_file_chooser(void *in_win, char *prompt, char *filter, char *start_path, char *current_selection, int select_dir = 0, int new_file = 0)
+{
+	int rr = my_file_chooser((MyWin *)in_win, prompt, filter, start_path, current_selection, select_dir, new_file);
+	return(rr);
 }
 
 char	*json_parse_string(cJSON *parent, char *find)
@@ -2231,13 +2411,13 @@ void	my_video_settings_chooser(MyWin *in_win, double& contrast, double& brightne
 	}
 }
 
-int	my_color_chooser(char *title, int& red, int& green, int &blue, int& alpha)
+int	my_color_chooser(MyWin *in_win, char *title, int& red, int& green, int &blue, int& alpha)
 {
 static ColorDialog	*cd = NULL;
 
 	if(cd == NULL)
 	{
-		cd = new ColorDialog(NULL, 420, 185, red, green, blue, alpha, title);
+		cd = new ColorDialog(in_win, 420, 185, red, green, blue, alpha, title);
 		cd->set_modal();
 	}
 	if(cd != NULL)
@@ -3907,16 +4087,19 @@ int		loop;
 		else if(strncmp(cp_in, "[dynamic]", strlen("[dynamic]")) == 0)
 		{
 			cp_in += strlen("[dynamic]");
-			if(!win->dynamic_string_window->visible())
+			if(win != NULL)
 			{
-				if(win->dynamic_string_window->stay_closed == 0)
+				if(!win->dynamic_string_window->visible())
 				{
-					Fl::add_timeout(0.1, force_dynamic_string_window_cb, win);
+					if(win->dynamic_string_window->stay_closed == 0)
+					{
+						Fl::add_timeout(0.1, force_dynamic_string_window_cb, win);
+					}
 				}
-			}
-			if(win->dynamic_string_window->use != NULL)
-			{
-				strncat(cp_out, win->dynamic_string_window->use, limit);
+				if(win->dynamic_string_window->use != NULL)
+				{
+					strncat(cp_out, win->dynamic_string_window->use, limit);
+				}
 			}
 		}
 		else if(strncmp(cp_in, "[curl=", strlen("[curl=")) == 0)
@@ -3994,7 +4177,7 @@ int		loop;
 							const char *error_ptr = cJSON_GetErrorPtr();
 							if(error_ptr != NULL)
 							{
-								fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+								fprintf(stderr, "Error: JSON Error in %s before: %s\n", use_url, error_ptr);
 							}
 						}
 						else
@@ -4054,59 +4237,77 @@ int		loop;
 	{
 		streaming = STREAMING_NDI;
 		char *cp = out + strlen("ndi://");
-		if(strlen(cp) > 0)
+		if(win != NULL)
 		{
-			strcpy(win->ndi_stream_name, cp);
+			if(strlen(cp) > 0)
+			{
+				strcpy(win->ndi_stream_name, cp);
+			}
 		}
 	}
 	else if(strncasecmp(out, "ndi_rgbx://", strlen("ndi_rgbx://")) == 0)
 	{
 		streaming = STREAMING_NDI;
 		char *cp = out + strlen("ndi_rgbx://");
-		if(strlen(cp) > 0)
+		if(win != NULL)
 		{
-			strcpy(win->ndi_stream_name, cp);
-			win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_RGBX;
+			if(strlen(cp) > 0)
+			{
+				strcpy(win->ndi_stream_name, cp);
+				win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_RGBX;
+			}
 		}
 	}
 	else if(strncasecmp(out, "ndi_bgrx://", strlen("ndi_bgrx://")) == 0)
 	{
 		streaming = STREAMING_NDI;
 		char *cp = out + strlen("ndi_bgrx://");
-		if(strlen(cp) > 0)
+		if(win != NULL)
 		{
-			strcpy(win->ndi_stream_name, cp);
-			win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_BGRX;
+			if(strlen(cp) > 0)
+			{
+				strcpy(win->ndi_stream_name, cp);
+				win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_BGRX;
+			}
 		}
 	}
 	else if(strncasecmp(out, "ndi_i420://", strlen("ndi_i420://")) == 0)
 	{
 		streaming = STREAMING_NDI;
 		char *cp = out + strlen("ndi_i420://");
-		if(strlen(cp) > 0)
+		if(win != NULL)
 		{
-			strcpy(win->ndi_stream_name, cp);
-			win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_I420;
+			if(strlen(cp) > 0)
+			{
+				strcpy(win->ndi_stream_name, cp);
+				win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_I420;
+			}
 		}
 	}
 	else if(strncasecmp(out, "ndi_uyva://", strlen("ndi_uyva://")) == 0)
 	{
 		streaming = STREAMING_NDI;
 		char *cp = out + strlen("ndi_uyva://");
-		if(strlen(cp) > 0)
+		if(win != NULL)
 		{
-			strcpy(win->ndi_stream_name, cp);
-			win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_UYVA;
+			if(strlen(cp) > 0)
+			{
+				strcpy(win->ndi_stream_name, cp);
+				win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_UYVA;
+			}
 		}
 	}
 	else if(strncasecmp(out, "ndi_uyvy://", strlen("ndi_uyvy://")) == 0)
 	{
 		streaming = STREAMING_NDI;
 		char *cp = out + strlen("ndi_uyvy://");
-		if(strlen(cp) > 0)
+		if(win != NULL)
 		{
-			strcpy(win->ndi_stream_name, cp);
-			win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_UYVY;
+			if(strlen(cp) > 0)
+			{
+				strcpy(win->ndi_stream_name, cp);
+				win->ndi_send_video_format = NDI_SEND_VIDEO_FORMAT_UYVY;
+			}
 		}
 	}
 	else if(strncasecmp(out, "virtual://", strlen("virtual://")) == 0)
@@ -4121,27 +4322,30 @@ int		loop;
 			int nn = match_tokens(str, ':', match);
 			if(nn > 0)
 			{
-				strcpy(win->virtual_stream_name, match[0]);
-				if(nn > 1)
+				if(win != NULL)
 				{
-					if(strncasecmp(match[1], "yuyv", strlen("yuyv")) == 0)
+					strcpy(win->virtual_stream_name, match[0]);
+					if(nn > 1)
 					{
-						win->virtual_output_format = VIRTUAL_OUTPUT_FORMAT_YUYV;
-					}
-					else if(strncasecmp(match[1], "bgr", strlen("bgr")) == 0)
-					{
-						win->virtual_output_format = VIRTUAL_OUTPUT_FORMAT_BGR;
-					}
-					else if(strncasecmp(match[1], "rgb", strlen("rgb")) == 0)
-					{
-						win->virtual_output_format = VIRTUAL_OUTPUT_FORMAT_RGB;
-					}
-					if(nn > 2)
-					{
-						win->virtual_output_height = atoi(match[2]);
-						if(nn > 3)
+						if(strncasecmp(match[1], "yuyv", strlen("yuyv")) == 0)
 						{
-							win->virtual_output_height = atoi(match[3]);
+							win->virtual_output_format = VIRTUAL_OUTPUT_FORMAT_YUYV;
+						}
+						else if(strncasecmp(match[1], "bgr", strlen("bgr")) == 0)
+						{
+							win->virtual_output_format = VIRTUAL_OUTPUT_FORMAT_BGR;
+						}
+						else if(strncasecmp(match[1], "rgb", strlen("rgb")) == 0)
+						{
+							win->virtual_output_format = VIRTUAL_OUTPUT_FORMAT_RGB;
+						}
+						if(nn > 2)
+						{
+							win->virtual_output_height = atoi(match[2]);
+							if(nn > 3)
+							{
+								win->virtual_output_height = atoi(match[3]);
+							}
 						}
 					}
 				}
@@ -4590,6 +4794,45 @@ unsigned short row, col, pos;
 			pos++;
 		}
 	}
+}
+
+XImage	*grab_entire_offscreen_window(Display *dpy, Window win) 
+{
+	int event_base, error_base;
+	
+	// 1. Verify that the server supports the Composite extension
+	if(!XCompositeQueryExtension(dpy, &event_base, &error_base)) 
+	{
+		fprintf(stderr, "Error: XComposite extension not supported by the X-Server.\n");
+		return NULL;
+	}
+	// 2. Query actual window size to allocate the right size buffer
+	XWindowAttributes attr;
+	if(!XGetWindowAttributes(dpy, win, &attr)) 
+	{
+		return NULL;
+	}
+	// 3. Instruct X11 to allocate and maintain backing store for this target window
+	// CompositeRedirectAutomatic keeps the window drawing normally on-screen too
+	XCompositeRedirectWindow(dpy, win, CompositeRedirectAutomatic);
+
+	// 4. Bind a named Pixmap identifier to the offscreen backing surface
+	Pixmap pixmap = XCompositeNameWindowPixmap(dpy, win);
+	if(!pixmap) 
+	{
+		fprintf(stderr, "Error: Failed to bind window pixmap. Is it mapped?\n");
+		XCompositeUnredirectWindow(dpy, win, CompositeRedirectAutomatic);
+		return NULL;
+	}
+	// 5. Read the pixel data directly from the Pixmap rather than the Window.
+	// Pixmaps do NOT throw BadMatch errors when portions are offscreen.
+	XImage *img = XGetImage(dpy, pixmap, 0, 0, attr.width, attr.height, AllPlanes, ZPixmap);
+
+	// 6. Clean up resources immediately to prevent server memory leaks
+	XFreePixmap(dpy, pixmap);
+	XCompositeUnredirectWindow(dpy, win, CompositeRedirectAutomatic);
+
+	return(img);
 }
 
 unsigned char	*x11_grab_window_image(Camera *cam, Window win, int *ww, int *hh, int *dd)
@@ -7969,6 +8212,7 @@ char	cwd[4096];
 
 void	file_selector_accept_cb(Fl_Widget *w, void *v)
 {
+extern int	is_url(char *);
 void	stop_playing_audio_button_cb(Fl_Widget *w, void *v);
 char	cwd[4096];
 
@@ -7983,35 +8227,43 @@ char	cwd[4096];
 	{
 		int use_this = 0;
 		char *filename = "";
-		if(fs->new_file == 1)
+		char *str = (char *)fs->path->value();
+		int go_ahead = 1;
+		if(is_url(str))
 		{
-			char *str = (char *)fs->path->value();
-			if(access(str, F_OK) != 0)
+			strcpy(fs->current_selection, str);
+			fs->use_result = 1;
+		}
+		else
+		{
+			if(fs->new_file == 1)
 			{
-				if(!IsDirectory(str))
+				if(access(str, F_OK) != 0)
 				{
-					use_this = 1;
-					filename = str;
-					sprintf(fs->current_selection, "%s", str);
-					fs->use_result = 1;
+					if(!IsDirectory(str))
+					{
+						use_this = 1;
+						filename = str;
+						sprintf(fs->current_selection, "%s", str);
+						fs->use_result = 1;
+					}
 				}
 			}
-		}
-		if(use_this == 0)
-		{
-			getcwd(cwd, 4096);
-			char *fn = (char *)fs->scroll->selection->label();
-			sprintf(fs->current_selection, "%s/%s", cwd, fn);
-			fs->use_result = 1;
-			filename = fs->current_selection;
-		}
-		int go_ahead = 1;
-		if(IsDirectory(filename))
-		{
-			go_ahead = 0;
-			if(fs->select_dir != 0)
+			if(use_this == 0)
 			{
-				go_ahead = 1;
+				getcwd(cwd, 4096);
+				char *fn = (char *)fs->scroll->selection->label();
+				sprintf(fs->current_selection, "%s/%s", cwd, fn);
+				fs->use_result = 1;
+				filename = fs->current_selection;
+			}
+			if(IsDirectory(filename))
+			{
+				go_ahead = 0;
+				if(fs->select_dir != 0)
+				{
+					go_ahead = 1;
+				}
 			}
 		}
 		if(go_ahead == 1)
@@ -8031,39 +8283,48 @@ void	file_selector_cancel_cb(Fl_Widget *w, void *v)
 
 void	file_selector_path_cb(Fl_Widget *w, void *v)
 {
-char	out[4096];
+extern int	is_url(char *str);
+char		out[4096];
 
 	FileSelector *fs = (FileSelector *)v;
 	char *str = (char *)fs->path->value();
-	fl_filename_expand(out, 4096, str);
-	if(fs->new_file == 1)
+	if(is_url(str))
 	{
-		fs->accept->hide();
-		if(access(str, F_OK) != 0)
+		fs->accept->show();
+		strcpy(fs->current_selection, str);
+	}
+	else
+	{
+		fl_filename_expand(out, 4096, str);
+		if(fs->new_file == 1)
 		{
-			char *use = strdup(str);
-			if(use != NULL)
+			fs->accept->hide();
+			if(access(str, F_OK) != 0)
 			{
-				char *dir_name = dirname(use);
-				if(dir_name != NULL)
+				char *use = strdup(str);
+				if(use != NULL)
 				{
-					if(access(dir_name, W_OK) == 0)
+					char *dir_name = dirname(use);
+					if(dir_name != NULL)
 					{
-						strcpy(fs->current_selection, str);
-						fs->accept->show();
+						if(access(dir_name, W_OK) == 0)
+						{
+							strcpy(fs->current_selection, str);
+							fs->accept->show();
+						}
 					}
+					free(use);
 				}
-				free(use);
+			}
+			else
+			{
+				fs->Update(out);
 			}
 		}
 		else
 		{
 			fs->Update(out);
 		}
-	}
-	else
-	{
-		fs->Update(out);
 	}
 }
 
@@ -9407,7 +9668,7 @@ int	scan_paths_for_shortcut(char *path)
 char	buf[256];
 
 	int rr = 0;
-	FILE *fp = fopen("shortcuts.txt", "r");
+	FILE *fp = fopen("button_shortcuts.txt", "r");
 	if(fp != NULL)
 	{
 		while(fgets(buf, 256, fp))
@@ -9468,6 +9729,20 @@ ShortcutWindow::ShortcutWindow(MyButton *b, int xx, int yy, int ww, int hh) : Fl
 
 	b->my_window->SetErrorMessage("Waiting on a keystroke.", 100000);
 	button = b;
+	slider = NULL;
+	box(FL_NO_BOX);
+	set_modal();
+	take_focus();
+	Fl::focus(this);
+}
+
+ShortcutWindow::ShortcutWindow(MySlider *s, int xx, int yy, int ww, int hh) : Fl_Window(xx, yy, ww, hh)
+{
+	end();
+
+	s->my_window->SetErrorMessage("Waiting on two keystrokes, down then up.", 100000);
+	slider = s;
+	button = NULL;
 	box(FL_NO_BOX);
 	set_modal();
 	take_focus();
@@ -9502,42 +9777,79 @@ char	path[4096];
 		&& (key != FL_Alt_R)
 		&& (key != FL_Escape))
 		{
-			FILE *fp = fopen("shortcuts.txt", "a");
-			if(fp != NULL)
+			int sated = 0;
+			int state = Fl::event_state();
+			if((state & FL_ALT) == FL_ALT)
 			{
-				int state = Fl::event_state();
-				if((state & FL_ALT) == FL_ALT)
-				{
-					key += FL_ALT;
-				}
-				if((state & FL_SHIFT) == FL_SHIFT)
-				{
-					key += FL_SHIFT;
-				}
-				if((state & FL_CTRL) == FL_CTRL)
-				{
-					key += FL_CTRL;
-				}
+				key += FL_ALT;
+			}
+			if((state & FL_SHIFT) == FL_SHIFT)
+			{
+				key += FL_SHIFT;
+			}
+			if((state & FL_CTRL) == FL_CTRL)
+			{
+				key += FL_CTRL;
+			}
+			if(button != NULL)
+			{
 				button->my_window->SetErrorMessage("Waiting on a keystroke - Satisfied.");
 				button->shortcut(key);
-				flag = 1;
-				hide();
-				Fl::delete_widget(this);
-				strcpy(path, "");
-				create_path_to_widget(button, path);
-				if(strlen(path) > 0)
+				sated = 1;
+			}
+			if(slider != NULL)
+			{
+				if(slider->ShortcutDown() == 0)
 				{
-					fprintf(fp, "%s\t%d\n", path, key);
+					slider->ShortcutDown(key);
+					slider->my_window->SetErrorMessage("Waiting on a 2nd keystroke.");
 				}
 				else
 				{
-					button->my_window->SetErrorMessage("Waiting on a keystroke - Failed.");
+					slider->ShortcutUp(key);
+					slider->my_window->SetErrorMessage("Waiting on a keystroke - Satisfied.");
+					sated = 1;
 				}
-				fclose(fp);
 			}
-			else
+			flag = 1;
+			if(sated == 1)
 			{
-				button->my_window->SetErrorMessage("Waiting on a keystroke - Failed.");
+				hide();
+				Fl::delete_widget(this);
+				strcpy(path, "");
+				if(button != NULL)
+				{
+					create_path_to_widget(button, path);
+					if(strlen(path) > 0)
+					{
+						FILE *fp = fopen("button_shortcuts.txt", "a");
+						if(fp != NULL)
+						{
+							fprintf(fp, "%s\t%d\n", path, key);
+							fclose(fp);
+						}
+						else
+						{
+							button->my_window->SetErrorMessage("Waiting on a keystroke - Failed.");
+						}
+					}
+					else
+					{
+						button->my_window->SetErrorMessage("Waiting on a keystroke - Failed.");
+					}
+				}
+				else
+				{
+					create_path_to_widget(slider, path);
+					if(strlen(path) > 0)
+					{
+						slider->my_window->AddSliderShortcut(path, slider->shortcut_down, slider->shortcut_up);
+					}
+					else
+					{
+						button->my_window->SetErrorMessage("Waiting on a keystroke - Failed.");
+					}
+				}
 			}
 		}
 		else if(key == FL_Escape)
@@ -9621,6 +9933,26 @@ void	my_button_popup_cb(Fl_Widget *w, void *v)
 			int xx = button->x();
 			int yy = button->y();
 			RelabelWindow *sc = new RelabelWindow(button->my_window, button, xx, yy, 340, 40);
+			sc->show();
+		}
+		else if(strcmp(str, "Cancel") == 0)
+		{
+			browser->window()->hide();
+		}
+	}
+}
+
+void	my_slider_popup_cb(Fl_Widget *w, void *v)
+{
+	Fl_Hold_Browser *browser = (Fl_Hold_Browser *)w;
+	MySlider *slider = (MySlider *)v;
+	char *str = (char *)browser->text(browser->value());
+	if(str != NULL)
+	{
+		if(strcmp(str, "Assign Shortcut") == 0)
+		{
+			browser->window()->hide();
+			ShortcutWindow *sc = new ShortcutWindow(slider, 0, 0, 10, 10);
 			sc->show();
 		}
 		else if(strcmp(str, "Cancel") == 0)
@@ -10000,8 +10332,9 @@ void	SelectButton::Prev()
 
 // SECTION *********************************** DRAG WINDOW *******************************************
 
-DragWindow::DragWindow(int ww, int hh) : Fl_Double_Window(ww, hh)
+DragWindow::DragWindow(MyWin *in_win, int ww, int hh) : Fl_Double_Window(ww, hh)
 {
+	my_window = in_win;
 	last_x = 0;
 	last_y = 0;
 	border(0);
@@ -10010,29 +10343,35 @@ DragWindow::DragWindow(int ww, int hh) : Fl_Double_Window(ww, hh)
 	color(BLACK);
 }
 
-DragWindow::DragWindow(int ww, int hh, char *lbl) : Fl_Double_Window(ww, hh, lbl)
+DragWindow::DragWindow(MyWin *in_win, int ww, int hh, char *lbl) : Fl_Double_Window(ww, hh, lbl)
 {
+	my_window = in_win;
 	last_x = 0;
 	last_y = 0;
 	border(0);
+	set_non_modal();
 	box(FL_FRAME_BOX);
 	color(BLACK);
 }
 
-DragWindow::DragWindow(int xx, int yy, int ww, int hh) : Fl_Double_Window(xx, yy, ww, hh)
+DragWindow::DragWindow(MyWin *in_win, int xx, int yy, int ww, int hh) : Fl_Double_Window(xx, yy, ww, hh)
 {
+	my_window = in_win;
 	last_x = 0;
 	last_y = 0;
 	border(0);
+	set_non_modal();
 	box(FL_FRAME_BOX);
 	color(BLACK);
 }
 
-DragWindow::DragWindow(int xx, int yy, int ww, int hh, char *lbl) : Fl_Double_Window(xx, yy, ww, hh, lbl)
+DragWindow::DragWindow(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : Fl_Double_Window(xx, yy, ww, hh, lbl)
 {
+	my_window = in_win;
 	last_x = 0;
 	last_y = 0;
 	border(0);
+	set_non_modal();
 	box(FL_FRAME_BOX);
 	color(BLACK);
 }
@@ -10043,6 +10382,10 @@ DragWindow::~DragWindow()
 
 int	DragWindow::handle(int event)
 {
+int		loop;
+int		inner;
+char	wid_path[4096];
+
 	int flag = 0;
 	if(event == FL_PUSH)
 	{
@@ -10118,13 +10461,13 @@ void	dialog_common(MyWin *in_win, Dialog *dialog, char *lbl)
 	dialog->old_h = dialog->h();
 }
 
-Dialog::Dialog(MyWin *in_win, int ww, int hh, char *lbl) : DragWindow(ww, hh + 20)
+Dialog::Dialog(MyWin *in_win, int ww, int hh, char *lbl) : DragWindow(in_win, ww, hh + 20)
 {
 	MyWin *my_window = in_win;
 	dialog_common(my_window, this, lbl);
 }
 
-Dialog::Dialog(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : DragWindow(xx, yy, ww, hh + 20)
+Dialog::Dialog(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : DragWindow(in_win, xx, yy, ww, hh + 20)
 {
 	MyWin *my_window = in_win;
 	dialog_common(my_window, this, lbl);
@@ -10138,6 +10481,11 @@ Dialog::~Dialog()
 void	Dialog::label(char *lbl)
 {
 	title_box->copy_label(lbl);
+}
+
+char	*Dialog::label()
+{
+	return((char *)title_box->label());
 }
 
 void	Dialog::resize(int xx, int yy, int ww, int hh)
@@ -12340,7 +12688,7 @@ void	hide_immediate_window_cb(Fl_Widget *w, void *v)
 	win->hide();
 }
 
-void	immediate_choose_color(MySlider *red, MySlider *green, MySlider *blue, MySlider *alpha)
+void	immediate_choose_color(MyWin *in_win, MySlider *red, MySlider *green, MySlider *blue, MySlider *alpha)
 {
 	int rr = red->value();
 	int gg = green->value();
@@ -12350,7 +12698,7 @@ void	immediate_choose_color(MySlider *red, MySlider *green, MySlider *blue, MySl
 	{
 		aa = alpha->value();
 	}
-	my_color_chooser("Fill Color", rr, gg, bb, aa);
+	my_color_chooser(in_win, "Fill Color", rr, gg, bb, aa);
 	red->value(rr);
 	green->value(gg);
 	blue->value(bb);
@@ -12363,28 +12711,36 @@ void	immediate_choose_color(MySlider *red, MySlider *green, MySlider *blue, MySl
 void	immediate_palette_for_font_cb(Fl_Widget *w, void *v)
 {
 	ImmediateDrawingWindow *idw = (ImmediateDrawingWindow *)v;
-	immediate_choose_color(idw->font_red_slider, idw->font_green_slider, idw->font_blue_slider, idw->font_alpha_slider);
+	MyWin *win = idw->my_window;
+
+	immediate_choose_color(win, idw->font_red_slider, idw->font_green_slider, idw->font_blue_slider, idw->font_alpha_slider);
 	drawing_font_color_cb(NULL, idw);
 }
 
 void	immediate_palette_for_line_cb(Fl_Widget *w, void *v)
 {
 	ImmediateDrawingWindow *idw = (ImmediateDrawingWindow *)v;
-	immediate_choose_color(idw->line_red_slider, idw->line_green_slider, idw->line_blue_slider, idw->line_alpha_slider);
+	MyWin *win = idw->my_window;
+
+	immediate_choose_color(win, idw->line_red_slider, idw->line_green_slider, idw->line_blue_slider, idw->line_alpha_slider);
 	drawing_line_color_cb(NULL, idw);
 }
 
 void	immediate_palette_for_rectangle_cb(Fl_Widget *w, void *v)
 {
 	ImmediateDrawingWindow *idw = (ImmediateDrawingWindow *)v;
-	immediate_choose_color(idw->rectangle_red_slider, idw->rectangle_green_slider, idw->rectangle_blue_slider, idw->rectangle_alpha_slider);
+	MyWin *win = idw->my_window;
+
+	immediate_choose_color(win, idw->rectangle_red_slider, idw->rectangle_green_slider, idw->rectangle_blue_slider, idw->rectangle_alpha_slider);
 	drawing_rectangle_color_cb(NULL, idw);
 }
 
 void	immediate_palette_for_freehand_cb(Fl_Widget *w, void *v)
 {
 	ImmediateDrawingWindow *idw = (ImmediateDrawingWindow *)v;
-	immediate_choose_color(idw->freehand_red_slider, idw->freehand_green_slider, idw->freehand_blue_slider, NULL);
+	MyWin *win = idw->my_window;
+
+	immediate_choose_color(win, idw->freehand_red_slider, idw->freehand_green_slider, idw->freehand_blue_slider, NULL);
 	drawing_freehand_color_cb(NULL, idw);
 }
 
@@ -13954,7 +14310,7 @@ void	load_global_palette_as_JSON()
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s reading %s\n", error_ptr, "color_palette.json");
+				fprintf(stderr, "Error: JSON Error in color_palette.json before %s\n", error_ptr);
 			}
 		}
 		else
@@ -14414,6 +14770,7 @@ int		loop;
 
 	InitializeVariables();
 	hot = 0;
+	hot_ready = 0;
 	hot_delay = 10000;
 
 	my_window = in_win;
@@ -14424,8 +14781,10 @@ int		loop;
 	last_retrieve = 0;
 	triggers_requested = 0;
 	trigger_override = 0;
+	sustain_recording = 12;
 	result_trigger = 0;
 	record_error = 0;
+	sound_trigger = 0.5;
 	detect_time = 0;
 	requested_x = -1;
 	requested_y = -1;
@@ -14594,6 +14953,11 @@ int		loop;
 		split_source[loop] = NULL;
 	}
 	ndi_recv = NULL;
+	for(loop = 0;loop < 128;loop++)
+	{
+		trigger_mic_list[loop] = NULL;
+	}
+	trigger_mic_list_cnt = 0;
 
 	strcpy(ndi_fourcc_str, "");
 	strcpy(ndi_format_type, "");
@@ -14798,68 +15162,79 @@ int		loop;
 	if(live_camera == 1)
 	{
 		SetSystemAlias();
-		int starting_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
-		int starting_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
+		int starting_width = requested_w;
+		int starting_height = requested_h;
+		if(my_window->fast_start == 0)
+		{
+			starting_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
+			starting_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
 
-		if(strlen(format_code) > 0)
-		{
-			n_cap->set(CAP_PROP_FOURCC, VideoWriter::fourcc(format_code[0], format_code[1], format_code[2], format_code[3]));
-		}
-		else
-		{
-			char *fourcc_list[128];
-			char use_source[4096];
-			if(source == NULL)
+			if(strlen(format_code) > 0)
 			{
-				sprintf(use_source, "/dev/video%d", num);
+				n_cap->set(CAP_PROP_FOURCC, VideoWriter::fourcc(format_code[0], format_code[1], format_code[2], format_code[3]));
 			}
 			else
 			{
-				strcpy(use_source, source);
-			}
-			int fourcc_cnt = query_fourcc(use_source, fourcc_list);
-			for(loop = 0;loop < fourcc_cnt;loop++)
-			{
-				if(fourcc_list[loop] != NULL)
+				char *fourcc_list[128];
+				char use_source[4096];
+				if(source == NULL)
 				{
-					if(strcasecmp(fourcc_list[loop], "MJPG") == 0)
+					sprintf(use_source, "/dev/video%d", num);
+				}
+				else
+				{
+					strcpy(use_source, source);
+				}
+				int fourcc_cnt = query_fourcc(use_source, fourcc_list);
+				for(loop = 0;loop < fourcc_cnt;loop++)
+				{
+					if(fourcc_list[loop] != NULL)
 					{
-						int fourcc_mjpg = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
-						n_cap->set(cv::CAP_PROP_FOURCC, fourcc_mjpg);
+						if(strcasecmp(fourcc_list[loop], "MJPG") == 0)
+						{
+							int fourcc_mjpg = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+							n_cap->set(cv::CAP_PROP_FOURCC, fourcc_mjpg);
+						}
+						free(fourcc_list[loop]);
 					}
-					free(fourcc_list[loop]);
 				}
 			}
 		}
-		if((starting_width != requested_w) || (starting_height != requested_h))
+		int n_width = requested_w;
+		int n_height = requested_h;
+		if(my_window->fast_start == 0)
 		{
-			n_cap->set(CAP_PROP_FRAME_WIDTH, requested_w);
-			n_cap->set(CAP_PROP_FRAME_HEIGHT, requested_h);
-			sleep(1);
-		}
-		int n_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
-		int n_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
-		n_cap->set(CAP_PROP_BUFFERSIZE, 10);
-		n_cap->set(CAP_PROP_FPS, 60);
-
-		cap_fourcc = n_cap->get(cv::CAP_PROP_FOURCC);
-		char c1, c2, c3, c4;
-		convert_fourcc(cap_fourcc, c1, c2, c3, c4);
-		cap_total_frames = 0;
-		cap_total_frames = n_cap->get(cv::CAP_PROP_FRAME_COUNT);
-		cap_format = n_cap->get(cv::CAP_PROP_FORMAT);
-		int frame_rate = n_cap->get(cv::CAP_PROP_FPS);
-		int frame_pos = n_cap->get(cv::CAP_PROP_POS_FRAMES);
-		Mat test_only = imread(path);
-		if(cap_total_frames < 2)
-		{
-			if((cap_fourcc == 0) || ((test_only.rows > 0) && (test_only.cols > 0)))
+			if((starting_width != requested_w) || (starting_height != requested_h))
 			{
-				type = CAMERA_TYPE_IMAGE;
+				n_cap->set(CAP_PROP_FRAME_WIDTH, requested_w);
+				n_cap->set(CAP_PROP_FRAME_HEIGHT, requested_h);
+				sleep(1);
 			}
+			int n_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
+			int n_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
+			n_cap->set(CAP_PROP_BUFFERSIZE, 10);
+			n_cap->set(CAP_PROP_FPS, 60);
+
+			cap_fourcc = n_cap->get(cv::CAP_PROP_FOURCC);
+			char c1, c2, c3, c4;
+			convert_fourcc(cap_fourcc, c1, c2, c3, c4);
+			cap_total_frames = 0;
+			cap_total_frames = n_cap->get(cv::CAP_PROP_FRAME_COUNT);
+			cap_format = n_cap->get(cv::CAP_PROP_FORMAT);
+			int frame_rate = n_cap->get(cv::CAP_PROP_FPS);
+			int frame_pos = n_cap->get(cv::CAP_PROP_POS_FRAMES);
+
+			Mat test_only = imread(path);
+			if(cap_total_frames < 2)
+			{
+				if((cap_fourcc == 0) || ((test_only.rows > 0) && (test_only.cols > 0)))
+				{
+					type = CAMERA_TYPE_IMAGE;
+				}
+			}
+			n_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
+			n_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
 		}
-		n_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
-		n_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
 		cap = n_cap;
 		width = n_width;
 		height = n_height;
@@ -15772,18 +16147,22 @@ int		loop;
 		}
 		cap = n_cap;
 	}
-	net = my_window->net;
-	for(loop = 0;loop < my_window->recognize_class_cnt;loop++)
+	if(my_window->fast_start == 0)
 	{
-		if(my_window->recognize_class_name[loop] != NULL)
+#ifdef FORCE_BIRD
+		for(loop = 0;loop < my_window->recognize_class_cnt;loop++)
 		{
-			if((strcasecmp("bird", my_window->recognize_class_name[loop]) == 0)
-			|| (strcasecmp("squirrel", my_window->recognize_class_name[loop]) == 0)
-			|| (strcasecmp("animal", my_window->recognize_class_name[loop]) == 0))
+			if(my_window->recognize_class_name[loop] != NULL)
 			{
-				object_index[loop] = 1;
+				if((strcasecmp("bird", my_window->recognize_class_name[loop]) == 0)
+				|| (strcasecmp("squirrel", my_window->recognize_class_name[loop]) == 0)
+				|| (strcasecmp("animal", my_window->recognize_class_name[loop]) == 0))
+				{
+					object_index[loop] = 1;
+				}
 			}
 		}
+#endif
 	}
 	if(!mat.empty())
 	{
@@ -15811,46 +16190,49 @@ int		loop;
 			{
 				sprintf(buf, "Open camera:\n%s", source);
 			}
-			if(mat.empty())
+			if(my_window->fast_start == 0)
 			{
-				if(cap != NULL)
+				if(mat.empty())
 				{
-					if(cap->isOpened())
+					if(cap != NULL)
 					{
-						cap->grab();
-						last_grab_time = precise_time();
-					}
-				}
-				Capture(1);
-			}
-			if(!mat.empty())
-			{
-				if(start_win->image_mat_cnt < 128)
-				{
-					Mat local_mat;
-					mat.copyTo(local_mat);
-					cv::resize(local_mat, local_mat, cv::Size(160, 90));
-					start_win->image_mat[start_win->image_mat_cnt] = local_mat.clone();
-					start_win->image_mat_cnt++;
-					start_win->redraw();
-					if(start_win->intro_pipe_fp != NULL)
-					{
-						Mat send_mat;
-						int nn = fileno(start_win->intro_pipe_fp);
-						int sz = local_mat.total() * local_mat.elemSize();
-						fprintf(start_win->intro_pipe_fp, "image: %d\n", sz);
-						fflush(start_win->intro_pipe_fp);
-						unsigned char *cp = local_mat.ptr();
-						for(int inner = 0;inner < sz;inner++)
+						if(cap->isOpened())
 						{
-							fprintf(start_win->intro_pipe_fp, "%u\n", *cp);
-							cp++;
+							cap->grab();
+							last_grab_time = precise_time();
 						}
-						fflush(start_win->intro_pipe_fp);
+					}
+					Capture(1);
+				}
+				if(!mat.empty())
+				{
+					if(start_win->image_mat_cnt < 128)
+					{
+						Mat local_mat;
+						mat.copyTo(local_mat);
+						cv::resize(local_mat, local_mat, cv::Size(160, 90));
+						start_win->image_mat[start_win->image_mat_cnt] = local_mat.clone();
+						start_win->image_mat_cnt++;
+						start_win->redraw();
+						if(start_win->intro_pipe_fp != NULL)
+						{
+							Mat send_mat;
+							int nn = fileno(start_win->intro_pipe_fp);
+							int sz = local_mat.total() * local_mat.elemSize();
+							fprintf(start_win->intro_pipe_fp, "image: %d\n", sz);
+							fflush(start_win->intro_pipe_fp);
+							unsigned char *cp = local_mat.ptr();
+							for(int inner = 0;inner < sz;inner++)
+							{
+								fprintf(start_win->intro_pipe_fp, "%u\n", *cp);
+								cp++;
+							}
+							fflush(start_win->intro_pipe_fp);
+						}
 					}
 				}
+				start_win->Update(buf);
 			}
-			start_win->Update(buf);
 		}
 	}
 }
@@ -15862,6 +16244,7 @@ int	loop;
 
 	power = 0;
 	hot = 0;
+	hot_ready = 0;
 	int cnt = 0;
 	Fl::remove_timeout(look_for_fullscreen_win_cb, this);
 	Fl::remove_timeout(slideshow_cb, this);
@@ -15979,6 +16362,15 @@ int	loop;
 			pip[loop] = NULL;
 		}
 	}
+	for(loop = 0;loop < trigger_mic_list_cnt;loop++)
+	{
+		if(trigger_mic_list[loop] != NULL)
+		{
+			free(trigger_mic_list[loop]);
+			trigger_mic_list[loop] = NULL;
+		}
+	}
+	trigger_mic_list_cnt = 0;
 	for(loop = 0;loop < 128;loop++)
 	{
 		if(filter_plugin[loop] != NULL)
@@ -16744,7 +17136,7 @@ void	Camera::PTZ_MoveToTemplate()
 					if(spd_y < 0) spd_y = 0;
 					if(spd_y > 12) spd_y = 12;
 
-					int zoom_factor = my_window->ptz_zoom_reading;
+					int zoom_factor = ptz_win->ptz_zoom_reading;
 					if(zoom_factor < 1) zoom_factor = 1;
 					if(zoom_factor > 16384) zoom_factor = 16384;
 					double use = (double)(16384 - zoom_factor) / 16384.0;
@@ -16983,6 +17375,11 @@ int	loop;
 		color_it_replace_a[loop] = 0;
 		trigger[loop] = 0;
 	}
+	for(loop = 0;loop < 128;loop++)
+	{
+		trigger_mic_list[loop] = NULL;
+	}
+	trigger_mic_list_cnt = 0;
 	for(loop = 0;loop < 1024;loop++)
 	{
 		slideshow_list[loop] = NULL;
@@ -17031,6 +17428,7 @@ int	loop;
 	snapshot_scale = 0.0;
 
 	hot = 0;
+	hot_ready = 0;
 	hot_delay = 0;
 	hot_fps = 0;
 	type = 0;
@@ -17430,6 +17828,8 @@ int	inner;
 	fprintf(fp, "\t\"requested h\": %d,\n", requested_h);
 	fprintf(fp, "\t\"record trigger\": %d,\n", record_trigger);
 	fprintf(fp, "\t\"darkness trigger\": %f,\n", darkness_trigger);
+	fprintf(fp, "\t\"sound trigger\": %f,\n", sound_trigger);
+	fprintf(fp, "\t\"sustain recording\": %d,\n", (int)sustain_recording);
 	fprintf(fp, "\t\"schedule start\": %d,\n", schedule_start);
 	fprintf(fp, "\t\"schedule stop\": %d,\n", schedule_stop);
 	fprintf(fp, "\t\"schedule day\": %d,\n", schedule_day);
@@ -17517,6 +17917,23 @@ int	inner;
 			}
 		}
 		fprintf(fp, "\t],\n");
+	}
+	fprintf(fp, "\t\"trigger mic list cnt\": %d,\n", trigger_mic_list_cnt);
+	if(trigger_mic_list_cnt > 0)
+	{
+		fprintf(fp, "\t\"trigger mic list\": [");
+		for(loop = 0;loop < trigger_mic_list_cnt;loop++)
+		{
+			fprintf(fp, "\"%s\"", trigger_mic_list[loop]);
+			if(loop < trigger_mic_list_cnt - 1)
+			{
+				fprintf(fp, ",");
+			}
+			else
+			{
+				fprintf(fp, "],\n");
+			}
+		}
 	}
 	fprintf(fp, "\t\"pseudo camera name\": \"%s\",\n", pseudo_camera_name);
 	fprintf(fp, "\t\"color it cnt\": %d,\n", color_it_cnt);
@@ -17878,6 +18295,7 @@ int	inner;
 	{
 		int nn = local_object_cnt - 1;
 		int cnt = 0;
+		fprintf(fp, "\t\"recognize object cnt\": %d,\n", local_object_cnt);
 		fprintf(fp, "\t\"recognize object\": [");
 		for(loop = 0;loop < my_window->recognize_class_cnt;loop++)
 		{
@@ -18023,6 +18441,8 @@ NDIlib_metadata_frame_t	metadata_frame;
 					frame.copyTo(in_mat);
 				}
 				NDILib->NDIlib_recv_free_video_v2(ndi_recv, &video_frame);
+				hot_ready++;
+				if(hot_ready > 100) hot_ready = 1;
 			}
 			break;
 			// There is a status change on the receiver (e.g. new web interface)
@@ -18123,6 +18543,8 @@ void	Camera::CaptureLoop()
 						start = precise_time();
 						frames = 0;
 					}
+					hot_ready++;
+					if(hot_ready > 100) hot_ready = 1;
 				}
 			}
 		}
@@ -18356,7 +18778,7 @@ void	Camera::LoadImmediate(char *filename)
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in %s before: %s\n", filename, error_ptr);
 			}
 		}
 		else
@@ -19733,8 +20155,14 @@ int				inner;
 					if(hot == 0)
 					{
 						hot = 1;
+						hot_ready = 0;
 						create_task((int (*)(int *))thread_read_camera, (void *)this);
-						sleep(1);
+						int cnt = 0;
+						while((hot_ready < 12) && (cnt < 200))
+						{
+							usleep(20000);
+							cnt++;
+						}
 					}
 					TransferHotMat(temp_mat);
 					if(freeze_video == 1)
@@ -21268,50 +21696,54 @@ std::vector<int> param(2);
 	}
 }
 
+
 void	Camera::StartCapture()
 {
 	capturing = 1;
 	pthread_t signal_thread = create_task((int (*)(int *))capture_frame, (void *)this);
 }
 
-int	Camera::PostProcessRecognition(Mat &frame, const vector<Mat> &outs, int *out_x, int *out_y, int *second_x, int *second_y)
+int	Camera::PostProcessRecognition(Mat &frame, Mat &output, int *out_x, int *out_y, int *second_x, int *second_y)
 {
-vector<int> classIds;
-vector<float> confidences;
-vector<Rect> boxes;
-
-	*out_x = -1;
-	*out_y = -1;
-	*second_x = -1;
-	*second_y = -1;
 	int found = -1;
-	for(size_t i = 0; i < outs.size(); ++i)
-	{
-		float *data = (float *)outs[i].data;
-		for(int j = 0;j < outs[i].rows; ++j, data += outs[i].cols)
-		{
-			Mat scores = outs[i].row(j).colRange(5, outs[i].cols);
-			Point classIdPoint;
-			double confidence;
+	int num_classes = my_window->recognize_class_cnt;
+	double scaleX = (double)frame.cols / 640.0;
+	double scaleY = (double)frame.rows / 640.0;
 
-			minMaxLoc(scores, 0, &confidence, 0, &classIdPoint);
-			if(confidence > recognition_threshold)
-			{
-				int centerX = (int)(data[0] * frame.cols);
-				int centerY = (int)(data[1] * frame.rows);
-				int width = (int)(data[2] * frame.cols);
-				int height = (int)(data[3] * frame.rows);
-				int left = centerX - width / 2;
-				int top = centerY - height / 2;
-					
-				classIds.push_back(classIdPoint.x);
-				confidences.push_back((float)confidence);
-				boxes.push_back(Rect(left, top, width, height));
-			}
+	int sizes[] = { 4 + num_classes, 8400 };
+	cv::Mat rawData(2, sizes, CV_32F, output.ptr<float>());
+	cv::Mat transposedData = rawData.t(); 
+
+	float nmsThreshold = 0.50f;
+	std::vector<int> classIds;
+	std::vector<float> confidences;
+	std::vector<cv::Rect> boxes;
+	for(int i = 0; i < transposedData.rows; ++i) 
+	{
+		float *data = transposedData.ptr<float>(i);
+		cv::Mat scores(1, num_classes, CV_32F, data + 4);
+		cv::Point classIdPoint;
+		double maxClassScore;
+		cv::minMaxLoc(scores, nullptr, &maxClassScore, nullptr, &classIdPoint);
+		if(maxClassScore > recognition_threshold)
+		{
+			float cx = data[0]; // Center X
+			float cy = data[1]; // Center Y
+			float w  = data[2]; // Width
+			float h  = data[3]; // Height
+
+			int left = static_cast<int>((cx - 0.5 * w) * scaleX);
+			int top  = static_cast<int>((cy - 0.5 * h) * scaleY);
+			int width = static_cast<int>(w * scaleX);
+			int height = static_cast<int>(h * scaleY);
+
+			classIds.push_back(classIdPoint.x);
+			confidences.push_back(static_cast<float>(maxClassScore));
+			boxes.push_back(cv::Rect(left, top, width, height));
 		}
 	}
-	vector<int> indices;
-	NMSBoxes(boxes, confidences, recognition_threshold, 0.4, indices);
+	std::vector<int> indices;
+	cv::dnn::NMSBoxes(boxes, confidences, recognition_threshold, nmsThreshold, indices);
 	detected_object_cnt = 0;
 	int max_x = -1000000;
 	int max_y = -1000000;
@@ -21323,20 +21755,23 @@ vector<Rect> boxes;
 		Rect box = boxes[idx];
 		if(object_index[classIds[idx]] == 1)
 		{
-			found = classIds[idx];
+			if(detected_object_cnt < 10)
+			{
+				found = classIds[idx];
 
-			if(box.x < min_x) min_x = box.x;
-			if(box.y < min_y) min_y = box.y;
-			if((box.x + box.width) > max_x) max_x = box.x + box.width;
-			if((box.y + box.height) > max_y) max_y = box.y + box.height;
+				if(box.x < min_x) min_x = box.x;
+				if(box.y < min_y) min_y = box.y;
+				if((box.x + box.width) > max_x) max_x = box.x + box.width;
+				if((box.y + box.height) > max_y) max_y = box.y + box.height;
 
-			detected_object[detected_object_cnt].x = box.x;
-			detected_object[detected_object_cnt].y = box.y;
-			detected_object[detected_object_cnt].w = box.width;
-			detected_object[detected_object_cnt].h = box.height;
-			detected_object[detected_object_cnt].idx = classIds[idx];
-			detected_object[detected_object_cnt].confidence = confidences[idx];
-			detected_object_cnt++;
+				detected_object[detected_object_cnt].x = box.x;
+				detected_object[detected_object_cnt].y = box.y;
+				detected_object[detected_object_cnt].w = box.width;
+				detected_object[detected_object_cnt].h = box.height;
+				detected_object[detected_object_cnt].idx = classIds[idx];
+				detected_object[detected_object_cnt].confidence = confidences[idx];
+				detected_object_cnt++;
+			}
 		}
 	}
 	if((max_x > 0) && (max_y > 0) && (min_x < 10000) && (min_y < 10000))
@@ -21349,46 +21784,22 @@ vector<Rect> boxes;
 	return(found);
 }
 
-vector<String> getOutputsNames(const Net& net)
-{
-	static vector<String> names;
-	if(!net.empty()) 
-	{
-		if(names.empty())
-		{
-			// Get the indices of the output layers, i.e. the layers with unconnected outputs
-			vector<int> outLayers = net.getUnconnectedOutLayers();
-			
-			// Get the names of all the layers in the network
-			vector<String> layersNames = net.getLayerNames();
-			
-			// Get the names of the output layers in names
-			names.resize(outLayers.size());
-			for(size_t i = 0; i < outLayers.size(); ++i)
-			{
-				names[i] = layersNames[outLayers[i] - 1];
-			}
-		}
-	}
-	return(names);
-}
-
 int	Camera::DetectObjects(int *out_x, int *out_y, int *second_x, int *second_y)
 {
 Mat	blob;
 
-	int found = 0;
+	int found = -1;
 	if(my_window->use_dnn_cuda == 1)
 	{
-		if(!net.empty()) 
+		if(!my_window->net.empty())
 		{
 			Mat use = mat.clone();
 			cvtColor(use, use, COLOR_RGBA2BGR);
-			blob = blobFromImage(use, 1 / 255.0, cv::Size(416, 416), Scalar(0, 0, 0), true, false);
-			net.setInput(blob);
+			blob = blobFromImage(use, 1 / 255.0, cv::Size(640, 640), Scalar(0, 0, 0), true, false);
+			my_window->net.setInput(blob);
 		
-			vector<Mat> outs;
-			net.forward(outs, getOutputsNames(net));
+			Mat outs;
+			my_window->net.forward(outs);
 			found = PostProcessRecognition(mat, outs, out_x, out_y, second_x, second_y);
 		}
 	}
@@ -22138,7 +22549,18 @@ int	loop;
 void	snapshot_timeout_cb(void *v)
 {
 	Camera *cam = (Camera *)v;
-	cam->snapshot = 1;
+	if(cam->my_window->snapshot_main_window == 1)
+	{
+		cam->my_window->SnapAll(1);
+	}
+	else if(cam->my_window->snapshot_entire_desktop == 1)
+	{
+		cam->my_window->SnapAll(0);
+	}
+	else
+	{
+		cam->snapshot = 1;
+	}
 	if(cam->snapshot_repeat_delay > 0)
 	{
 		Fl::repeat_timeout(cam->snapshot_repeat_delay, snapshot_timeout_cb, cam);
@@ -23090,6 +23512,7 @@ static Mat	local_mat;
 			if(my_window->muxing == 1)
 			{
 				my_window->muxer_cnt = 0;
+				my_window->SetDefaultOutputPathList();
 				for(loop = 0;loop < my_window->output_path_cnt;loop++)
 				{
 					if(my_window->output_active[loop] == 1)
@@ -23201,7 +23624,7 @@ static Mat	local_mat;
 								else if(my_window->streaming == STREAMING_NET)
 								{
 									my_window->video_count++;
-									mux = new Muxer(my_window, NULL, 0);
+									mux = new Muxer(my_window, this, NULL, 0);
 									int init_mux_err = mux->InitMux(
 										use_audio,
 										my_window->use_container,
@@ -23235,7 +23658,6 @@ static Mat	local_mat;
 									}
 									else
 									{
-										my_window->AddLastMuxed(buf);
 										my_window->muxer_cnt++;
 									}
 								}
@@ -23253,7 +23675,7 @@ static Mat	local_mat;
 									if(no_go == 0)
 									{
 										my_window->video_count++;
-										mux = new Muxer(my_window, NULL, 0);
+										mux = new Muxer(my_window, this, NULL, 0);
 										if(my_window->testing_mux != 0)
 										{
 											my_window->tested_mux = mux;
@@ -23755,7 +24177,11 @@ void	Camera::VideoEffects()
 					if((my_window->last_cam->mat.cols == mat.cols)
 					&& (my_window->last_cam->mat.rows == mat.rows))
 					{
-						double interval = 0.1;
+						double val = my_window->transition_interval;
+						double out = pow(val, 3.32192809489);
+						if(out < 0.00001) out = 0.0001;
+						if(out > 0.9999) out = 0.9999;
+						double interval = out;
 						if(my_window->transition == TRANSITION_BLEND)
 						{
 							Mat new_mat;
@@ -23765,20 +24191,22 @@ void	Camera::VideoEffects()
 						else if(my_window->transition == TRANSITION_FADE_TO_BLACK)
 						{
 							Mat new_mat;
-							cv::Mat local_mat(mat.rows, mat.cols, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+							uchar rr, gg, bb;
+							Fl::get_color(my_window->transition_color, rr, gg, bb);
+							cv::Mat local_mat(mat.rows, mat.cols, CV_8UC4, cv::Scalar(rr, gg, bb, 0));
 							new_mat = my_window->last_cam->mat.clone();
 							double use = my_window->transition_cnt;
 							addWeighted(new_mat, 1.0 - use, local_mat, use, 0.0, mat);
-							interval = 0.025;
 						}
 						else if(my_window->transition == TRANSITION_FADE_FROM_BLACK)
 						{
 							Mat new_mat;
-							cv::Mat local_mat(mat.rows, mat.cols, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+							uchar rr, gg, bb;
+							Fl::get_color(my_window->transition_color, rr, gg, bb);
+							cv::Mat local_mat(mat.rows, mat.cols, CV_8UC4, cv::Scalar(rr, gg, bb, 0));
 							new_mat = my_window->last_cam->mat.clone();
 							double use = my_window->transition_cnt;
 							addWeighted(local_mat, 1.0 - use, mat, use, 0.0, mat);
-							interval = 0.025;
 						}
 						else if(my_window->transition == TRANSITION_L2R_WIPE)
 						{
@@ -23796,7 +24224,6 @@ void	Camera::VideoEffects()
 							{
 								cropped.copyTo(mat.rowRange(sy, ey).colRange(sx, ex));
 							}
-							interval = 0.2;
 						}
 						else if(my_window->transition == TRANSITION_R2L_WIPE)
 						{
@@ -23814,7 +24241,6 @@ void	Camera::VideoEffects()
 							{
 								cropped.copyTo(mat.rowRange(sy, ey).colRange(sx, ex));
 							}
-							interval = 0.2;
 						}
 						else if(my_window->transition == TRANSITION_T2B_WIPE)
 						{
@@ -23832,7 +24258,6 @@ void	Camera::VideoEffects()
 							{
 								cropped.copyTo(mat.rowRange(sy, ey).colRange(sx, ex));
 							}
-							interval = 0.2;
 						}
 						else if(my_window->transition == TRANSITION_B2T_WIPE)
 						{
@@ -23850,16 +24275,20 @@ void	Camera::VideoEffects()
 							{
 								cropped.copyTo(mat.rowRange(sy, ey).colRange(sx, ex));
 							}
-							interval = 0.2;
 						}
 						else if(my_window->transition == TRANSITION_PLUGIN)
 						{
 							if(void_transition_plugin != NULL)
 							{
-								void (*plug_transition)(int, int, int, unsigned char *, unsigned char *, double);
-								plug_transition = (void (*)(int, int, int, unsigned char *, unsigned char *, double))void_transition_plugin;
-								plug_transition(mat.cols, mat.rows, mat.channels(), my_window->last_cam->mat.ptr(), mat.ptr(), my_window->transition_cnt);
-								interval = 0.025;
+								Camera *last = my_window->last_cam;
+								if(last->utility_mat.empty())
+								{
+									last->utility_mat = last->mat.clone();
+								}
+								void (*plug_transition)(int, int, int, unsigned char *, unsigned char *, unsigned char *, double);
+								plug_transition = (void (*)(int, int, int, unsigned char *, unsigned char *, unsigned char *, double))void_transition_plugin;
+								plug_transition(mat.cols, mat.rows, mat.channels(), my_window->last_cam->mat.ptr(), mat.ptr(), last->utility_mat.ptr(), my_window->transition_cnt);
+								mat = last->utility_mat.clone();
 							}
 						}
 						my_window->transition_cnt += interval;
@@ -23871,6 +24300,7 @@ void	Camera::VideoEffects()
 							}
 							else
 							{
+								my_window->last_cam->utility_mat.release();
 								my_window->last_cam = NULL;
 							}
 							my_window->transition_cnt = 0.0;
@@ -23969,7 +24399,7 @@ int		interpret_output_path(MyWin *win, char *in, int limit, char *out, int *cloc
 			if(back_a > 0)
 			{
 				my_cairo_set_source_rgba(cairo_context, back_r, back_g, back_b, back_a);
-				cairo_rectangle(cairo_context, xx, yy - sz_y, sz_x, sz_y + (sz_y / 4));
+				cairo_rectangle(cairo_context, xx, yy, sz_x, sz_y + (sz_y / 4));
 				cairo_fill(cairo_context);
 			}
 			int extent_w = 0;
@@ -24005,6 +24435,10 @@ void	Camera::SnapshotFrame()
 		{
 			cv::resize(out, out, cv::Size(), snapshot_scale, snapshot_scale);
 			imwrite(buf, out);
+			if(my_window->snapshot_copy_to_copy_buffer == 1)
+			{
+				CopyMatToClipboard(out);
+			}
 		}
 	}
 }
@@ -24619,6 +25053,71 @@ int	Camera::DarknessTrigger()
 	return(triggered);
 }
 
+int	Camera::IsMyTriggerMic(char *name)
+{
+int		loop;
+
+	int found = -1;
+	if(name != NULL)
+	{
+		for(loop = 0;((loop < trigger_mic_list_cnt) && (found == -1));loop++)
+		{
+			if(trigger_mic_list[loop] != NULL)
+			{
+				if(strcmp(trigger_mic_list[loop], name) == 0)
+				{
+					found = loop;
+				}
+			}
+		}
+	}
+	return(found);
+}
+
+int	Camera::SoundTrigger()
+{
+int		loop;
+
+	int triggered = 0;
+	int max = 0;
+	for(loop = 0;loop < my_window->pulse_microphone_cnt;loop++)
+	{
+		if(my_window->pulse_microphone[loop] != NULL)
+		{
+			PulseMicrophone *mic = my_window->pulse_microphone[loop];
+			int tst = mic->local_peak;
+			if(tst > max)
+			{
+				if(IsMyTriggerMic(mic->alias) > -1)
+				{
+					max = tst;
+				}
+			}
+		}
+	}
+	if(max > 0)
+	{
+		double heard_volume = (double)max / 16384.0;
+		if(heard_volume > sound_trigger)
+		{
+			triggered = 1;
+			result_trigger |= ON_DETECT_SOUND;
+			detect_time = time(0);
+		}
+	}
+	if((record == 1) && (triggered == 0))
+	{
+		time_t current_time = time(0);
+		int diff_time = (int)(current_time - detect_time);
+		if(diff_time < sustain_recording)
+		{
+			triggered = 1;
+			result_trigger |= ON_DETECT_MOTION;
+		}
+	}
+	return(triggered);
+}
+
 int	Camera::MotionTrigger()
 {
 	int triggered = 0;
@@ -24637,7 +25136,7 @@ int	Camera::MotionTrigger()
 	{
 		time_t current_time = time(0);
 		int diff_time = (int)(current_time - detect_time);
-		if(diff_time < 12)
+		if(diff_time < sustain_recording)
 		{
 			triggered = 1;
 			result_trigger |= ON_DETECT_MOTION;
@@ -24679,7 +25178,7 @@ int		loop;
 	{
 		time_t current_time = time(0);
 		int diff_time = (int)(current_time - detect_time);
-		if(diff_time < 12)
+		if(diff_time < sustain_recording)
 		{
 			triggered = 1;
 			result_trigger |= ON_DETECT_OBJECT;
@@ -24717,9 +25216,95 @@ int	Camera::Triggers()
 						triggered = DarknessTrigger();
 						if(triggered == 1)
 						{
-							if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
+							if((record_trigger & ON_DETECT_SOUND) == ON_DETECT_SOUND)
 							{
 								triggered = 0;
+								triggered = SoundTrigger();
+								if(triggered == 1)
+								{
+									if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
+									{
+										triggered = 0;
+										triggered = MotionTrigger();
+										if(triggered == 1)
+										{
+											if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+											{
+												triggered = 0;
+												triggered = ObjectTrigger();
+											}
+										}
+									}
+									else
+									{
+										if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+										{
+											triggered = 0;
+											triggered = ObjectTrigger();
+										}
+									}
+								}
+							}
+							else
+							{
+								if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
+								{
+									triggered = 0;
+									triggered = MotionTrigger();
+									if(triggered == 1)
+									{
+										if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+										{
+											triggered = 0;
+											triggered = ObjectTrigger();
+										}
+									}
+								}
+								else
+								{
+									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+									{
+										triggered = 0;
+										triggered = ObjectTrigger();
+									}
+								}
+							}
+						}
+					}
+					else
+					{
+						if((record_trigger & ON_DETECT_SOUND) == ON_DETECT_SOUND)
+						{
+							triggered = 0;
+							triggered = SoundTrigger();
+							if(triggered == 1)
+							{
+								if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
+								{
+									triggered = MotionTrigger();
+									if(triggered == 1)
+									{
+										if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+										{
+											triggered = 0;
+											triggered = ObjectTrigger();
+										}
+									}
+								}
+								else
+								{
+									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+									{
+										triggered = 0;
+										triggered = ObjectTrigger();
+									}
+								}
+							}
+						}
+						else
+						{
+							if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
+							{
 								triggered = MotionTrigger();
 								if(triggered == 1)
 								{
@@ -24740,29 +25325,6 @@ int	Camera::Triggers()
 							}
 						}
 					}
-					else
-					{
-						if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
-						{
-							triggered = MotionTrigger();
-							if(triggered == 1)
-							{
-								if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
-								{
-									triggered = 0;
-									triggered = ObjectTrigger();
-								}
-							}
-						}
-						else
-						{
-							if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
-							{
-								triggered = 0;
-								triggered = ObjectTrigger();
-							}
-						}
-					}
 				}
 			}
 			else
@@ -24773,18 +25335,90 @@ int	Camera::Triggers()
 					triggered = DarknessTrigger();
 					if(triggered == 1)
 					{
+						if((record_trigger & ON_DETECT_SOUND) == ON_DETECT_SOUND)
+						{
+							triggered = 0;
+							triggered = SoundTrigger();
+							if(triggered == 1)
+							{
+								if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
+								{
+									triggered = 0;
+									triggered = MotionTrigger();
+									if(triggered == 1)
+									{
+										triggered = 0;
+										if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+										{
+											triggered = ObjectTrigger();
+										}
+									}
+								}
+								else
+								{
+									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+									{
+										triggered = 0;
+										triggered = ObjectTrigger();
+									}
+								}
+							}
+						}
+						else
+						{
+							if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
+							{
+								triggered = 0;
+								triggered = MotionTrigger();
+								if(triggered == 1)
+								{
+									triggered = 0;
+									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+									{
+										triggered = ObjectTrigger();
+									}
+								}
+							}
+							else
+							{
+								if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+								{
+									triggered = 0;
+									triggered = ObjectTrigger();
+								}
+							}
+						}
+					}
+				}
+				else
+				{
+					if((record_trigger & ON_DETECT_SOUND) == ON_DETECT_SOUND)
+					{
+						triggered = 0;
+						triggered = SoundTrigger();
+						if(triggered == 1)
+						{
+							if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
+							{
+								triggered = 0;
+								triggered = MotionTrigger();
+							}
+							else
+							{
+								if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
+								{
+									triggered = 0;
+									triggered = ObjectTrigger();
+								}
+							}
+						}
+					}
+					else
+					{
 						if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
 						{
 							triggered = 0;
 							triggered = MotionTrigger();
-							if(triggered == 1)
-							{
-								triggered = 0;
-								if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
-								{
-									triggered = ObjectTrigger();
-								}
-							}
 						}
 						else
 						{
@@ -24793,22 +25427,6 @@ int	Camera::Triggers()
 								triggered = 0;
 								triggered = ObjectTrigger();
 							}
-						}
-					}
-				}
-				else
-				{
-					if((record_trigger & ON_DETECT_MOTION) == ON_DETECT_MOTION)
-					{
-						triggered = 0;
-						triggered = MotionTrigger();
-					}
-					else
-					{
-						if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
-						{
-							triggered = 0;
-							triggered = ObjectTrigger();
 						}
 					}
 				}
@@ -26831,6 +27449,7 @@ void	Shape::draw()
 void	shape_popup_cb(Fl_Widget *w, void *v)
 {
 	Shape *shape = (Shape *)v;
+	MyWin *my_window = shape->my_window;
 	if(shape->popup != NULL)
 	{
 		shape->popup->hide();
@@ -26868,11 +27487,11 @@ void	shape_popup_cb(Fl_Widget *w, void *v)
 		}
 		else if(strcmp(str, "Set Line Color") == 0)
 		{
-			my_color_chooser("Line Color", shape->foreground_r, shape->foreground_g, shape->foreground_b, shape->foreground_a);
+			my_color_chooser(my_window, "Line Color", shape->foreground_r, shape->foreground_g, shape->foreground_b, shape->foreground_a);
 		}
 		else if(strcmp(str, "Set Fill Color") == 0)
 		{
-			my_color_chooser("Fill Color", shape->foreground_r, shape->background_g, shape->background_b, shape->background_a);
+			my_color_chooser(my_window, "Fill Color", shape->foreground_r, shape->background_g, shape->background_b, shape->background_a);
 		}
 		else if(strcmp(str, "Set to Erase") == 0)
 		{
@@ -31501,7 +32120,7 @@ struct stat sz;
 					const char *error_ptr = cJSON_GetErrorPtr();
 					if(error_ptr != NULL)
 					{
-						fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+						fprintf(stderr, "Error: JSON Error in %s before: %s\n", path, error_ptr);
 					}
 				}
 				else
@@ -31762,15 +32381,17 @@ int		inner, outer;
 				}
 				if(my_window->pulse_mixer != NULL)
 				{
-					if(my_window->pulse_mixer->done == 0)
+					PulseMixer *mixer = my_window->pulse_mixer;
+					if(mixer->done == 0)
 					{
 						for(loop = 0;loop < my_window->pulse_microphone_cnt;loop++)
 						{
 							if(my_window->pulse_microphone[loop] != NULL)
 							{
-								if(my_window->pulse_microphone[loop]->failure == 0)
+								PulseMicrophone *mic = my_window->pulse_microphone[loop];
+								if(mic->failure == 0)
 								{
-									read_pulse_mic(my_window->pulse_microphone[loop], any_recording);
+									read_pulse_mic(mic, any_recording);
 								}
 							}
 						}
@@ -33242,8 +33863,8 @@ void	ptz_follow_cb(Fl_Widget *w, void *v)
 	win->follow = val;
 	if(val == 1)
 	{
-		win->my_window->ptz_follow_home_pan = win->my_window->ptz_pan_reading / 16;
-		win->my_window->ptz_follow_home_tilt = win->my_window->ptz_tilt_reading / 16;
+		win->my_window->ptz_follow_home_pan = win->ptz_pan_reading / 16;
+		win->my_window->ptz_follow_home_tilt = win->ptz_tilt_reading / 16;
 	}
 }
 
@@ -33408,6 +34029,7 @@ int	loop;
 int	inner;
 int	outer;
 int	aa, ab, ac;
+char buf[8192];
 
 	my_window = in_win;
 	popup = NULL;
@@ -33422,6 +34044,7 @@ int	aa, ab, ac;
 	focusing = 0;
 	last_here = 0;
 	dir = 0;
+	center_on_coord = 0;
 	auto_focus_status = -1;
 	auto_exposure_status = -1;
 	digital_zoom_status = -1;
@@ -33459,10 +34082,22 @@ int	aa, ab, ac;
 	ptz_target_pan_speed = 24.0 * 0.25;
 	ptz_target_tilt_speed = 20.0 * 0.25;
 
+	max_optical_zoom = 0x0;
+	max_motor_step = 0.0;
+	max_magnification = 0;
+	horizontal_field_of_view_degrees = 0.0;
+	pan_steps_per_degree = 0.0;
+	tilt_steps_per_degree = 0.0;
+	for(loop = 0;loop < 128;loop++)
+	{
+		zoom_node[loop].position = 0;
+		zoom_node[loop].magnification = 0.0;
+	}
 	ptz_focus_speed = 1;
 	ptz_zoom_speed = 20;
 	ptz_zoomer_speed = 0;
 	ptz_adjust_speed_for_zoom = 0;
+	support_absolute_zoom = 1;
 	for(loop = 0;loop < NUMBER_OF_CAMERAS;loop++)
 	{
 		ptz_camera_select_button[loop] = NULL;
@@ -33544,6 +34179,124 @@ int	aa, ab, ac;
 		ptz_contract_cb(NULL, this);
 	}
 	UpdatePresets();
+	sprintf(buf, "%s.json", alias);
+	if(access(buf, F_OK) == F_OK)
+	{
+		LoadZoomParamsFromJSON(buf);
+	}
+}
+
+void	PTZ_Window::SetViscaZoomDefaults(char *model_str)
+{
+int		loop;
+
+	for(loop = 0;loop < 128;loop++)
+	{
+		zoom_node[loop].position = 0;
+		zoom_node[loop].magnification = 0.0;
+	}
+	if(strcmp(model_str, "Sony") == 0)
+	{
+		max_optical_zoom = 0x4000;
+		max_motor_step = 16384.0;
+		max_magnification = 12;
+		horizontal_field_of_view_degrees = 71.0;
+		pan_steps_per_degree = 51.2;
+		tilt_steps_per_degree = 51.2;
+		zoom_node[0].position = 0x0000;
+		zoom_node[0].magnification = 1.0;
+		zoom_node[1].position = 0x1970;
+		zoom_node[1].magnification = 2.0;
+		zoom_node[2].position = 0x249c;
+		zoom_node[2].magnification = 3.0;
+		zoom_node[3].position = 0x2b5f;
+		zoom_node[3].magnification = 4.0;
+		zoom_node[4].position = 0x3020;
+		zoom_node[4].magnification = 5.0;
+		zoom_node[5].position = 0x33c4;
+		zoom_node[5].magnification = 6.0;
+		zoom_node[6].position = 0x36b7;
+		zoom_node[6].magnification = 7.0;
+		zoom_node[7].position = 0x392f;
+		zoom_node[7].magnification = 8.0;
+		zoom_node[8].position = 0xb4d;
+		zoom_node[8].magnification = 9.0;
+		zoom_node[9].position = 0x3d1e;
+		zoom_node[9].magnification = 10.0;
+		zoom_node[10].position = 0x3ead;
+		zoom_node[10].magnification = 11.0;
+		zoom_node[11].position = 0x4000;
+		zoom_node[11].magnification = 12.0;
+	}
+	else if(strcmp(model_str, "BZBGear") == 0)
+	{
+		max_optical_zoom = 0x4000;
+		max_motor_step = 16384.0;
+		max_magnification = 30;
+		horizontal_field_of_view_degrees = 60.7;
+		pan_steps_per_degree = 161.0;
+		tilt_steps_per_degree = 161.0;
+		zoom_node[0].magnification = 1.0;
+		zoom_node[0].position = 0x0000;
+		zoom_node[1].magnification = 1.2;
+		zoom_node[1].position = 0x05F0;
+		zoom_node[2].magnification = 1.5;
+		zoom_node[2].position = 0x0ADC;
+		zoom_node[3].magnification = 2.0;
+		zoom_node[3].position = 0x0F3C;
+		zoom_node[4].magnification = 2.8;
+		zoom_node[4].position = 0x1400;
+		zoom_node[5].magnification = 3.5;
+		zoom_node[5].position = 0x18B0;
+		zoom_node[6].magnification = 4.3;
+		zoom_node[6].position = 0x1D10;
+		zoom_node[7].magnification = 5.2;
+		zoom_node[7].position = 0x20D0;
+		zoom_node[8].magnification = 6.4;
+		zoom_node[8].position = 0x23F0;
+		zoom_node[9].magnification = 7.8;
+		zoom_node[9].position = 0x26D4;
+		zoom_node[10].magnification = 9.2;
+		zoom_node[10].position = 0x2954;
+		zoom_node[11].magnification = 10.8;
+		zoom_node[11].position = 0x2B70;
+		zoom_node[12].magnification = 12.5;
+		zoom_node[12].position = 0x2D50;
+		zoom_node[13].magnification = 14.1;
+		zoom_node[13].position = 0x2EF4;
+		zoom_node[14].magnification = 15.9;
+		zoom_node[14].position = 0x3070;
+		zoom_node[15].magnification = 17.6;
+		zoom_node[15].position = 0x31C4;
+		zoom_node[16].magnification = 19.4;
+		zoom_node[16].position = 0x32F0;
+		zoom_node[17].magnification = 21.0;
+		zoom_node[17].position = 0x3408;
+		zoom_node[18].magnification = 22.5;
+		zoom_node[18].position = 0x350C;
+		zoom_node[19].magnification = 23.9;
+		zoom_node[19].position = 0x35E8;
+		zoom_node[20].magnification = 25.1;
+		zoom_node[20].position = 0x36C4;
+		zoom_node[21].magnification = 26.2;
+		zoom_node[21].position = 0x37A0;
+		zoom_node[22].magnification = 27.1;
+		zoom_node[22].position = 0x387C;
+		zoom_node[23].magnification = 27.9;
+		zoom_node[23].position = 0x3958;
+		zoom_node[24].magnification = 28.5;
+		zoom_node[24].position = 0x3A48;
+		zoom_node[25].magnification = 29.0;
+		zoom_node[25].position = 0x3B60;
+		zoom_node[26].magnification = 29.4;
+		zoom_node[26].position = 0x3CA0;
+		zoom_node[27].magnification = 29.7;
+		zoom_node[27].position = 0x3E08;
+		zoom_node[28].magnification = 29.9;
+		zoom_node[28].position = 0x3F48;
+		zoom_node[29].magnification = 30.0;
+		zoom_node[29].position = 0x4000;
+	}
 }
 
 void	PTZ_Window::show()
@@ -33554,6 +34307,184 @@ void	PTZ_Window::show()
 void	PTZ_Window::hide()
 {
 	Fl_Group::hide();
+}
+
+// COW - I KINDA LIKE THIS ONE!!!!!!!!!!!!!!!!!
+// Single-formula model: replaces the whole guessed lookup table.
+// Assumes the zoom mechanism is tuned for constant perceived zoom speed,
+// i.e. magnification is geometric (exponential) in motor position.
+double PTZ_Window::CalcMagnificationByRatio(double zoom_ratio)
+{
+	if (zoom_ratio <= 0.0) return 1.0;
+	if (zoom_ratio >= 1.0) return (double)max_magnification;
+
+	// M(r) = M_min * (M_max / M_min) ^ r,  M_min = 1.0
+	return pow((double)max_magnification, zoom_ratio);
+}
+
+// Monotonic cubic Hermite interpolation (Fritsch-Carlson) over zoom_node[].
+// Curves *through* the table points instead of drawing straight chords
+// between them, which is what was causing the convex-curve undershoot.
+// Falls back to linear interpolation gracefully if a segment's slope
+// can't be made monotonic-safe (shouldn't normally trigger).
+double PTZ_Window::GetMagnificationByRatio(double zoom_ratio)
+{
+	if(zoom_ratio <= 0.0)
+	{
+		return zoom_node[0].magnification;
+	}
+	if(zoom_ratio >= 1.0)
+	{
+		return zoom_node[max_magnification - 1].magnification;
+	}
+	int target_position = (int)(zoom_ratio * max_motor_step);
+
+	for(int i = 0; i < max_magnification - 1; i++)
+	{
+		if((target_position >= zoom_node[i].position) && (target_position <= zoom_node[i + 1].position))
+		{
+			// Neighboring knots for slope estimation, clamped at table edges.
+			int i0 = (i > 0) ? i - 1 : i;
+			int i3 = (i + 2 < max_magnification) ? i + 2 : i + 1;
+
+			double x0 = zoom_node[i0].position, y0 = zoom_node[i0].magnification;
+			double x1 = zoom_node[i].position,  y1 = zoom_node[i].magnification;
+			double x2 = zoom_node[i+1].position, y2 = zoom_node[i+1].magnification;
+			double x3 = zoom_node[i3].position,  y3 = zoom_node[i3].magnification;
+
+			double h = x2 - x1;
+			if (h <= 0.0)
+			{
+				// Degenerate/duplicate knot positions - just return the known value.
+				return y1;
+			}
+
+			double d1 = (y2 - y1) / h; // secant slope across this segment
+
+			double m1 = (i0 == i) ? d1 : (y1 - y0) / (x1 - x0);
+			double m2 = (i3 == i + 1) ? d1 : (y3 - y2) / (x3 - x2);
+
+			double t1 = (d1 + m1) / 2.0;
+			double t2 = (d1 + m2) / 2.0;
+
+			// Fritsch-Carlson monotonicity guard: tangents can't overshoot
+			// the secant slope, and can't flip sign relative to it.
+			if (d1 == 0.0)
+			{
+				t1 = 0.0;
+				t2 = 0.0;
+			}
+			else
+			{
+				double r1 = t1 / d1;
+				double r2 = t2 / d1;
+				if (r1 < 0.0) t1 = 0.0;
+				if (r2 < 0.0) t2 = 0.0;
+				if (r1 > 3.0) t1 = 3.0 * d1;
+				if (r2 > 3.0) t2 = 3.0 * d1;
+			}
+			double t = (double)(target_position - x1) / h;
+			double t2_ = t * t;
+			double t3_ = t2_ * t;
+
+			// Hermite basis functions
+			double h00 =  2.0 * t3_ - 3.0 * t2_ + 1.0;
+			double h10 =		t3_ - 2.0 * t2_ + t;
+			double h01 = -2.0 * t3_ + 3.0 * t2_;
+			double h11 =		t3_ -	   t2_;
+
+			return h00 * y1 + h10 * h * t1 + h01 * y2 + h11 * h * t2;
+		}
+	}
+	return 1.0;
+}
+
+// Current horizontal FOV (degrees) given magnification.
+float	PTZ_Window::ComputeCurrentHFOVDegrees(float magnification)
+{
+	float hfov_wide_radians = horizontal_field_of_view_degrees * (float)M_PI / 180.0f;
+	float half_angle_wide = hfov_wide_radians / 2.0f;
+	float half_angle_current = atanf(tanf(half_angle_wide) / magnification);
+	return (half_angle_current * 2.0f) * 180.0f / (float)M_PI;
+}
+
+// Focal length in pixels for a given resolution width and HFOV.
+float	PTZ_Window::ComputeFocalLengthPixels(int res_width, float hfov_degrees)
+{
+	float hfov_radians = hfov_degrees * (float)M_PI / 180.0f;
+	return (float)res_width / (2.0f * tanf(hfov_radians / 2.0f));
+}
+
+void	PTZ_Window::CenterCameraOnPixel(int click_x, int click_y, uint16_t visca_zoom)
+{
+	// 1. Calculate raw distance deltas from the center of the display matrix
+	int res_width = my_window->display_width;
+	int res_height = my_window->display_height;
+	int center_x = res_width / 2;
+	int center_y = res_height / 2;
+	int pixel_delta_x = click_x - center_x;
+	int pixel_delta_y = center_y - click_y; // FIX: Restored to original tracking calculation
+
+	// 2. Determine the camera's actual current field of view at this zoom
+	//  level using the linear-magnification model, then derive the
+	//  matching focal length in pixels.
+	float zoom_ratio = (float)visca_zoom / (float)max_optical_zoom;
+
+	float magnification1 = GetMagnificationByRatio(zoom_ratio);
+	float magnification2 = CalcMagnificationByRatio(zoom_ratio);
+
+	float current_hfov_degrees = ComputeCurrentHFOVDegrees(magnification1);
+	float focal_length_px = ComputeFocalLengthPixels(res_width, current_hfov_degrees);
+
+	// 3. Convert pixel offsets into real angular offsets (radians).
+	float angle_x_radians = atan2f((float)pixel_delta_x, focal_length_px);
+	float angle_y_radians = atan2f((float)pixel_delta_y, focal_length_px);
+	float angle_x_degrees = angle_x_radians * 180.0f / (float)M_PI;
+	float angle_y_degrees = angle_y_radians * 180.0f / (float)M_PI;
+
+	// 4. Convert angle directly into VISCA steps using the camera's known
+	//  step resolution.
+	int32_t visca_delta_x = lroundf(angle_x_degrees * pan_steps_per_degree);
+	int32_t visca_delta_y = lroundf(angle_y_degrees * tilt_steps_per_degree);
+
+	// 5. Broadcast the relative move frame instantly via UDP
+	if((visca_delta_x != 0) || (visca_delta_y != 0))
+	{
+		int dx = visca_delta_x;
+		int dy = visca_delta_y;
+
+		// Initialize working speeds with your global target preset values
+		uint8_t scaled_pan_speed = ptz_pan_speed;
+		uint8_t scaled_tilt_speed = ptz_tilt_speed;
+
+		uint32_t abs_dx = abs(dx);
+		uint32_t abs_dy = abs(dy);
+
+		if((abs_dx) > 0 && (abs_dy > 0))
+		{
+			if((abs_dx) >= (abs_dy))
+			{
+				// Pan is the dominant axis. Keep max pan speed, scale down tilt speed.
+				float ratio = (float)abs_dy / (float)abs_dx;
+				scaled_tilt_speed = (uint8_t)lroundf((float)ptz_pan_speed * ratio);
+				
+				// Keep scaled speed within hardware bounds (VISCA minimum speed is 1)
+				if (scaled_tilt_speed < 1) scaled_tilt_speed = 1;
+				if (scaled_tilt_speed > ptz_tilt_speed) scaled_tilt_speed = ptz_tilt_speed;
+			}
+			else
+			{
+				// Tilt is the dominant axis. Keep max tilt speed, scale down pan speed.
+				float ratio = (float)abs_dx / (float)abs_dy;
+				scaled_pan_speed = (uint8_t)lroundf((float)ptz_tilt_speed * ratio);
+				
+				// Keep scaled speed within hardware bounds
+				if (scaled_pan_speed < 1) scaled_pan_speed = 1;
+				if (scaled_pan_speed > ptz_pan_speed) scaled_pan_speed = ptz_pan_speed;
+			}
+		}
+		my_window->ViscaCommand(instance, PTZ_RELATIVE_POSITION, 4, scaled_pan_speed, scaled_tilt_speed, dx, dy);
+	}
 }
 
 void	PTZ_Window::Contract()
@@ -33591,6 +34522,15 @@ void	MyWin::SavePTZ_WindowsAsJSON(FILE *fp)
 {
 int		loop;
 
+	int last = 0;
+	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+	{
+		PTZ_Window *ptz_win = ptz_window[loop];
+		if(ptz_win != NULL)
+		{
+			last = loop;
+		}
+	}
 	fprintf(fp, ",\n");
 	fprintf(fp, "\"ptz windows\": [\n");
 	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
@@ -33599,7 +34539,7 @@ int		loop;
 		if(ptz_win != NULL)
 		{
 			ptz_win->SaveAsJSON(fp);
-			if(loop < PTZ_WINDOW_LIMIT - 1)
+			if(loop < last)
 			{
 				fprintf(fp, ",\n");
 			}
@@ -33628,6 +34568,65 @@ void	MyWin::ParseJSONPTZ_Windows(cJSON *json)
 			}
 			cnt++;
 		}
+	}
+}
+
+void	PTZ_Window::LoadZoomParamsFromJSON(char *filename)
+{
+	char *buf = ReadWholeFile(filename);
+	if(buf != NULL)
+	{
+		cJSON *json = cJSON_Parse(buf);
+		if(json == NULL)
+		{
+			const char *error_ptr = cJSON_GetErrorPtr();
+			if(error_ptr != NULL)
+			{
+				fprintf(stderr, "Error: JSON Error in %s before: %s\n", filename, error_ptr);
+			}
+		}
+		else
+		{
+			LoadZoomParamsFromJSON(json);
+			cJSON_Delete(json);
+		}
+		free(buf);
+	}
+}
+
+void	PTZ_Window::LoadZoomParamsFromJSON(cJSON *json)
+{
+	int success = 0;
+	success = json_parse_int(json, "support absolute zoom", support_absolute_zoom);
+	success = json_parse_int(json, "ptz max optical zoom", max_optical_zoom);
+	success = json_parse_double(json, "ptz max motor step", max_motor_step);
+	success = json_parse_int(json, "ptz max magnification", max_magnification);
+	success = json_parse_double(json, "ptz horizontal field of view degrees", horizontal_field_of_view_degrees);
+	success = json_parse_double(json, "ptz pan steps per degree", pan_steps_per_degree);
+	success = json_parse_double(json, "ptz tilt steps per degree", tilt_steps_per_degree);
+	cJSON *ptz_zoom_node_item = NULL;
+	cJSON *ptz_zoom_node_items = json_parse_array(json, "ptz zoom node");
+	if(ptz_zoom_node_items != NULL)
+	{
+		int cnt = 0;
+		int idx = 0;
+		cJSON_ArrayForEach(ptz_zoom_node_item, ptz_zoom_node_items)
+		{
+			if((cnt % 2) == 0)
+			{
+				zoom_node[idx].position = ptz_zoom_node_item->valueint;
+			}
+			else
+			{
+				zoom_node[idx].magnification = ptz_zoom_node_item->valuedouble;
+				idx++;
+			}
+			cnt++;
+		}
+	}
+	if(max_magnification > 0)
+	{
+		center_on_coord = 1;
 	}
 }
 
@@ -33707,6 +34706,7 @@ void	PTZ_Window::ParseJSON(cJSON *json)
 	success = json_parse_int(json, "ptz zoomer speed", ptz_zoomer_speed);
 	success = json_parse_int(json, "ptz adjust speed for zoom", ptz_adjust_speed_for_zoom);
 
+	LoadZoomParamsFromJSON(json);
 	cJSON *grid = json_parse_array(json, "ptz soft memory");
 	int rows = cJSON_GetArraySize(grid);
 	for(int i = 0; i < rows; i++) 
@@ -33723,6 +34723,44 @@ void	PTZ_Window::ParseJSON(cJSON *json)
 					ptz_soft_memory[i][j] = cell->valueint;
 				}
 			}
+		}
+	}
+}
+
+void	PTZ_Window::SaveZoomParamsAsJSON(char *filename)
+{
+	FILE *fp = fopen(filename, "w");
+	if(fp != NULL)
+	{
+		fprintf(fp, "{\n");
+		SaveZoomParamsAsJSON(fp);
+		fprintf(fp, "}\n");
+		fclose(fp);
+	}
+}
+
+void	PTZ_Window::SaveZoomParamsAsJSON(FILE *fp)
+{
+int		loop;
+
+	fprintf(fp, "\t\"support absolute zoom\": %d,\n", support_absolute_zoom);
+	fprintf(fp, "\t\"ptz max optical zoom\": %d,\n", max_optical_zoom);
+	fprintf(fp, "\t\"ptz max motor step\": %g,\n", max_motor_step);
+	fprintf(fp, "\t\"ptz max magnification\": %d,\n", max_magnification);
+	fprintf(fp, "\t\"ptz horizontal field of view degrees\": %g,\n", horizontal_field_of_view_degrees);
+	fprintf(fp, "\t\"ptz pan steps per degree\": %g,\n", pan_steps_per_degree);
+	fprintf(fp, "\t\"ptz tilt steps per degree\": %g,\n", tilt_steps_per_degree);
+	fprintf(fp, "\t\"ptz zoom node\": [");
+	for(loop = 0;loop < 128;loop++)
+	{
+		fprintf(fp, "%d,%g", zoom_node[loop].position, zoom_node[loop].magnification);
+		if(loop != 127)
+		{
+			fprintf(fp, ",");
+		}
+		else
+		{
+			fprintf(fp, "]\n");
 		}
 	}
 }
@@ -33795,6 +34833,9 @@ int		inner;
 	fprintf(fp, "\t\"ptz zoom speed\": %d,\n", ptz_zoom_speed);
 	fprintf(fp, "\t\"ptz zoomer speed\": %d,\n", ptz_zoomer_speed);
 	fprintf(fp, "\t\"ptz adjust speed for zoom\": %d,\n", ptz_adjust_speed_for_zoom);
+
+	SaveZoomParamsAsJSON(fp);
+	fprintf(fp, ",");
 	fprintf(fp, "\t\"ptz soft memory\": [");
 	for(outer = 0;outer < NUMBER_OF_INTERFACES;outer++)
 	{
@@ -34080,6 +35121,10 @@ int	PTZ_Window::AddWindowControls(int start_x, int start_y)
 	ptz_spawn_another_button->copy_tooltip("Reveal and addition PTZ / VISCA control dialog");
 	ptz_spawn_another_button->value(0);
 	ptz_spawn_another_button->callback(ptz_spawn_another_cb, this);
+	if(my_window->fast_start == 1)
+	{
+		ptz_spawn_another_button->hide();
+	}
 	yy += 16;
 
 	ptz_hide_button = new MyButton(my_window, start_x, yy, 80, 15, "Hide");
@@ -35572,7 +36617,7 @@ void	PTZ_Window::PTZ_RememberPosition(int num)
 	PTZ_Position *pos = ptz_position[ptz_interface_index][ptz_current_camera_idx][num];
 	if(pos != NULL)
 	{
-		pos->Set(win->ptz_pan_reading, win->ptz_tilt_reading, win->ptz_zoom_reading, win->ptz_focus_reading);
+		pos->Set(ptz_pan_reading, ptz_tilt_reading, ptz_zoom_reading, ptz_focus_reading);
 	}
 	if(ptz_current_interface != NULL)
 	{
@@ -35639,8 +36684,8 @@ void	PTZ_Window::GoToPTZPosition(int speed, int in_pan, int in_tilt, int in_zoom
 			Fl::check();
 			usleep(10000);
 		}
-		int r_pan = my_window->ptz_pan_reading / 16;
-		int r_tilt = my_window->ptz_tilt_reading / 16;
+		int r_pan = ptz_pan_reading / 16;
+		int r_tilt = ptz_tilt_reading / 16;
 		int d_pan = abs(r_pan - target_pan);
 		int d_tilt = abs(r_tilt - target_tilt);
 		if((d_pan < 100) && (d_tilt < 100))
@@ -35753,14 +36798,10 @@ void	PTZ_Window::AutoExposure(int on)
 				if(on == 1)
 				{
 					VISCA_set_auto_exp_mode(ptz_current_interface, ptz_current_camera, (uint8_t)VISCA_AUTO_EXP_FULL_AUTO);
-					ptz_aperture_open_button->deactivate();
-					ptz_aperture_close_button->deactivate();
 				}
 				else
 				{
 					VISCA_set_auto_exp_mode(ptz_current_interface, ptz_current_camera, (uint8_t)VISCA_AUTO_EXP_MANUAL);
-					ptz_aperture_open_button->activate();
-					ptz_aperture_close_button->activate();
 				}
 			}
 		}
@@ -36847,6 +37888,9 @@ CommandKeySettingsWindow::CommandKeySettingsWindow(MyWin *in_win, int ww, int hh
 	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_VOLUME_DOWN]);
 	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "VOLUME DOWN", str); cnt++; y_pos += 18;
 
+	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_CYCLE_CROSSHAIR]);
+	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "CYCLE CROSSHAIR", str); cnt++; y_pos += 18;
+
 	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_CYCLE_DOWN_THUMBGROUP]);
 	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "CYCLE DOWN THUMBGROUP", str); cnt++; y_pos += 18;
 
@@ -37050,7 +38094,7 @@ int	loop;
 
 // SECTION ************************************** MENU BUTTON **********************************************
 
-HoverMenu::HoverMenu(MyWin *in_win, int ww, int hh) : DragWindow(0, 0, ww, hh)
+HoverMenu::HoverMenu(MyWin *in_win, int ww, int hh) : DragWindow(in_win, 0, 0, ww, hh)
 {
 }
 
@@ -38950,6 +39994,28 @@ void	snapshot_button_cb(Fl_Widget *w, void *v)
 	}
 }
 
+void	MyWin::CloseMuxByFilename(char *in_filename)
+{
+int		loop;
+
+	int mux_cnt = 0;
+	for(loop = 0;loop < 128;loop++)
+	{
+		Muxer *mux = my_muxer[loop];
+		if(mux != NULL)
+		{
+			if(strcmp(in_filename, mux->filename) == 0)
+			{
+				mux->Pause();
+				mux->FinishMux();
+				my_muxer[loop] = NULL;
+				delete mux;
+				recorded_frames = 0;
+			}
+		}
+	}
+}
+
 void	review_muxed_button_cb(Fl_Widget *w, void *v)
 {
 	MyWin *win = (MyWin *)v;
@@ -38957,17 +40023,23 @@ void	review_muxed_button_cb(Fl_Widget *w, void *v)
 	{
 		if(win->last_muxed_list[0] != NULL)
 		{
-			if(win->video_window != NULL)
+			if(access(win->last_muxed_list[0], F_OK) == F_OK)
 			{
-				win->video_window->hide();
-				Fl::delete_widget(win->video_window);
-				win->video_window = NULL;
+				win->CloseMuxByFilename(win->last_muxed_list[0]);
+				if(win->video_window == NULL)
+				{
+					VideoWindow *vw = new VideoWindow(win, win->last_muxed_list, 800, 500, "VideoWindow");
+					win->video_window = vw;
+					win->video_window->set_non_modal();
+					win->video_window->show();
+					win->video_window->Play();
+				}
+				else
+				{
+					win->video_window->show();
+					win->video_window->NewVideo(win->last_muxed_list[0]);
+				}
 			}
-			VideoWindow *vw = new VideoWindow(win->last_muxed_list, 800, 500, "VideoWindow");
-			win->video_window = vw;
-			win->video_window->set_non_modal();
-			win->video_window->show();
-			win->video_window->Play();
 		}
 	}
 }
@@ -39106,7 +40178,7 @@ int		loop;
 			}
 		}
 		pthread_mutex_lock(&win->muxer_mutex);
-		win->ClearAllCurrentMuxers(cam);
+		win->ClearAllCurrentMuxers(NULL);
 		pthread_mutex_unlock(&win->muxer_mutex);
 		win->recorded_frames = 0;
 		if(restart == 1)
@@ -39857,7 +40929,7 @@ void	MyWin::LoadAudioSettings(char *filename)
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in %s before: %s\n", filename, error_ptr);
 			}
 		}
 		else
@@ -39932,6 +41004,12 @@ void	record_button_cb(Fl_Widget *w, void *v)
 			win->RecordOff(cam);
 		}
 	}
+}
+
+void	fast_start_record_cb(void *v)
+{
+	MyWin *win = (MyWin *)v;
+	record_button_cb(NULL, win);
 }
 
 void	record_all_button_cb(Fl_Widget *w, void *v)
@@ -40376,11 +41454,10 @@ MyWin::MyWin(
 	, int in_ptz_follow[NUMBER_OF_INTERFACES]
 	, int in_ptz_reverse_h[NUMBER_OF_INTERFACES]
 	, int in_ptz_reverse_v[NUMBER_OF_INTERFACES]
+	, int in_ptz_start_position[NUMBER_OF_INTERFACES]
 	, char *in_ptz_alias[NUMBER_OF_INTERFACES]
 	, int in_ptz_home_on_launch
-	, int in_use_yolo_model
-	, char *in_yolo_cfg
-	, char *in_yolo_weights
+	, char *in_yolo_onnx
 	, char *in_yolo_names
 	, char *in_jpeg_streaming
 	, int in_streaming
@@ -40416,6 +41493,7 @@ MyWin::MyWin(
 	, char *use_joystick_path
 	, int use_borderless
 	, double use_cycle_cameras
+	, int use_fast_start
 	, char *lbl)
 	: Fl_Double_Window(in_w, in_h, lbl)
 {
@@ -40424,6 +41502,7 @@ int	inner;
 int	outer;
 char	update_buf[256];
 
+	fast_start = use_fast_start;
 	InitializeVariables();
 
 	resizable(this);
@@ -40484,7 +41563,14 @@ char	update_buf[256];
 	}
 	command_set = SHOW_CAMERA_COMMANDS | SHOW_AUDIO_COMMANDS | SHOW_SYSTEM_COMMANDS;
 	source_cnt = in_source_cnt;
-	audio_source = in_audio_source;
+	for(loop = 0;loop < 1024;loop++)
+	{
+		audio_source[loop] = NULL;
+	}
+	for(loop = 0;loop < in_audio_source_cnt;loop++)
+	{
+		audio_source[loop] = in_audio_source[loop];
+	}
 	audio_source_cnt = in_audio_source_cnt;
 	audio_sudden_stop = 0;
 	audio_preview_playing = 0;
@@ -40547,6 +41633,7 @@ char	update_buf[256];
 
 	use_dnn_cuda = 0;
 
+	joystick_path = NULL;
 	joystick_path = use_joystick_path;
 	joystick_fd = -1;
 
@@ -40750,6 +41837,7 @@ char	update_buf[256];
 		output_active[loop] = 0;
 	}
 	output_path_cnt = 0;
+
 	for(loop = 0;loop < 10;loop++)
 	{
 		embedded_app[loop] = NULL;
@@ -40801,22 +41889,14 @@ char	update_buf[256];
 	{
 		recognize_class_name[loop] = NULL;
 	}
-	if(in_use_yolo_model == USE_YOLO_MODEL_OPEN_IMAGES)
+	strcpy(yolo_onnx_filename, YOLO_ONNX_FILENAME);
+	strcpy(yolo_names_filename, YOLO_NAMES_FILENAME);
+	if(in_yolo_onnx != NULL)
 	{
-		strcpy(yolo_cfg_filename, YOLO_CFG_FILENAME);
-		strcpy(yolo_weights_filename, YOLO_WEIGHTS_FILENAME);
-		strcpy(yolo_names_filename, YOLO_NAMES_FILENAME);
+		strcpy(yolo_onnx_filename, in_yolo_onnx);
 	}
-	else
+	if(in_yolo_names != NULL)
 	{
-		strcpy(yolo_cfg_filename, YOLO_ALT_CFG_FILENAME);
-		strcpy(yolo_weights_filename, YOLO_ALT_WEIGHTS_FILENAME);
-		strcpy(yolo_names_filename, YOLO_ALT_NAMES_FILENAME);
-	}
-	if((in_yolo_cfg != NULL) && (in_yolo_weights != NULL) && (in_yolo_names != NULL))
-	{
-		strcpy(yolo_cfg_filename, in_yolo_cfg);
-		strcpy(yolo_weights_filename, in_yolo_weights);
 		strcpy(yolo_names_filename, in_yolo_names);
 	}
 	jpeg_streaming = in_jpeg_streaming;
@@ -40937,8 +42017,11 @@ char	update_buf[256];
 	encoding_frame_cnt = 0;
 	transition_cnt = 0.0;
 	transition = in_transition;
+	transition_interval = 0.5;
+	transition_color = BLACK;
 	strcpy(transition_plugin, in_transition_plugin);
 	ptz_mode = 0;
+	crosshair_mode = 0;
 	for(loop = 0;loop < NUMBER_OF_INTERFACES;loop++)
 	{
 		for(inner = 0;inner < NUMBER_OF_CAMERAS;inner++)
@@ -40974,6 +42057,7 @@ char	update_buf[256];
 		ptz_follow_array[loop] = in_ptz_follow[loop];
 		ptz_reverse_h[loop] = in_ptz_reverse_h[loop];
 		ptz_reverse_v[loop] = in_ptz_reverse_v[loop];
+		ptz_start_position[loop] = in_ptz_start_position[loop];
 	}
 	ptz_zoom = 0;
 	ptz_panning = 0;
@@ -40983,10 +42067,6 @@ char	update_buf[256];
 	start_ptz_drag_x = 0;
 	start_ptz_drag_y = 0;
 	ptz_middle_mouse = 0;
-	ptz_focus_reading = 0;
-	ptz_zoom_reading = -1;
-	ptz_pan_reading = 0;
-	ptz_tilt_reading = 0;
 	ptz_dragged = 0;
 	use_pan_speed = 0;
 	use_tilt_speed = 0;
@@ -41041,9 +42121,12 @@ char	update_buf[256];
 	strcpy(use_extension, "flv");
 	strcpy(use_container, "flv");
 
-	OpenJoystick();
+	if(fast_start == 0)
+	{
+		OpenJoystick();
+		LoadTransition();
+	}
 	LoadCodecs();
-	LoadTransition();
 
 	box(FL_NO_BOX);
 	current_fps_window = new CurrentFPSWindow(this, 10, 10, 475, 24);
@@ -41133,12 +42216,17 @@ char	update_buf[256];
 	if(ptz_device_cnt > 0)
 	{
 		ptz_home_on_launch = in_ptz_home_on_launch;
-		for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+		int limit = PTZ_WINDOW_LIMIT;
+		if(fast_start == 1)
+		{
+			limit = ptz_device_cnt;
+		}
+		for(loop = 0;loop < limit;loop++)
 		{
 			SetupPTZWindow(loop);
 		}
 		LoadAllPTZPositions();
-		for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+		for(loop = 0;loop < limit;loop++)
 		{
 			PTZ_DoCommand(loop, 0);
 		}
@@ -41146,41 +42234,48 @@ char	update_buf[256];
 	progress_scrubber = new ProgressScrubber(this, NULL, 0, 0, Fl::w(), Fl::h());
 	progress_scrubber->end();
 
-	bad_codec_combo_cnt = 0;
-	FILE *fp = fopen("bad_codec_combinations.txt", "r");
-	if(fp != NULL)
+	if(fast_start == 0)
 	{
-		int cnt = 0;
-		char in_buf[256];
-		char use_ext[256];
-		while(fgets(in_buf, 256, fp))
+		bad_codec_combo_cnt = 0;
+		FILE *fp = fopen("bad_codec_combinations.txt", "r");
+		if(fp != NULL)
 		{
-			char *cp = in_buf;
-			while((*cp != ':') && (*cp != '\0')) cp++;
-			if(*cp == ':')
+			int cnt = 0;
+			char in_buf[256];
+			char use_ext[256];
+			while(fgets(in_buf, 256, fp))
 			{
-				*cp = '\0';
-				strcpy(use_ext, in_buf);
-				cp++;
-				int vid_id = atoi(cp);
+				char *cp = in_buf;
 				while((*cp != ':') && (*cp != '\0')) cp++;
 				if(*cp == ':')
 				{
+					*cp = '\0';
+					strcpy(use_ext, in_buf);
 					cp++;
-					int aud_id = atoi(cp);
+					int vid_id = atoi(cp);
 					while((*cp != ':') && (*cp != '\0')) cp++;
 					if(*cp == ':')
 					{
 						cp++;
-						double score = atof(cp);
-						bad_codec_combo[cnt] = new CodecCombo(use_ext, vid_id, aud_id, score);
-						cnt++;
+						int aud_id = atoi(cp);
+						while((*cp != ':') && (*cp != '\0')) cp++;
+						if(*cp == ':')
+						{
+							cp++;
+							double score = atof(cp);
+							bad_codec_combo[cnt] = new CodecCombo(use_ext, vid_id, aud_id, score);
+							cnt++;
+						}
 					}
 				}
 			}
+			bad_codec_combo_cnt = cnt;
+			fclose(fp);
 		}
-		bad_codec_combo_cnt = cnt;
-		fclose(fp);
+		else
+		{
+			disable_slow_codecs = 0;
+		}
 	}
 	else
 	{
@@ -41189,8 +42284,11 @@ char	update_buf[256];
 	number_of_fonts = Fl::set_fonts(NULL);
 
 	Fl::add_clipboard_notify(clipboard_notify, this);
-	start_win->Update("Read external programs");
-	ReadInExternalPrograms();
+	if(fast_start == 0)
+	{
+		start_win->Update("Read external programs");
+		ReadInExternalPrograms();
+	}
 	resize_grp->end();
 	monitor_window = new MonitorWindow(this, output_width, output_height, "Monitor Window");
 	monitor_window->hide();
@@ -42178,7 +43276,6 @@ int	outer, inner;
 
 	video_window = NULL;
 	resize_grp = NULL;
-	audio_source = NULL;
 	recording_camera = NULL;
 	tested_mux = NULL;
 	error_message = NULL;
@@ -42363,6 +43460,19 @@ int	outer, inner;
 		thumbnail[loop] = NULL;
 		audio_thumbnail[loop] = NULL;
 	}
+	for(loop = 0;loop < 1024;loop++)
+	{
+		slider[loop] = NULL;
+	}
+	slider_cnt = 0;
+	for(loop = 0;loop < 128;loop++)
+	{
+		strcpy(slider_shortcut[loop].path, "");
+		slider_shortcut[loop].down = 0;
+		slider_shortcut[loop].up = 0;
+	}
+	slider_shortcut_cnt = 0;;
+	LoadSliderShortcuts("slider_shortcuts.txt");
 	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
 	{
 		initial_ptz_x[loop] = 0;
@@ -42391,7 +43501,10 @@ int	outer, inner;
 		last_muxed_list[loop] = NULL;
 	}
 	use_last_muxed = NULL;
-	LoadLastMuxedList();
+	for(loop = 0;loop < 64;loop++)
+	{
+		last_muxed_list[loop] = NULL;
+	}
 	for(loop = 0;loop < 3;loop++)
 	{
 		audio_thumbnail_pack[loop] = NULL;
@@ -42413,6 +43526,7 @@ int	outer, inner;
 		ptz_follow_array[outer] = 0;
 		ptz_reverse_h[outer] = 0;
 		ptz_reverse_v[outer] = 0;
+		ptz_start_position[outer] = -1;
 		ptz_interface_type[outer] = 0;
 		for(inner = 0;inner < NUMBER_OF_CAMERAS;inner++)
 		{
@@ -42437,13 +43551,13 @@ int	outer, inner;
 	strcpy(last_used_filename, "");
 	strcpy(ndi_stream_name, "");
 	strcpy(virtual_stream_name, "");
-	strcpy(yolo_cfg_filename, "");
-	strcpy(yolo_weights_filename, "");
+	strcpy(yolo_onnx_filename, "");
 	strcpy(yolo_names_filename, "");
 	strcpy(stream_url, "");
 	strcpy(filename, "");
 	strcpy(timestamp_format, "");
 	strcpy(transition_plugin, "");
+	strcpy(snapshot_filename_format, "photo_%U.png");
 
 	current_source = 0;
 	displayed_source = 0;
@@ -42469,8 +43583,8 @@ int	outer, inner;
 	clip_format = 0;
 	no_overwrite = 0;
 	audio_display_timer = 0;
-	audio_sample_rate = 0;
-	audio_channels = 0;
+	audio_sample_rate = 44100;
+	audio_channels = 2;
 	guideline_cnt = 0;
 	mux_test_sudden_stop = 0;
 	requested_w = 0;
@@ -42488,6 +43602,9 @@ int	outer, inner;
 	use_mousewheel = 0;
 	mouse_moving = 0;
 	resize_capture = 0;
+	snapshot_copy_to_copy_buffer = 0;
+	snapshot_entire_desktop = 0;
+	snapshot_main_window = 0;
 	hour = 0;
 	minute = 0;
 	second = 0;
@@ -42579,6 +43696,7 @@ int	outer, inner;
 	visca_arg_cnt = 0;
 	disable_slow_codecs = 1;
 	output_path_cnt = 0;
+
 	dragging_thumb_x = 0;
 	dragging_thumb_y = 0;
 	immediate_cnt = 0;
@@ -42676,6 +43794,8 @@ int	outer, inner;
 	single_stream = 0;
 	follow_mode = 0;
 	transition = 0;
+	transition_interval = 0.5;
+	transition_color = BLACK;
 	button_group_side = 0;
 	ptz_mode = 0;
 	ptz_device_cnt = 0;
@@ -42688,10 +43808,6 @@ int	outer, inner;
 	start_ptz_drag_y = 0;
 	ptz_middle_mouse = 0;
 	ptz_dragging = 0;
-	ptz_zoom_reading = 0;
-	ptz_focus_reading = 0;
-	ptz_pan_reading = 0;
-	ptz_tilt_reading = 0;
 	ptz_dragged = 0;
 	use_pan_speed = 0;
 	use_tilt_speed = 0;
@@ -42845,10 +43961,13 @@ int	inner, outer;
 			{
 				if(my_muxer[loop] != NULL)
 				{
-					my_muxer[loop]->Pause();
-					my_muxer[loop]->FinishMux();
-					delete my_muxer[loop];
-					my_muxer[loop] = NULL;
+					if(my_muxer[loop]->camera == cam)
+					{
+						my_muxer[loop]->Pause();
+						my_muxer[loop]->FinishMux();
+						delete my_muxer[loop];
+						my_muxer[loop] = NULL;
+					}
 				}
 			}
 		}
@@ -43130,9 +44249,13 @@ int	inner;
 	fprintf(fp, "\t\"year\": %d,\n", year);
 	fprintf(fp, "\t\"month\": %d,\n", month);
 	fprintf(fp, "\t\"day\": %d,\n", day);
+	fprintf(fp, "\t\"snapshot filename format\": \"%s\",\n", snapshot_filename_format);
 	fprintf(fp, "\t\"animate panels\": %d,\n", animate_panels);
 	fprintf(fp, "\t\"exclude directories\": %d,\n", file_selector_exclude_directories);
 	fprintf(fp, "\t\"use tooltips\": %d,\n", use_tooltips);
+	fprintf(fp, "\t\"snapshot copy to copy buffer\": %d,\n", snapshot_copy_to_copy_buffer);
+	fprintf(fp, "\t\"snapshot entire desktop\": %d,\n", snapshot_entire_desktop);
+	fprintf(fp, "\t\"snapshot main window\": %d,\n", snapshot_main_window);
 	fprintf(fp, "\t\"last used filename\": \"%s\",\n", last_used_filename);
 	fprintf(fp, "\t\"transparent interface\": %d,\n", transparent_interface);
 	fprintf(fp, "\t\"status color r\": %d,\n", status_color_r);
@@ -43173,8 +44296,7 @@ int	inner;
 			}
 		}
 	}
-	fprintf(fp, "\t\"yolo cfg filename\": \"%s\",\n", yolo_cfg_filename);
-	fprintf(fp, "\t\"yolo weights filename\": \"%s\",\n", yolo_weights_filename);
+	fprintf(fp, "\t\"yolo onnx filename\": \"%s\",\n", yolo_onnx_filename);
 	fprintf(fp, "\t\"yolo names filename\": \"%s\",\n", yolo_names_filename);
 	fprintf(fp, "\t\"forced fps\": %d,\n", forced_fps);
 	fprintf(fp, "\t\"forced interval\": %f,\n", forced_interval);
@@ -43448,6 +44570,8 @@ int	inner;
 	fprintf(fp, "\t\"desktop h\": %d,\n", desktop_h);
 	fprintf(fp, "\t\"follow mode\": %d,\n", follow_mode);
 	fprintf(fp, "\t\"transition\": %d,\n", transition);
+	fprintf(fp, "\t\"transition interval\": %f,\n", transition_interval);
+	fprintf(fp, "\t\"transition color\": %d,\n", transition_color);
 	fprintf(fp, "\t\"ptz mode\": %d,\n", ptz_mode);
 	fprintf(fp, "\t\"ptz device cnt\": %d,\n", ptz_device_cnt);
 	if(ptz_device_cnt > 0)
@@ -43583,7 +44707,7 @@ int		outer;
 		const char *error_ptr = cJSON_GetErrorPtr();
 		if(error_ptr != NULL)
 		{
-			fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+			fprintf(stderr, "Error: JSON Error in system default JSON before: %s\n", error_ptr);
 		}
 		status = 0;
 	}
@@ -43724,6 +44848,11 @@ int		outer;
 	{
 		record_on_start_alias = strdup(str);
 	}
+	char *ss_filename_format = json_parse_string(json, "snapshot filename format");
+	if(ss_filename_format != NULL)
+	{
+		strcpy(snapshot_filename_format, ss_filename_format);
+	}
 	success = json_parse_int(json, "hour", hour);
 	success = json_parse_int(json, "minute", minute);
 	success = json_parse_int(json, "second", second);
@@ -43733,6 +44862,9 @@ int		outer;
 	success = json_parse_int(json, "animate panels", animate_panels);
 	success = json_parse_int(json, "exclude directories", file_selector_exclude_directories);
 	success = json_parse_int(json, "use tooltips", use_tooltips);
+	success = json_parse_int(json, "snapshot copy to copy buffer", snapshot_copy_to_copy_buffer);
+	success = json_parse_int(json, "snapshot entire desktop", snapshot_entire_desktop);
+	success = json_parse_int(json, "snapshot main window", snapshot_main_window);
 	char *joystick_p = json_parse_string(json, "joystick path");
 	if(joystick_p != NULL)
 	{
@@ -43799,17 +44931,11 @@ int		outer;
 		}
 		recognize_class_cnt = cnt;
 	}
-	strcpy(yolo_cfg_filename, "");
-	str = json_parse_string(json, "yolo cfg filename");
+	strcpy(yolo_onnx_filename, "");
+	str = json_parse_string(json, "yolo onnx filename");
 	if(str != NULL)
 	{
-		strcpy(yolo_cfg_filename, str);
-	}
-	strcpy(yolo_weights_filename, "");
-	str = json_parse_string(json, "yolo weights filename");
-	if(str != NULL)
-	{
-		strcpy(yolo_weights_filename, str);
+		strcpy(yolo_onnx_filename, str);
 	}
 	strcpy(yolo_names_filename, "");
 	str = json_parse_string(json, "yolo names filename");
@@ -44164,6 +45290,8 @@ int		outer;
 	success = json_parse_int(json, "desktop h", desktop_h);
 	success = json_parse_int(json, "follow mode", follow_mode);
 	success = json_parse_int(json, "transition", transition);
+	success = json_parse_double(json, "transition interval", transition_interval);
+	success = json_parse_int(json, "transition color", transition_color);
 	success = json_parse_int(json, "ptz mode", ptz_mode);
 	if(immediate_drawing_window != NULL)
 	{
@@ -44444,7 +45572,7 @@ void	MyWin::LoadJSONCamera(char *filename, Camera *cam)
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in %s before: %s\n", filename, error_ptr);
 			}
 		}
 		else
@@ -44529,6 +45657,8 @@ int		loop;
 			success = json_parse_int(name, "requested h", cam->requested_h);
 			success = json_parse_int(name, "record trigger", cam->record_trigger);
 			success = json_parse_double(name, "darkness trigger", cam->darkness_trigger);
+			success = json_parse_double(name, "sound trigger", cam->sound_trigger);
+			success = json_parse_int(name, "sustain recording", cam->sustain_recording);
 			success = json_parse_int(name, "schedule start", cam->schedule_start);
 			success = json_parse_int(name, "schedule stop", cam->schedule_stop);
 			success = json_parse_int(name, "schedule day", cam->schedule_day);
@@ -44654,6 +45784,28 @@ int		loop;
 			if(pseudo_camera_name != NULL)
 			{
 				strcpy(cam->pseudo_camera_name, pseudo_camera_name);
+			}
+			success = json_parse_int(name, "trigger mic list cnt", cam->trigger_mic_list_cnt);
+			if(cam->trigger_mic_list_cnt > 0)
+			{
+				cJSON *mic = NULL;
+				cJSON *mics = json_parse_array(name, "trigger mic list");
+				if(mics != NULL)
+				{
+					int cnt = 0;
+					cJSON_ArrayForEach(mic, mics)
+					{
+						if(cnt < 128)
+						{
+							if(mic->valuestring != NULL)
+							{
+								cam->trigger_mic_list[cnt] = strdup(mic->valuestring);
+								cnt++;
+							}
+						}
+					}
+					cam->trigger_mic_list_cnt = cnt;
+				}
 			}
 			success = json_parse_int(name, "immediate cnt", immediate_cnt);
 			if(immediate_cnt > 0)
@@ -45369,10 +46521,13 @@ struct js_event	ev;
 
 void	MyWin::OpenJoystick()
 {
-	joystick_fd = open(joystick_path, O_RDONLY);
-	if(joystick_fd > -1)
+	if(joystick_path != NULL)
 	{
-		create_task((int (*)(int *))read_joystick_thread, (void *)this);
+		joystick_fd = open(joystick_path, O_RDONLY);
+		if(joystick_fd > -1)
+		{
+			create_task((int (*)(int *))read_joystick_thread, (void *)this);
+		}
 	}
 }
 
@@ -45797,6 +46952,8 @@ void	MyWin::SaveTransition()
 	if(fp != NULL)
 	{
 		fprintf(fp, "{\n");
+		fprintf(fp, "\t\"transition interval\": %f,\n", transition_interval);
+		fprintf(fp, "\t\"transition color\": %d,\n", transition_color);
 		if(transition == TRANSITION_NONE)
 		{
 			fprintf(fp, "\t\"transition\": \"NONE\"\n");
@@ -45845,11 +47002,13 @@ void	MyWin::LoadTransition()
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in transition.json before: %s\n", error_ptr);
 			}
 		}
 		else
 		{
+			json_parse_double(json, "transition interval", transition_interval);
+			json_parse_int(json, "transition color", transition_color);
 			char *str = json_parse_string(json, "transition");
 			if(str != NULL)
 			{
@@ -45920,7 +47079,7 @@ void	MyWin::LoadCodecs(char *filename)
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in %s before: %s\n", filename, error_ptr);
 			}
 		}
 		else
@@ -46024,7 +47183,7 @@ void	MyWin::LoadAllPTZPositions()
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in ptz_positions.json before: %s\n", error_ptr);
 			}
 		}
 		else
@@ -46071,6 +47230,17 @@ void	MyWin::LoadAllPTZPositions()
 			cJSON_Delete(json);
 		}
 		free(buf);
+	}
+}
+
+void	MyWin::SetDefaultOutputPathList()
+{
+	if(output_path_cnt < 1)
+	{
+		output_name[0] = strdup("default");
+		output_path[0] = strdup("output_%Y_%M_%D_%h_%m_%s");
+		output_active[0] = 1;
+		output_path_cnt = 1;
 	}
 }
 
@@ -46121,6 +47291,7 @@ int		loop;
 		fclose(fp);
 	}
 	output_path_cnt = cnt;
+	SetDefaultOutputPathList();
 }
 
 void	MyWin::SaveOutputPathList(char *filename)
@@ -46156,7 +47327,6 @@ void	set_output_accept_cb(Fl_Widget *w, void *v)
 {
 	EditOutputWindow *win = (EditOutputWindow *)v;
 	win->Debrief();
-	win->my_window->SaveOutputPathList("outputs.txt");
 	win->hide();
 	reset_button_cb(NULL, win->my_window);
 }
@@ -46699,7 +47869,6 @@ char	*sorted_list[1024];
 					{
 						if(cam->object_index[inner] == 1)
 						{
-							// COW COW object_menu->object_name_button[loop]->labelcolor(WHITE);
 							object_menu->object_name_button[loop]->labelcolor(CYAN);
 						}
 						else
@@ -47113,14 +48282,14 @@ static char	buf2[256];
 	}
 	else
 	{
-		if(ptz_zoom_reading < 0)
+		if(win->ptz_zoom_reading < 0)
 		{
-			ptz_zoom_reading = 0;
+			win->ptz_zoom_reading = 0;
 			if(win->ptz_current_interface != NULL)
 			{
-				VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&ptz_zoom_reading);
+				VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&win->ptz_zoom_reading);
 			}
-			sprintf(buf2, "%05d", ptz_zoom_reading);
+			sprintf(buf2, "%05d", win->ptz_zoom_reading);
 			win->ptz_zoom_value_label->copy_label(buf2);
 		}
 		ptz_set_speed_cb(win->ptz_speed_slider, this);
@@ -47128,7 +48297,7 @@ static char	buf2[256];
 		double use = (double)1.0;
 		if(win->ptz_adjust_speed_for_zoom == 1)
 		{
-			zoom_factor = ptz_zoom_reading;
+			zoom_factor = win->ptz_zoom_reading;
 			if(zoom_factor < 1) zoom_factor = 1;
 			if(zoom_factor > 16384) zoom_factor = 16384;
 			use = (double)(16384 - zoom_factor) / 16384.0;
@@ -47164,6 +48333,13 @@ static char	buf2[256];
 		else if(button == PTZ_DOWN_LEFT) button = PTZ_UP_LEFT;
 		else if(button == PTZ_UP_RIGHT) button = PTZ_DOWN_RIGHT;
 		else if(button == PTZ_UP_LEFT) button = PTZ_DOWN_LEFT;
+	}
+	if(button < PTZ_ZOOM_IN) // PAN / TILT COMMAND
+	{
+		if((use_pan_speed < 1) && (use_tilt_speed < 1))
+		{
+			button = PTZ_PAN_STOP;
+		}
 	}
 	if(button == PTZ_UP_LEFT)
 	{
@@ -47469,7 +48645,34 @@ static char	buf2[256];
 	{
 		if(win->ptz_current_interface != NULL)
 		{
-			VISCA_set_zoom_value(win->ptz_current_interface, win->ptz_current_camera, arg0);
+			if(win->support_absolute_zoom == 1)
+			{
+				int err = VISCA_set_zoom_value(win->ptz_current_interface, win->ptz_current_camera, arg0);
+			}
+			else
+			{
+				VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&win->ptz_zoom_reading);
+				if(arg0 > win->ptz_zoom_reading)
+				{
+					int err = VISCA_set_zoom_tele_speed(win->ptz_current_interface, win->ptz_current_camera, 1);
+					while(arg0 < win->ptz_zoom_reading)
+					{
+						usleep(1000);
+						VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&win->ptz_zoom_reading);
+					}
+					err = VISCA_set_zoom_stop(win->ptz_current_interface, win->ptz_current_camera);
+				}
+				else if(arg0 < win->ptz_zoom_reading)
+				{
+					int err = VISCA_set_zoom_wide_speed(win->ptz_current_interface, win->ptz_current_camera, 1);
+					while(arg0 < win->ptz_zoom_reading)
+					{
+						usleep(1000);
+						VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&win->ptz_zoom_reading);
+					}
+					err = VISCA_set_zoom_stop(win->ptz_current_interface, win->ptz_current_camera);
+				}
+			}
 			ptz_zooming = -1;
 		}
 	}
@@ -47573,7 +48776,15 @@ static char	buf2[256];
 		{
 			if(win->ptz_current_interface != NULL)
 			{
-				VISCA_set_iris_up(win->ptz_current_interface, win->ptz_current_camera);
+				if(win->auto_exposure_status == 0)
+				{
+					VISCA_set_iris_up(win->ptz_current_interface, win->ptz_current_camera);
+				}
+				else
+				{
+					VISCA_set_exp_comp_power(win->ptz_current_interface, win->ptz_current_camera, 1);
+					VISCA_set_exp_comp_up(win->ptz_current_interface, win->ptz_current_camera);
+				}
 				ptz_focusing = 1;
 			}
 		}
@@ -47591,7 +48802,15 @@ static char	buf2[256];
 		{
 			if(win->ptz_current_interface != NULL)
 			{
-				VISCA_set_iris_down(win->ptz_current_interface, win->ptz_current_camera);
+				if(win->auto_exposure_status == 0)
+				{
+					VISCA_set_iris_down(win->ptz_current_interface, win->ptz_current_camera);
+				}
+				else
+				{
+					VISCA_set_exp_comp_power(win->ptz_current_interface, win->ptz_current_camera, 1);
+					VISCA_set_exp_comp_down(win->ptz_current_interface, win->ptz_current_camera);
+				}
 				ptz_focusing = -1;
 			}
 		}
@@ -47681,7 +48900,9 @@ static char	buf2[256];
 		}
 		if(win->ptz_current_interface != NULL)
 		{
-			VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&ptz_zoom_reading);
+			VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&win->ptz_zoom_reading);
+			sprintf(buf2, "%05d", win->ptz_zoom_reading);
+			win->ptz_zoom_value_label->copy_label(buf2);
 		}
 	}
 	else if(button == PTZ_FOCUS_STOP)
@@ -47724,7 +48945,9 @@ static char	buf2[256];
 		}
 		if(win->ptz_current_interface != NULL)
 		{
-			VISCA_get_focus_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&ptz_focus_reading);
+			VISCA_get_focus_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&win->ptz_focus_reading);
+			sprintf(buf2, "%05d", win->ptz_focus_reading);
+			win->ptz_focus_value_label->copy_label(buf2);
 		}
 	}
 	else if(button == PTZ_RELATIVE_POSITION)
@@ -47804,15 +49027,15 @@ static char	buf2[256];
 	{
 		if(win->ptz_current_interface != NULL)
 		{
-			ptz_focus_reading = 0;
+			win->ptz_focus_reading = 0;
 			char nn = -1;
 			int cnt = 0;
 			while((nn == -1) && (cnt < 10))
 			{
-				nn = VISCA_get_focus_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&ptz_focus_reading);
+				nn = VISCA_get_focus_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&win->ptz_focus_reading);
 				cnt++;
 			}
-			sprintf(buf1, "%05d", ptz_focus_reading);
+			sprintf(buf1, "%05d", win->ptz_focus_reading);
 			win->ptz_focus_value_label->copy_label(buf1);
 		}
 	}
@@ -47820,15 +49043,15 @@ static char	buf2[256];
 	{
 		if(win->ptz_current_interface != NULL)
 		{
-			ptz_zoom_reading = 0;
+			win->ptz_zoom_reading = 0;
 			char nn = -1;
 			int cnt = 0;
 			while((nn == -1) && (cnt < 10))
 			{
-				nn = VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&ptz_zoom_reading);
+				nn = VISCA_get_zoom_value(win->ptz_current_interface, win->ptz_current_camera, (uint16_t *)&win->ptz_zoom_reading);
 				cnt++;
 			}
-			sprintf(buf2, "%05d", ptz_zoom_reading);
+			sprintf(buf2, "%05d", win->ptz_zoom_reading);
 			win->ptz_zoom_value_label->copy_label(buf2);
 		}
 	}
@@ -47836,13 +49059,13 @@ static char	buf2[256];
 	{
 		if(win->ptz_current_interface != NULL)
 		{
-			ptz_pan_reading = 0;
-			ptz_tilt_reading = 0;
+			win->ptz_pan_reading = 0;
+			win->ptz_tilt_reading = 0;
 			char nn = -1;
 			int cnt = 0;
 			while((nn == -1) && (cnt < 10))
 			{
-				nn = (char)VISCA_get_pantilt_position(win->ptz_current_interface, win->ptz_current_camera, &ptz_pan_reading, &ptz_tilt_reading);
+				nn = (char)VISCA_get_pantilt_position(win->ptz_current_interface, win->ptz_current_camera, &win->ptz_pan_reading, &win->ptz_tilt_reading);
 				cnt++;
 			}
 		}
@@ -47904,7 +49127,7 @@ void	ptz_drag_cb(void *v)
 	}
 }
 
-void	MyWin::PTZ_MoveTo(int instance, int spd_x, int spd_y, int xx, int yy)
+void	PTZ_Window::PTZ_MoveTo(int instance, int spd_x, int spd_y, int xx, int yy)
 {
 	int ctrl = Fl::event_state(FL_CTRL);
 	int alt = Fl::event_state(FL_ALT);
@@ -47937,7 +49160,7 @@ void	MyWin::PTZ_MoveTo(int instance, int spd_x, int spd_y, int xx, int yy)
 	double ddy = (double)dy * use;
 	dx = (int)ddx;
 	dy = (int)ddy;
-	ViscaCommand(instance, PTZ_RELATIVE_POSITION, 4, spd_x, spd_y, dx, dy);
+	my_window->ViscaCommand(instance, PTZ_RELATIVE_POSITION, 4, spd_x, spd_y, dx, dy);
 }
 
 void	ptz_tour_presets_cb(void *v)
@@ -47977,14 +49200,24 @@ int	loop;
 	}
 }
 
+void	ptz_startup_recall_position(void *v)
+{
+	PTZ_Window *win = (PTZ_Window *)v;
+	if(win->my_window->ptz_start_position[win->ptz_interface_index] > 0)
+	{
+		win->PTZ_RecallPosition(10, win->my_window->ptz_start_position[win->ptz_interface_index] - 1);
+	}
+}
+
 void	MyWin::ZoomALittle(int instance, int key)
 {
 	if(visca_command == 0)
 	{
-		if(ptz_window[instance]->ptz_current_interface != NULL)
+		PTZ_Window *ptz_win = ptz_window[instance];
+		if(ptz_win->ptz_current_interface != NULL)
 		{
 			int zoom_reading = 0;
-			VISCA_get_zoom_value(ptz_window[instance]->ptz_current_interface, ptz_window[instance]->ptz_current_camera, (uint16_t *)&zoom_reading);
+			VISCA_get_zoom_value(ptz_win->ptz_current_interface, ptz_win->ptz_current_camera, (uint16_t *)&zoom_reading);
 			if((key == 'w') || (key == FL_KP + '8'))
 			{
 				ViscaCommand(instance, PTZ_ZOOM, 1, zoom_reading + ptz_little_speed);
@@ -48004,10 +49237,11 @@ void	MyWin::FocusALittle(int instance, int key)
 {
 	if(visca_command == 0)
 	{
-		if(ptz_window[instance]->ptz_current_interface != NULL)
+		PTZ_Window *ptz_win = ptz_window[instance];
+		if(ptz_win->ptz_current_interface != NULL)
 		{
 			int focus_reading = 0;
-			VISCA_get_focus_value(ptz_window[instance]->ptz_current_interface, ptz_window[instance]->ptz_current_camera, (uint16_t *)&focus_reading);
+			VISCA_get_focus_value(ptz_win->ptz_current_interface, ptz_win->ptz_current_camera, (uint16_t *)&focus_reading);
 			if((key == 'w') || (key == FL_KP + '8'))
 			{
 				ViscaCommand(instance, PTZ_FOCUS, 1, focus_reading + ptz_little_speed);
@@ -48027,12 +49261,13 @@ void	MyWin::ZoomAndFocusALittle(int instance, int key)
 {
 	if(visca_command == 0)
 	{
-		if(ptz_window[instance]->ptz_current_interface != NULL)
+		PTZ_Window *ptz_win = ptz_window[instance];
+		if(ptz_win->ptz_current_interface != NULL)
 		{
 			int zoom_reading = 0;
 			int focus_reading = 0;
-			VISCA_get_zoom_value(ptz_window[instance]->ptz_current_interface, ptz_window[instance]->ptz_current_camera, (uint16_t *)&zoom_reading);
-			VISCA_get_focus_value(ptz_window[instance]->ptz_current_interface, ptz_window[instance]->ptz_current_camera, (uint16_t *)&focus_reading);
+			VISCA_get_zoom_value(ptz_win->ptz_current_interface, ptz_win->ptz_current_camera, (uint16_t *)&zoom_reading);
+			VISCA_get_focus_value(ptz_win->ptz_current_interface, ptz_win->ptz_current_camera, (uint16_t *)&focus_reading);
 			if((key == 'w') || (key == FL_KP + '8'))
 			{
 				ViscaCommand(instance, PTZ_ZOOM_AND_FOCUS, 2, zoom_reading + ptz_little_speed, focus_reading + ptz_little_speed);
@@ -48709,6 +49944,11 @@ int		loop;
 		else if((key == command_key[MY_KEY_VOLUME_DOWN]) && (!ctrl) && (!alt) && (!shift))
 		{
 			DecreaseVolume();
+			flag = 1;
+		}
+		else if((key == command_key[MY_KEY_CYCLE_CROSSHAIR]) && (!ctrl) && (!alt) && (!shift))
+		{
+			CycleCrosshair();
 			flag = 1;
 		}
 		else if((key == command_key[MY_KEY_CYCLE_DOWN_THUMBGROUP]) && (!ctrl) && (!alt) && (!shift))
@@ -49769,6 +51009,7 @@ int	loop;
 						if(rubberband_mode == SCROLL_MODE)
 						{
 							int no_go = 0;
+							int my_ptz_index = -1;
 							for(loop = 0;loop < ptz_device_cnt;loop++)
 							{
 								if(ptz_window[loop] != NULL)
@@ -49786,6 +51027,10 @@ int	loop;
 										{
 											no_go = 1;
 										}
+										else
+										{
+											my_ptz_index = loop;
+										}
 									}
 								}
 							}
@@ -49795,14 +51040,26 @@ int	loop;
 								&& (xx > cam->image_sx) && (xx < (cam->image_sx + cam->mat.cols))
 								&& (yy > cam->image_sy) && (yy < (cam->image_sy + cam->mat.rows)))
 								{
-									xx -= cam->image_sx;
-									yy -= cam->image_sy;
-									xx -= 100;
-									yy -= 100;
-									cam->template_image = cam->mat.clone();
-									crop_mat(cam->template_image, xx, yy, 200, 200);
-									cam->match_template = 1;
-									cam->match_template_start = precise_time();
+									if(my_ptz_index > -1)
+									{
+										if(ptz_window[my_ptz_index]->center_on_coord == 1)
+										{
+											int click_x = xx - cam->image_sx;
+											int click_y = yy - cam->image_sy;
+											ptz_window[my_ptz_index]->CenterCameraOnPixel(click_x, click_y, ptz_window[my_ptz_index]->ptz_zoom_reading);
+										}
+										else
+										{
+											xx -= cam->image_sx;
+											yy -= cam->image_sy;
+											xx -= 100;
+											yy -= 100;
+											cam->template_image = cam->mat.clone();
+											crop_mat(cam->template_image, xx, yy, 200, 200);
+											cam->match_template = 1;
+											cam->match_template_start = precise_time();
+										}
+									}
 								}
 								else
 								{
@@ -50536,6 +51793,16 @@ int	loop;
 		highlight_image_windows = 0;
 		int xx = Fl::event_x();
 		int yy = Fl::event_y();
+
+		int cx1 = (w() / 2) - 500;
+		int cx2 = (w() / 2) + 500;
+		int cy1 = (h() - 120);
+		int cy2 = h();
+		if((xx > cx1) && (xx < cx2)
+		&& (yy > cy1) && (yy < cy2))
+		{
+			audio_display_timer = 200;
+		}
 		if(rubberband_mode == INTEREST_MODE)
 		{
 			int off_x = image_origin_x;
@@ -51730,7 +52997,7 @@ int		loop;
 					int gg = 128;
 					int bb = 128;
 					int aa = 255;
-					my_color_chooser("Fill Color", rr, gg, bb, aa);
+					my_color_chooser(win, "Fill Color", rr, gg, bb, aa);
 					win->AddMiscCopy(cam, MISC_COPY_FILL, local, 1, NULL, use_x, use_y, ww, hh, rr, gg, bb, aa);
 				}
 				else if(strcmp(str, "Crop") == 0)
@@ -53021,78 +54288,108 @@ int		loop;
 
 	int flag = 0;
 	int key = Fl::event_key();
-	NoteKey(key, 1);
-	flag = HandleKeyboard(event, cam);
-	int state = Fl::event_state();
-	if((state & FL_CTRL) == FL_CTRL)
+	flag = TrySliderShortcut(key);
+	if(flag == 0)
 	{
-		if(key == 'v')
+		NoteKey(key, 1);
+		HandleKeyboard(event, cam);
+		int state = Fl::event_state();
+		if((state & FL_CTRL) == FL_CTRL)
 		{
-			Fl::paste(*this, 1, Fl::clipboard_image);
-			flag = 1;
-		}
-		else if((key == 'c') || (key == 'x'))
-		{
-			int xx = 0;
-			int yy = 0;
-			int ww = cam->display_width;
-			int hh = cam->display_height;
-			if((rubberband_x > -1)
-			&& (rubberband_y > -1)
-			&& (rubberband_w > -1)
-			&& (rubberband_h > -1))
+			if(key == 'v')
 			{
-				xx = rubberband_x - cam->image_sx;
-				yy = rubberband_y - cam->image_sy;
-				ww = rubberband_w;
-				hh = rubberband_h;
+				Fl::paste(*this, 1, Fl::clipboard_image);
+				flag = 1;
 			}
-			copy_to_clipboard(cam, xx, yy, ww, hh);
-			if(key == 'x')
+			else if((key == 'c') || (key == 'x'))
 			{
-				Mat local;
-				AddMiscCopy(cam, MISC_COPY_MASK, local, 1, NULL, xx, yy, ww, hh);
-			}
-			flag = 1;
-		}
-		else if(key == FL_Page_Up)
-		{
-			double scale_now = Fl::screen_scale(0);
-			if(scale_now < 2.0)
-			{
-				scale_now += 0.1;
-				Fl::screen_scale(0, scale_now);
-				resize(x(), y(), Fl::w(), Fl::h());	
-			}
-			flag = 1;
-		}
-		else if(key == FL_Page_Down)
-		{
-			double scale_now = Fl::screen_scale(0);
-			if(scale_now > 1.0)
-			{
-				scale_now -= 0.1;
-				Fl::screen_scale(0, scale_now);
-				resize(x(), y(), Fl::w(), Fl::h());	
-			}
-			flag = 1;
-		}
-		else if(key == FL_Insert)
-		{
-			if(borderless == 0)
-			{
-				int nn = border();
-				if(nn == 0)
+				int xx = 0;
+				int yy = 0;
+				int ww = cam->display_width;
+				int hh = cam->display_height;
+				if((rubberband_x > -1)
+				&& (rubberband_y > -1)
+				&& (rubberband_w > -1)
+				&& (rubberband_h > -1))
 				{
-					border(1);
-					fullscreen_off();
+					xx = rubberband_x - cam->image_sx;
+					yy = rubberband_y - cam->image_sy;
+					ww = rubberband_w;
+					hh = rubberband_h;
 				}
-				else
+				copy_to_clipboard(cam, xx, yy, ww, hh);
+				if(key == 'x')
 				{
-					border(0);
-					fullscreen();
+					Mat local;
+					AddMiscCopy(cam, MISC_COPY_MASK, local, 1, NULL, xx, yy, ww, hh);
 				}
 				flag = 1;
+			}
+			else if(key == FL_Page_Up)
+			{
+				double scale_now = Fl::screen_scale(0);
+				if(scale_now < 2.0)
+				{
+					scale_now += 0.1;
+					Fl::screen_scale(0, scale_now);
+					resize(x(), y(), Fl::w(), Fl::h());	
+				}
+				flag = 1;
+			}
+			else if(key == FL_Page_Down)
+			{
+				double scale_now = Fl::screen_scale(0);
+				if(scale_now > 1.0)
+				{
+					scale_now -= 0.1;
+					Fl::screen_scale(0, scale_now);
+					resize(x(), y(), Fl::w(), Fl::h());	
+				}
+				flag = 1;
+			}
+			else if(key == FL_Insert)
+			{
+				if(borderless == 0)
+				{
+					int nn = border();
+					if(nn == 0)
+					{
+						border(1);
+						fullscreen_off();
+					}
+					else
+					{
+						border(0);
+						fullscreen();
+					}
+					flag = 1;
+				}
+			}
+		}
+		else
+		{
+		}
+	}
+	return(flag);
+}
+
+int		MyWin::TrySliderShortcut(int key)
+{
+int		loop;
+
+	int flag = 0;
+	for(loop = 0;loop < slider_cnt;loop++)
+	{
+		if(slider[loop] != NULL)
+		{
+			if((slider[loop]->shortcut_up == key) || (slider[loop]->shortcut_down == key)
+			|| (slider[loop]->in_slider == 1))
+			{
+				int used = slider[loop]->handle(FL_KEYBOARD);
+				if(used == 1)
+				{
+					flag = 1;
+				}
 			}
 		}
 	}
@@ -53261,7 +54558,8 @@ int	MyWin::OnPush(int event, Camera *cam)
 						&& (ptz_mode == 1) 
 						&& (move_corner == 0) 
 						&& (resize_corner == 0) 
-						&& (restore_corner == 0))
+						&& (restore_corner == 0)
+						&& (lock_ptz_mouse_move == 0))
 						{
 							if((cam->zoom <= 1.0) || (Fl::event_button() == FL_MIDDLE_MOUSE))
 							{
@@ -53928,6 +55226,126 @@ void	MyWin::ReallyToggleButtonPanel()
 	}
 }
 
+void		MyWin::RegisterSlider(MySlider *in_slider)
+{
+int		loop;
+
+	int found = -1;
+	for(loop = 0;((loop < slider_cnt) && (found == -1));loop++)
+	{
+		if(slider[loop] == NULL)
+		{
+			found = loop;
+		}
+	}
+	if(found > -1)
+	{
+		slider[found] = in_slider;
+	}
+	else
+	{
+		if(slider_cnt < 1024)
+		{
+			slider[slider_cnt] = in_slider;
+			slider_cnt++;
+		}
+	}
+}
+
+void	MyWin::RemoveSlider(MySlider *in_slider)
+{
+int		loop;
+
+	for(loop = 0;loop < slider_cnt;loop++)
+	{
+		if(slider[loop] == in_slider)
+		{
+			slider[loop] = NULL;
+		}
+	}
+}
+
+void	MyWin::AddSliderShortcut(char *path, int down, int up)
+{
+	if(slider_shortcut_cnt < 128)
+	{
+		if(path != NULL)
+		{
+			strncpy(slider_shortcut[slider_shortcut_cnt].path, path, 1024);
+			slider_shortcut[slider_shortcut_cnt].down = down;
+			slider_shortcut[slider_shortcut_cnt].up = up;
+			slider_shortcut_cnt++;
+			SaveSliderShortcuts("slider_shortcuts.txt");
+		}
+	}
+}
+
+void	MyWin::LoadSliderShortcuts(char *filename)
+{
+char	buf[1024];
+
+	FILE *fp = fopen(filename, "r");
+	if(fp != NULL)
+	{
+		slider_shortcut_cnt = 0;
+		int done = 0;
+		while((fgets(buf, 1024, fp) != NULL) && (done == 0))
+		{
+			if(slider_shortcut_cnt < 128)
+			{
+				char *cp = buf;
+				while((*cp != '\t') && (*cp != '\0'))
+				{
+					cp++;
+				}
+				if(*cp == '\t')
+				{
+					*cp = '\0';
+					char *path = buf;
+					cp++;
+					if(*cp != '\0')
+					{
+						int down = atoi(cp);
+						while((*cp != '\t') && (*cp != '\0'))
+						{
+							cp++;
+						}
+						if(*cp == '\t')
+						{
+							cp++;
+							if(*cp != '\0')
+							{
+								int up = atoi(cp);
+								AddSliderShortcut(path, down, up);
+							}
+						}
+					}
+				}
+			}
+			else
+			{
+				done = 1;
+			}
+		}
+		fclose(fp);
+	}
+}
+
+void	MyWin::SaveSliderShortcuts(char *filename)
+{
+int	loop;
+
+	FILE *fp = fopen(filename, "w");
+	if(fp != NULL)
+	{
+		for(loop = 0;loop < slider_shortcut_cnt;loop++)
+		{
+			fprintf(fp, "%s\t%d\t%d\n", slider_shortcut[loop].path, slider_shortcut[loop].down, slider_shortcut[loop].up);
+		}
+		fclose(fp);
+	}
+}
+
 void	MyWin::RemoveSource(int src)
 {
 int	loop;
@@ -54266,7 +55684,7 @@ char	buf[4096];
 				}
 			}
 			encoding = 1;
-			Muxer *use_muxer = new Muxer(this, review, 1);
+			Muxer *use_muxer = new Muxer(this, NULL, review, 1);
 			SetUseOutputPath(0, buf);
 
 			// COW - Forced to 30 FPS, otherwise cannot sync
@@ -55804,6 +57222,7 @@ int			outer;
 					|| (split == 1) 
 					|| (cam->priority > 0) 
 					|| (cam->snapshot == 1) 
+					|| (cam == last_cam)
 					|| (cam->record == 1))
 					{
 						cam->Capture();
@@ -56052,6 +57471,14 @@ int			outer;
 				{
 					cam->DrawFilterDialogs();
 					cam->HighlightShapes();
+					DrawCrosshairs(cam);
+					if(transition_cnt < 1.0)
+					{
+						fl_color(BLUE);
+						fl_line_style(FL_SOLID, 4);
+						fl_line(cam->image_sx, cam->image_sy + cam->display_height, cam->image_sx + (display_width * transition_cnt), cam->image_sy + cam->display_height);
+						fl_line_style(FL_SOLID, 1);
+					}
 				}
 			}
 			else
@@ -56242,6 +57669,11 @@ int			outer;
 						fl_font(FL_HELVETICA, 11);
 						fl_draw("AUDIO", (audio_thumbnail_group->x() + (audio_thumbnail_group->w()) / 2) - 40, 4, 80, 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 					}
+					int cx1 = (w() / 2) - 500;
+					int cx2 = (w() / 2) + 500;
+					int cy1 = (h() - 2);
+					fl_draw("AUDIO METERS", cx1, cy1 - 21, 1000, 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+					fl_line(cx1, cy1, cx2, cy1);
 					for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
 					{
 						if(ptz_window[loop] != NULL)
@@ -56354,6 +57786,58 @@ int			outer;
 	else
 	{
 		ErrorMessage();
+	}
+}
+
+void	MyWin::DrawCrosshairs(Camera *cam)
+{
+	int sx = cam->image_sx;
+	int sy = cam->image_sy;
+	int iw = cam->display_width;
+	int ih = cam->display_height;
+	if(crosshair_mode  == BOX_CROSSHAIR_MODE)
+	{
+		crosshair_box(sx, sy, iw / 2, ih / 2);
+	}
+	else if(crosshair_mode == CROSS_CROSSHAIR_MODE)
+	{
+		crosshair_cross(sx, sy, iw / 2, ih / 2);
+	}
+	else if(crosshair_mode == BOXES_CROSSHAIR_MODE)
+	{
+		int cx = (iw / 2);
+		int cy = (ih / 2);
+		crosshair_box(sx, sy, cx, cy);
+		crosshair_box(sx, sy, cx - (cx / 2), cy - (cy / 2));
+		crosshair_box(sx, sy, cx + (cx / 2), cy - (cy / 2));
+		crosshair_box(sx, sy, cx + (cx / 2), cy + (cy / 2));
+		crosshair_box(sx, sy, cx - (cx / 2), cy + (cy / 2));
+	}
+	else if(crosshair_mode == CROSSES_CROSSHAIR_MODE)
+	{
+		int cx = (iw / 2);
+		int cy = (ih / 2);
+		crosshair_cross(sx, sy, cx, cy);
+		crosshair_cross(sx, sy, cx - (cx / 2), cy - (cy / 2));
+		crosshair_cross(sx, sy, cx + (cx / 2), cy - (cy / 2));
+		crosshair_cross(sx, sy, cx + (cx / 2), cy + (cy / 2));
+		crosshair_cross(sx, sy, cx - (cx / 2), cy + (cy / 2));
+	}
+	else if(crosshair_mode == GRID5_CROSSHAIR_MODE)
+	{
+		crosshair_grid(sx, sy, iw, ih, 5);
+	}
+	else if(crosshair_mode == GRID10_CROSSHAIR_MODE)
+	{
+		crosshair_grid(sx, sy, iw, ih, 10);
+	}
+	else if(crosshair_mode == GRID20_CROSSHAIR_MODE)
+	{
+		crosshair_grid(sx, sy, iw, ih, 20);
+	}
+	else if(crosshair_mode == RULER_CROSSHAIR_MODE)
+	{
+		crosshair_ruler(sx, sy, iw, ih);
 	}
 }
 
@@ -56846,6 +58330,11 @@ int	loop;
 	}
 	if(audio_display_timer > 0)
 	{
+		int mw = 0;
+		int mh = 0;
+		fl_measure("(scroll to change)", mw, mh);
+		mw = ((w() / 2) - (mw / 2));
+
 		int start_x = (w() / 2);
 		int start_y = h() - 80;
 		fl_color(WHITE);
@@ -56860,6 +58349,8 @@ int	loop;
 			start_x -= (ww / 2);
 			start_y -= (hh / 2);
 			fl_draw("Frequency & Amplitude", start_x, start_y);
+			fl_font(FL_HELVETICA, 9);
+			fl_draw("(scroll to change)", mw, start_y + 24);
 		}
 		else if((audio_display & AUDIO_DISPLAY_FREQUENCY) == AUDIO_DISPLAY_FREQUENCY)
 		{
@@ -56869,6 +58360,8 @@ int	loop;
 			start_x -= (ww / 2);
 			start_y -= (hh / 2);
 			fl_draw("Frequency", start_x, start_y);
+			fl_font(FL_HELVETICA, 9);
+			fl_draw("(scroll to change)", mw, start_y + 24);
 		}
 		else if((audio_display & AUDIO_DISPLAY_AMPLITUDE) == AUDIO_DISPLAY_AMPLITUDE)
 		{
@@ -56878,6 +58371,8 @@ int	loop;
 			start_x -= (ww / 2);
 			start_y -= (hh / 2);
 			fl_draw("Amplitude", start_x, start_y);
+			fl_font(FL_HELVETICA, 9);
+			fl_draw("(scroll to change)", mw, start_y + 24);
 		}
 		else if((audio_display & AUDIO_DISPLAY_VU) == AUDIO_DISPLAY_VU)
 		{
@@ -56887,6 +58382,8 @@ int	loop;
 			start_x -= (ww / 2);
 			start_y -= (hh / 2);
 			fl_draw("VU", start_x, start_y);
+			fl_font(FL_HELVETICA, 9);
+			fl_draw("(scroll to change)", mw, start_y + 24);
 		}
 		else
 		{
@@ -56896,6 +58393,8 @@ int	loop;
 			start_x -= (ww / 2);
 			start_y -= (hh / 2);
 			fl_draw("No Audio Display", start_x, start_y);
+			fl_font(FL_HELVETICA, 9);
+			fl_draw("(scroll to change)", mw, start_y + 24);
 		}
 	}
 }
@@ -56979,7 +58478,7 @@ char	buf[1024];
 		time_t now = time(0);
 		struct tm *tm = localtime(&now);
 		sprintf(buf, "desktop_%04d_%02d_%02d_%02d_%02d_%02d.%s", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, use_extension);
-		record_all_muxer = new Muxer(this, NULL, 0);
+		record_all_muxer = new Muxer(this, NULL, NULL, 0);
 		int init_mux_err = record_all_muxer->InitMux(
 			1,
 			use_container,
@@ -57036,28 +58535,60 @@ char	buf[1024];
 	}
 }
 
-void	MyWin::SnapAll()
+void	MyWin::SnapAll(int main_window)
 {
+char	filename[4096];
+Mat		use_mat;
+
 	int depth = 0;
 	int sz = 0;
+	int xx = -1;
+	int yy = -1;
 	int ww = -1;
 	int hh = -1;
-	unsigned char *b = grab_raw_image(NULL, -1, -1, ww, hh, &sz, &depth);
-	if(b != NULL)
+	unsigned char *b = NULL;
+	if(main_window == 1)
 	{
-		time_t now = time(0);
-		struct tm *tm = localtime(&now);
-		if(tm != NULL)
+		ww = w();
+		hh = h();
+		GrabWindowImage(fl_xid(this), use_mat);
+		if(!use_mat.empty())
+		{
+			b = use_mat.ptr();
+			ww = use_mat.cols;
+			hh = use_mat.rows;
+			depth = use_mat.channels();
+			cv::cvtColor(use_mat, use_mat, COLOR_RGBA2BGR);
+			interpret_output_path(NULL, snapshot_filename_format, 4096, filename, NULL);
+			if(strlen(filename) > 0)
+			{
+				imwrite(filename, use_mat);
+			}
+			if(snapshot_copy_to_copy_buffer == 1)
+			{
+				CopyMatToClipboard(use_mat);
+			}
+		}
+	}
+	else
+	{
+		b = grab_raw_image(NULL, xx, yy, ww, hh, &sz, &depth);
+		if(b != NULL)
 		{
 			int width = ww;
 			int height = hh;
 			Mat src(height, width, CV_8UC4, (void *)b);
 			Mat out;
 			cv::cvtColor(src, out, COLOR_BGRA2BGR);
-			cv::resize(out, out, cv::Size(), 0.25, 0.25);
-			char filename[4096];
-	 		sprintf(filename, "desktop_%04d_%02d_%02d_%02d_%02d_%02d.png", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-			imwrite(filename, out);
+			interpret_output_path(NULL, snapshot_filename_format, 4096, filename, NULL);
+			if(strlen(filename) > 0)
+			{
+				imwrite(filename, out);
+			}
+			if(snapshot_copy_to_copy_buffer == 1)
+			{
+				CopyMatToClipboard(out);
+			}
 		}
 	}
 }
@@ -57307,7 +58838,8 @@ int	loop;
 		Camera *cam = camera[loop];
 		if(cam != NULL)
 		{
-			int triggered = cam->Triggers();
+			int triggered = 0;
+			triggered = cam->Triggers();
 			if(triggered == 1)
 			{
 				if(cam->record == 0)
@@ -57740,10 +59272,9 @@ int	loop;
 
 void	MyWin::SetupObjectDetection()
 {
-	if((access(yolo_cfg_filename, F_OK) == 0)
-	&& (access(yolo_weights_filename, F_OK) == 0))
+	if(access(yolo_onnx_filename, F_OK) == F_OK)
 	{
-		net = readNetFromDarknet(yolo_cfg_filename, yolo_weights_filename);
+		net = readNetFromONNX(yolo_onnx_filename);
 		if(!net.empty()) 
 		{
 			net.setPreferableBackend(DNN_BACKEND_CUDA);
@@ -57751,12 +59282,12 @@ void	MyWin::SetupObjectDetection()
 		}
 		else
 		{
-			fprintf(stderr, "Error: While reading net from darknet, %s or %s produced an empty network.\n", yolo_cfg_filename, yolo_weights_filename);
+			fprintf(stderr, "Error: readNetFromONNX failed.\n");
 		}
 	}
 	else
 	{
-		fprintf(stderr, "Error: While reading net from darknet, %s or %s cannot be accessed.\n", yolo_cfg_filename, yolo_weights_filename);
+		fprintf(stderr, "Error: Object detection has been requested but %s is not found.\n", yolo_onnx_filename);
 	}
 }
 
@@ -57955,21 +59486,42 @@ void	reset_button_cb(Fl_Widget *w, void *v);
 	reset_button_cb(NULL, this);
 }
 
+int		MyWin::CheckForUniqueLastMuxed(char *filename)
+{
+int	loop;
+
+	int flag = 0;
+	for(loop = 0;loop < 64;loop++)
+	{
+		if(last_muxed_list[loop] != NULL)
+		{
+			if(strcmp(filename, last_muxed_list[loop]) == 0)
+			{
+				flag = 1;
+			}
+		}
+	}
+	return(flag);
+}
+
 void	MyWin::AddLastMuxed(char *filename)
 {
 int	loop;
 
-	if(last_muxed_list[63] != NULL)
+	if(CheckForUniqueLastMuxed(filename) == 0)
 	{
-		free(last_muxed_list[63]);
-		last_muxed_list[63] = NULL;
+		if(last_muxed_list[63] != NULL)
+		{
+			free(last_muxed_list[63]);
+			last_muxed_list[63] = NULL;
+		}
+		for(loop = 63;loop > 0;loop--)
+		{
+			last_muxed_list[loop] = last_muxed_list[loop - 1];
+		}
+		last_muxed_list[loop] = strdup(filename);
+		strcpy(last_used_filename, filename);
 	}
-	for(loop = 63;loop > 0;loop--)
-	{
-		last_muxed_list[loop] = last_muxed_list[loop - 1];
-	}
-	last_muxed_list[loop] = strdup(filename);
-	strcpy(last_used_filename, filename);
 }
 
 void	MyWin::SaveLastMuxedList()
@@ -58004,8 +59556,14 @@ char	buf[4096];
 			strip_lf(buf);
 			if(strlen(buf) > 0)
 			{
-				last_muxed_list[cnt] = strdup(buf);
-				cnt++;
+				if(access(buf, F_OK) == F_OK)
+				{
+					if(CheckForUniqueLastMuxed(buf) == 0)
+					{
+						last_muxed_list[cnt] = strdup(buf);
+						cnt++;
+					}
+				}
 			}
 		}
 		fclose(fp);
@@ -58065,7 +59623,7 @@ int	loop;
 				const char *error_ptr = cJSON_GetErrorPtr();
 				if(error_ptr != NULL)
 				{
-					fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+					fprintf(stderr, "Error: JSON Error in %s before: %s\n", filename, error_ptr);
 				}
 			}
 			else
@@ -58256,6 +59814,8 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 					encode_speed_window->show();
 					reset_camera_button->hide();
 					reset_cameras_button->hide();
+					review_muxed_button->hide();
+					review_button->hide();
 					load_setup_button->hide();
 					video_settings_button->hide();
 					if(global_my_format_cnt > 0)
@@ -58296,6 +59856,15 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 					encode_speed_window->hide();
 					reset_camera_button->show();
 					reset_cameras_button->show();
+					review_muxed_button->show();
+					if(review == NULL)
+					{
+						review_button->show();
+					}
+					else
+					{
+						review_button->hide();
+					}
 					load_setup_button->show();
 					video_settings_button->show();
 					if(global_my_format_cnt > 0)
@@ -58363,22 +59932,6 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 			}
 			show_debug_button->show();
 			test_recognition_button->show();
-			if(review == NULL)
-			{
-				review_button->show();
-			}
-			else
-			{
-				review_button->hide();
-			}
-			if(recording == 0)
-			{
-				review_muxed_button->show();
-			}
-			else
-			{
-				review_muxed_button->hide();
-			}
 			if(cam->zoom_box_display == 1)
 			{
 				zoom_box_button->copy_label("Cease Box Zoom");
@@ -58483,7 +60036,10 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 			if(ptz_mode == 1)
 			{
 				ptz_lock_window_button->show();
-				new_ptz_window_button->show();
+				if(fast_start == 0)
+				{
+					new_ptz_window_button->show();
+				}
 			}
 			keyboard_settings_button->show();
 			gui_settings_button->show();
@@ -59031,18 +60587,15 @@ int	loop;
 			usleep(500000);
 		}
 	}
-	if(audio_source != NULL)
+	for(loop = 0;loop < audio_source_cnt;loop++)
 	{
-		for(loop = 0;loop < audio_source_cnt;loop++)
+		if(audio_source[loop] != NULL)
 		{
-			if(audio_source[loop] != NULL)
-			{
-				list[nn] = strdup(audio_source[loop]);
-				rate[nn] = audio_sample_rate;
-				channels[nn] = audio_channels;
-				description[nn] = NULL;
-				nn++;
-			}
+			list[nn] = strdup(audio_source[loop]);
+			rate[nn] = audio_sample_rate;
+			channels[nn] = audio_channels;
+			description[nn] = NULL;
+			nn++;
 		}
 	}
 	int nyy = 10;
@@ -59161,11 +60714,14 @@ int	loop;
 
 void	MyWin::ViscaSpecs(VISCAInterface_t *interface, MyVISCACamera *cam)
 {
-int	err;
+int		err;
+int		loop;
+char	use_name[4096];
 
 	VISCA_get_camera_info(interface, cam);
 	char visca_filename[4096];
 	sprintf(visca_filename, "VISCA_CAMERA_%x_%x.specs", cam->vendor, cam->model);
+	sprintf(use_name, "%x:%x", cam->vendor, cam->model);
 	FILE *fp = fopen(visca_filename, "r");
 	if(fp != NULL)
 	{
@@ -59191,8 +60747,9 @@ int	err;
 		if(fp != NULL)
 		{
 			char local_buf[8192];
-			sprintf(local_buf, "Deriving specs for %s", visca_filename);
+			sprintf(local_buf, "Deriving specs for visca device %s", use_name);
 			start_win->Update(local_buf);
+
 			VISCA_set_pantilt_home(interface, cam);
 			usleep(100000);
 			VISCA_set_pantilt_absolute_position(interface, cam, 20, 20, 0, 0);
@@ -59200,34 +60757,61 @@ int	err;
 			VISCA_set_zoom_value(interface, cam, 0);
 			usleep(100000);
 
+			sprintf(local_buf, "Deriving pan/tilt specs for visca device %s", use_name);
+			start_win->Update(local_buf);
+
 			int16_t pan_reading = 0;
 			int16_t tilt_reading = 0;
 			VISCA_set_pantilt_upright(interface, cam, 20, 20);
-			usleep(10000000);
+			for(loop = 0;loop < 10;loop++)
+			{
+				sprintf(local_buf, "Deriving pan/tilt (up/right) specs for visca device %s (%d)", use_name, 10 - loop);
+				start_win->Update(local_buf);
+				usleep(1000000);
+			}
 			VISCA_set_pantilt_stop(interface, cam, 20, 20);
 			usleep(100000);
 			err = VISCA_get_pantilt_position(interface, cam, &pan_reading, &tilt_reading);
 			cam->param_pan_limit = pan_reading;
 			cam->param_tilt_up_limit = tilt_reading;
 
+			sprintf(local_buf, "Deriving pan/tilt specs for visca device %s", use_name);
+			start_win->Update(local_buf);
+
 			pan_reading = 0;
 			tilt_reading = 0;
 			VISCA_set_pantilt_downleft(interface, cam, 20, 20);
-			usleep(10000000);
+			for(loop = 0;loop < 10;loop++)
+			{
+				sprintf(local_buf, "Deriving pan/tilt (down/left) specs for visca device %s (%d)", use_name, 10 - loop);
+				start_win->Update(local_buf);
+				usleep(1000000);
+			}
 			VISCA_set_pantilt_stop(interface, cam, 20, 20);
 			usleep(100000);
 			err = VISCA_get_pantilt_position(interface, cam, &pan_reading, &tilt_reading);
 			cam->param_tilt_down_limit = tilt_reading;
+
+			sprintf(local_buf, "Deriving zoom specs for visca device %s", use_name);
+			start_win->Update(local_buf);
 
 			VISCA_set_pantilt_home(interface, cam);
 			usleep(100000);
 			VISCA_set_zoom_value(interface, cam, 0);
 			usleep(100000);
 			int err = VISCA_set_zoom_tele_speed(interface, cam, 20);
-			usleep(10000000);
+			for(loop = 0;loop < 10;loop++)
+			{
+				sprintf(local_buf, "Deriving zoom specs for visca device %s (%d)", use_name, 10 - loop);
+				start_win->Update(local_buf);
+				usleep(1000000);
+			}
 			int zoom_reading = 0;
 			VISCA_get_zoom_value(interface, cam, (uint16_t *)&zoom_reading);
 			cam->param_zoom_limit = zoom_reading;
+
+			sprintf(local_buf, "Writing specs for visca device %s", use_name);
+			start_win->Update(local_buf);
 
 			VISCA_get_pantilt_maxspeed(interface, cam, (uint8_t *)&cam->param_pan_max_speed, (uint8_t *)&cam->param_tilt_max_speed);
 			if(cam->param_pan_max_speed < 20)
@@ -59245,6 +60829,9 @@ int	err;
 			fprintf(fp, "%d\n", cam->param_pan_max_speed);
 			fprintf(fp, "%d\n", cam->param_tilt_max_speed);
 			fclose(fp);
+
+			sprintf(local_buf, "Reset visca device %s", use_name);
+			start_win->Update(local_buf);
 
 			VISCA_set_pantilt_home(interface, cam);
 			VISCA_set_zoom_value(interface, cam, 0);
@@ -59418,6 +61005,19 @@ int	aa, ab, ac;
 	{
 		local_ptz_window->showing = 1;
 	}
+	if(ptz_start_position[in_instance] > -1)
+	{
+		Fl::add_timeout(1.0, ptz_startup_recall_position, local_ptz_window);
+	}
+}
+
+void	MyWin::CycleCrosshair()
+{
+	crosshair_mode++;
+	if(crosshair_mode > RULER_CROSSHAIR_MODE)
+	{
+		crosshair_mode = 0;
+	}
 }
 
 void	MyWin::ResetCommandKeys()
@@ -59484,6 +61084,7 @@ void	MyWin::ResetCommandKeys()
 	command_key[MY_KEY_OPEN_PTZ] = FL_F + 4;
 	command_key[MY_KEY_VOLUME_UP] = FL_Right;
 	command_key[MY_KEY_VOLUME_DOWN] = FL_Left;
+	command_key[MY_KEY_CYCLE_CROSSHAIR] = 'm';
 }
 
 int	MyWin::CheckCommandTitle(char *name)
@@ -59548,6 +61149,7 @@ int	MyWin::CheckCommandTitle(char *name)
 	if(strcasecmp("OPEN CAMERAS", name) == 0) nn = MY_KEY_OPEN_CAMERAS;
 	if(strcasecmp("OPEN AUDIO", name) == 0) nn = MY_KEY_OPEN_AUDIO;
 	if(strcasecmp("OPEN PTZ", name) == 0) nn = MY_KEY_OPEN_PTZ;
+	if(strcasecmp("CYCLE CROSSHAIR", name) == 0) nn = MY_KEY_CYCLE_CROSSHAIR;
 	return(nn);
 }
 
@@ -59596,6 +61198,7 @@ void	MyWin::SaveCommandKeyDefinitions(char *filename)
 		fprintf(fp, "PTZ HOME\t%s\n", CommandKeyName(command_key[MY_KEY_PTZ_HOME]));
 		fprintf(fp, "VOLUME UP\t%s\n", CommandKeyName(command_key[MY_KEY_VOLUME_UP]));
 		fprintf(fp, "VOLUME DOWN\t%s\n", CommandKeyName(command_key[MY_KEY_VOLUME_DOWN]));
+		fprintf(fp, "CYCLE CROSSHAIR\t%s\n", CommandKeyName(command_key[MY_KEY_CYCLE_CROSSHAIR]));
 		fprintf(fp, "CYCLE DOWN THUMBGROUP\t%s\n", CommandKeyName(command_key[MY_KEY_CYCLE_DOWN_THUMBGROUP]));
 		fprintf(fp, "CYCLE UP THUMBGROUP\t%s\n", CommandKeyName(command_key[MY_KEY_CYCLE_UP_THUMBGROUP]));
 		fprintf(fp, "DISPLAY THUMBGROUP 0\t%s\n", CommandKeyName(command_key[MY_KEY_DISPLAY_THUMBGROUP_0]));
@@ -60600,6 +62203,10 @@ int	loop;
 	new_ptz_window_button->priority = 1;
 	new_ptz_window_button->copy_tooltip("Create a new set of PTZ controls.");
 	new_ptz_window_button->callback(new_ptz_window_cb, this);
+	if(fast_start == 1)
+	{
+		new_ptz_window_button->hide();
+	}
 	y_pos += y_inc;
 
 	video_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Video Settings");
@@ -61164,7 +62771,7 @@ int	loop;
 void	status_window_cb(void *v)
 {
 int		loop;
-char	local_buf[4096];
+char	local_buf[32758];
 char	trigger_str[4096];
 char	use_name[4096];
 
@@ -61513,7 +63120,7 @@ void	SlidingElement::show()
 	if(my_window->actively_loading == 0)
 	{
 		DragGroup::show();
-		if(animated == 1)
+		if((animated == 1) || (my_window->animate_panels))
 		{
 			behavior = OPENING;
 			if(in_motion == 0)
@@ -61559,7 +63166,7 @@ void	SlidingElement::hide()
 {
 	if(my_window->actively_loading == 0)
 	{
-		if(animated == 1)
+		if((animated == 1) || (my_window->animate_panels == 1))
 		{
 			behavior = CLOSING;
 			if(in_motion == 0)
@@ -61633,7 +63240,7 @@ void	hide_window_cb(Fl_Widget *w, void *v);
 	my_window = in_win;
 	last_x = 0;
 	last_y = 0;
-	my_window->LoadOutputPathList("outputs.txt");
+	my_window->SetDefaultOutputPathList();
 	int cnt = my_window->output_path_cnt;
 
 	int new_yp = 20;
@@ -62166,7 +63773,7 @@ int			loop;
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in GUI_settings.json before: %s\n", error_ptr);
 			}
 		}
 		else
@@ -67450,12 +69057,12 @@ void	review_win_encode_cb(Fl_Widget *w, void *v)
 	ReviewWin *win = (ReviewWin *)v;
 	if(win->playing == 0)
 	{
-		if(win->my_win != NULL)
+		if(win->my_window != NULL)
 		{
-			if((win->my_win->encoding == 0) && (win->encoding == 0))
+			if((win->my_window->encoding == 0) && (win->encoding == 0))
 			{
 				win->encoding = 1;
-				win->my_win->Encode();
+				win->my_window->Encode();
 				win->encoding = 0;
 			}
 		}
@@ -67551,6 +69158,43 @@ void	review_win_retreat_one_cb(Fl_Widget *w, void *v)
 	}
 }
 
+void	save_rgb_mat_as_png(MyWin *in_win, Mat mat)
+{
+Mat			src;
+
+	char filename[4096];
+	if(in_win != NULL)
+	{
+		interpret_output_path(NULL, in_win->snapshot_filename_format, 4096, filename, NULL);
+	}
+	else
+	{
+		interpret_output_path(NULL, "photo_%U.png", 4096, filename, NULL);
+	}
+	if(strlen(filename) > 0)
+	{
+		cvtColor(mat, src, COLOR_RGB2BGR);
+		imwrite(filename, src);
+		if(in_win->snapshot_copy_to_copy_buffer == 1)
+		{
+			CopyMatToClipboard(src);
+		}
+	}
+}
+
+void	save_rgb_as_png(MyWin *in_win, void *rgb, int ww, int hh)
+{
+	Mat src = Mat(hh, ww, CV_8UC3, rgb);
+	save_rgb_mat_as_png(in_win, src);
+}
+
+void	save_rgb_as_png(VideoWindow *in_win, void *rgb, int ww, int hh)
+{
+	MyWin *my_win = (MyWin *)in_win->my_window;
+	Mat src = Mat(hh, ww, CV_8UC3, rgb);
+	save_rgb_mat_as_png(my_win, src);
+}
+
 void	review_win_snap_one_cb(Fl_Widget *w, void *v)
 {
 char		filename[256];
@@ -67562,16 +69206,7 @@ struct tm	*tm;
 		win->single_frame = 1;
 		win->playing = 1;
 		win->redraw();
-		
-		time_t t_num = time(0);
-		tm = localtime((const time_t *)&t_num);
-		if(tm != NULL)
-		{
-		 	sprintf(filename, "photo_%04d_%02d_%02d_%02d_%02d_%02d.png", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-			Mat src = Mat(win->h(), win->w(), CV_8UC3, win->frame);
-			cvtColor(src, src, COLOR_RGB2BGR);
-			imwrite(filename, src);
-		}
+		save_rgb_as_png(win->my_window, win->frame, win->w(), win->h());
 	}
 }
 
@@ -67611,7 +69246,7 @@ int	loop;
 
 	if(win->title_image_cnt < 1023)
 	{
-		TitleImage *title = new TitleImage(win->my_win, win, win->current_frame, win->frame_cnt - 1);
+		TitleImage *title = new TitleImage(win->my_window, win, win->current_frame, win->frame_cnt - 1);
 		win->add(title);
 		int done = 0;
 		for(loop = 0;((loop < win->title_image_cnt) && (done == 0));loop++)
@@ -67673,7 +69308,7 @@ void	close_review_window(Fl_Widget *w, void *v)
 	ReviewWin *rw = (ReviewWin *)w;
 	if(rw != NULL)
 	{
-		if(rw->my_win->encoding == 0)
+		if(rw->my_window->encoding == 0)
 		{
 			Fl::remove_timeout(review_win_cb);
 			rw->hide();
@@ -67742,14 +69377,14 @@ int		extract_video(void *update_win, int *prg, char *in_filename, char *out_file
 	{
 		if(strcmp(str, "Cancel") != 0)
 		{
-			mpw->my_win->use_last_muxed = str;
-			mpw->my_win->extracting = -1;
-			int nn = extract_audio(mpw->my_win, &mpw->my_win->extracting, mpw->my_win->use_last_muxed, "audio.bin", mpw->my_win->audio_sample_rate, 1);
+			mpw->my_window->use_last_muxed = str;
+			mpw->my_window->extracting = -1;
+			int nn = extract_audio(mpw->my_window, &mpw->my_window->extracting, mpw->my_window->use_last_muxed, "audio.bin", mpw->my_window->audio_sample_rate, 1);
 			if(nn >= 0)
 			{
-				mpw->my_win->FlushMuxerArray();
-				mpw->my_win->extracting = 1;
-				nn = extract_video(mpw->my_win, &mpw->my_win->extracting, mpw->my_win->use_last_muxed, "video.bin", 0);
+				mpw->my_window->FlushMuxerArray();
+				mpw->my_window->extracting = 1;
+				nn = extract_video(mpw->my_window, &mpw->my_window->extracting, mpw->my_window->use_last_muxed, "video.bin", 0);
 				if(nn >= 0)
 				{
 					mpw->Shutdown();
@@ -68205,20 +69840,20 @@ int	loop;
 	color(BLACK);
 	box(FL_FLAT_BOX);
 
-	my_win = in_my_win;
+	my_window = in_my_win;
 	Init(in_filename, in_fps);
 	controls = new Fl_Window(0, h() - 30, ww, 26);
 	controls->color(BLACK);
 
 		int nxx = 8;
-		play = new MyButton(my_win, nxx, 2, 14, 14, "@>");
+		play = new MyButton(my_window, nxx, 2, 14, 14, "@>");
 		play->labelcolor(WHITE);
 		play->box(FL_NO_BOX);
 		play->copy_tooltip("Play");
 		play->callback(review_win_play_cb, this);
 		nxx += 18;
 
-		play_trim = new MyButton(my_win, nxx, 2, 14, 14, "@->");
+		play_trim = new MyButton(my_window, nxx, 2, 14, 14, "@->");
 		play_trim->labelcolor(WHITE);
 		play_trim->box(FL_NO_BOX);
 		play_trim->copy_tooltip("Play with trims");
@@ -68226,35 +69861,35 @@ int	loop;
 		play_trim->hide();
 		nxx += 18;
 
-		retreat_one = new MyRepeatButton(my_win, nxx, 2, 14, 14, "-");
+		retreat_one = new MyRepeatButton(my_window, nxx, 2, 14, 14, "-");
 		retreat_one->labelcolor(WHITE);
 		retreat_one->box(FL_NO_BOX);
 		retreat_one->copy_tooltip("Retreat one frame");
 		retreat_one->callback(review_win_retreat_one_cb, this);
 		nxx += 18;
 
-		advance_one = new MyRepeatButton(my_win, nxx, 2, 14, 14, "+");
+		advance_one = new MyRepeatButton(my_window, nxx, 2, 14, 14, "+");
 		advance_one->labelcolor(WHITE);
 		advance_one->box(FL_NO_BOX);
 		advance_one->copy_tooltip("Advance one frame");
 		advance_one->callback(review_win_advance_one_cb, this);
 		nxx += 28;
 
-		encode = new MyButton(my_win, nxx, 4, 14, 14, "@-4square");
+		encode = new MyButton(my_window, nxx, 4, 14, 14, "@-4square");
 		encode->labelcolor(RED);
 		encode->box(FL_NO_BOX);
 		encode->copy_tooltip("Encode with trims");
 		encode->callback(review_win_encode_cb, this);
 		nxx += 28;
 	
-		start_trim_button = new MyButton(my_win, nxx, 4, 14, 14, ">|");
+		start_trim_button = new MyButton(my_window, nxx, 4, 14, 14, ">|");
 		start_trim_button->labelcolor(WHITE);
 		start_trim_button->box(FL_NO_BOX);
 		start_trim_button->copy_tooltip("Start of trim");
 		start_trim_button->callback(review_win_start_trim_cb, this);
 		nxx += 28;
 	
-		end_trim_button = new MyButton(my_win, nxx, 4, 14, 14, "|<");
+		end_trim_button = new MyButton(my_window, nxx, 4, 14, 14, "|<");
 		end_trim_button->labelcolor(WHITE);
 		end_trim_button->box(FL_NO_BOX);
 		end_trim_button->copy_tooltip("End of trim");
@@ -68262,7 +69897,7 @@ int	loop;
 		end_trim_button->deactivate();
 		nxx += 28;
 
-		clear_trim_button = new MyButton(my_win, nxx, 4, 14, 14, "@undo");
+		clear_trim_button = new MyButton(my_window, nxx, 4, 14, 14, "@undo");
 		clear_trim_button->labelcolor(WHITE);
 		clear_trim_button->box(FL_NO_BOX);
 		clear_trim_button->copy_tooltip("Reset all trims");
@@ -68270,21 +69905,21 @@ int	loop;
 		clear_trim_button->hide();
 		nxx += 48;
 
-		snap_one_button = new MyButton(my_win, nxx, 4, 14, 14, "@-7circle");
+		snap_one_button = new MyButton(my_window, nxx, 4, 14, 14, "@-7circle");
 		snap_one_button->labelcolor(WHITE);
 		snap_one_button->box(FL_NO_BOX);
 		snap_one_button->copy_tooltip("Save as image");
 		snap_one_button->callback(review_win_snap_one_cb, this);
 		nxx += 28;
 
-		moving_crop_button = new MyButton(my_win, nxx, 4, 14, 14, "");
+		moving_crop_button = new MyButton(my_window, nxx, 4, 14, 14, "");
 		moving_crop_button->labelcolor(WHITE);
 		moving_crop_button->box(FL_FRAME_BOX);
 		moving_crop_button->copy_tooltip("Moving Crop");
 		moving_crop_button->callback(moving_crop_cb, this);
 		nxx += 28;
 	
-		add_text_button = new MyButton(my_win, nxx, 4, 17, 17, "T");
+		add_text_button = new MyButton(my_window, nxx, 4, 17, 17, "T");
 		add_text_button->labelcolor(WHITE);
 		add_text_button->color(BLACK);
 		add_text_button->box(FL_FRAME_BOX);
@@ -68292,7 +69927,7 @@ int	loop;
 		add_text_button->callback(add_text_cb, this);
 		nxx += 28;
 
-		add_image_button = new MyButton(my_win, nxx, 4, 17, 17, "I");
+		add_image_button = new MyButton(my_window, nxx, 4, 17, 17, "I");
 		add_image_button->labelcolor(WHITE);
 		add_image_button->color(BLACK);
 		add_image_button->box(FL_FRAME_BOX);
@@ -68329,9 +69964,9 @@ int	loop;
 	callback(close_review_window, this);
 	set_modal();
 
-	my_win->review_button->hide();
-	my_win->button_group->hide();
-	my_win->buttons_shown = 0;
+	my_window->review_button->hide();
+	my_window->button_group->hide();
+	my_window->buttons_shown = 0;
 }
 
 void	ReviewWin::Init(char *in_filename, int in_fps)
@@ -68390,7 +70025,7 @@ int	loop;
 ReviewWin::~ReviewWin()
 {
 	Shutdown();
-	my_win->review_button->show();
+	my_window->review_button->show();
 }
 
 void	ReviewWin::Shutdown()
@@ -68668,7 +70303,7 @@ int	loop;
 			{
 				if(popup == NULL)
 				{
-					popup = new PopupMenu(my_win, Fl::event_x_root(), Fl::event_y_root(), 260, 300);
+					popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 260, 300);
 					popup->browser->callback(load_used_mux_video_popup_cb, this);
 				}
 				else
@@ -68680,11 +70315,11 @@ int	loop;
 					popup->browser->clear();
 					for(loop = 0;loop < 64;loop++)
 					{
-   						if(my_win->last_muxed_list[loop] != NULL)
+   						if(my_window->last_muxed_list[loop] != NULL)
 						{
-							if(access(my_win->last_muxed_list[loop], F_OK) == 0)
+							if(access(my_window->last_muxed_list[loop], F_OK) == 0)
 							{
-								popup->browser->add(my_win->last_muxed_list[loop]);
+								popup->browser->add(my_window->last_muxed_list[loop]);
 							}
 						}
 					}
@@ -68741,7 +70376,7 @@ int	loop;
 						{
 							if(title_box_cnt < 1023)
 							{
-								TitleBox *title = new TitleBox(my_win, this, xx, yy, current_frame, frame_cnt - 1);
+								TitleBox *title = new TitleBox(my_window, this, xx, yy, current_frame, frame_cnt - 1);
 								add(title);
 								title->show();
 								int done = 0;
@@ -69089,10 +70724,10 @@ int	loop, outer, inner;
 long int	start_tc[1024];
 long int	end_tc[1024];
 
-	my_win->dump_type = "Extracting";
-	my_win->dumped_frames = 0;
-	my_win->dumped_limit = 0;
-	my_win->redraw();
+	my_window->dump_type = "Extracting";
+	my_window->dumped_frames = 0;
+	my_window->dumped_limit = 0;
+	my_window->redraw();
 	Fl::check();
 
 	int retained_frames = 0;
@@ -69117,10 +70752,10 @@ long int	end_tc[1024];
 			length -= (sizeof(int) * 4);
 			int dumped_frame_cnt = length / sz;
 		
-			my_win->dump_type = "Extracting";
-			my_win->dumped_frames = 0;
-			my_win->dumped_limit = total_trim;
-			my_win->redraw();
+			my_window->dump_type = "Extracting";
+			my_window->dumped_frames = 0;
+			my_window->dumped_limit = total_trim;
+			my_window->redraw();
 			Fl::check();
 			int fdo = open("video_output.bin", O_WRONLY | O_CREAT | O_TRUNC, 0666);
 			if(fdo > -1)
@@ -69156,13 +70791,13 @@ long int	end_tc[1024];
 					{
 						long int ts = 0;
 						double transition_cnt = 0.0;
-						if(my_win->transition > 0)
+						if(my_window->transition > 0)
 						{
 							transition_cnt = 1.0;
 						}
 						for(inner = scrub->start_trim[outer];inner < scrub->end_trim[outer];inner++)
 						{
-							my_win->redraw();
+							my_window->redraw();
 							Fl::check();
 
 							off_t nn = (off_t)((off_t)inner * (off_t)(sz + sizeof(long int))) + (off_t)(sizeof(int) * 4);
@@ -69197,16 +70832,16 @@ long int	end_tc[1024];
 								last_used_ts = use_ts;
 								in_frame++;
 
-								my_win->dumped_frames = in_frame;
-								my_win->dump_type = "Extracting Video";
-								my_win->dumped_limit = total_trim;
+								my_window->dumped_frames = in_frame;
+								my_window->dump_type = "Extracting Video";
+								my_window->dumped_limit = total_trim;
 							}
 						}
 						memcpy(last_frame, ptr, sz);
 						end_tc[outer] = ts;
 						start_gap = ts;
 					}
-					if(my_win->transition > 0)
+					if(my_window->transition > 0)
 					{
 						memset(last_frame, 0, sz);
 						double transition_cnt = 1.0;
@@ -69239,10 +70874,10 @@ long int	end_tc[1024];
 			close(fdi);
 			if(access("encode_audio.bin", 0) == 0)
 			{
-				my_win->dumped_limit = -1;
-				my_win->dump_type = "Extracting Audio";
-				my_win->dumped_frames = 0;
-				my_win->redraw();
+				my_window->dumped_limit = -1;
+				my_window->dump_type = "Extracting Audio";
+				my_window->dumped_frames = 0;
+				my_window->redraw();
 				Fl::check();
 				int fdi = open("encode_audio.bin", O_RDONLY);
 				if(fdi > -1)
@@ -69260,7 +70895,7 @@ long int	end_tc[1024];
 						read(fdi, &hz, sizeof(int));
 						if(hz <= 0)
 						{
-							hz = my_win->audio_sample_rate;
+							hz = my_window->audio_sample_rate;
 						}
 						write(fdo, &channels, sizeof(int));
 						write(fdo, &hz, sizeof(int));
@@ -69286,11 +70921,11 @@ long int	end_tc[1024];
 								if(flag == 1)
 								{
 									write(fdo, &sample, sizeof(short int));
-									my_win->dumped_frames++;
-									my_win->dumped_limit = dumped_frame_cnt;
+									my_window->dumped_frames++;
+									my_window->dumped_limit = dumped_frame_cnt;
 									if((sample_cnt % 10000) == 0)
 									{
-										my_win->redraw();
+										my_window->redraw();
 										Fl::check();
 									}
 								}
@@ -69308,10 +70943,10 @@ long int	end_tc[1024];
 			}
 		}
 	}
-	my_win->dumped_frames = 0;
-	my_win->dumped_limit = -1;
-	my_win->dump_type = NULL;
-	my_win->redraw();
+	my_window->dumped_frames = 0;
+	my_window->dumped_limit = -1;
+	my_window->dump_type = NULL;
+	my_window->redraw();
 	Fl::check();
 	*used_frames = retained_frames;
 	return(last_used_ts);
@@ -69663,7 +71298,7 @@ void	thumb_background_button_cb(Fl_Widget *w, void *v)
 	int green = 200;
 	int blue = 200;
 	int alpha = 255;
-	if(my_color_chooser("Background Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Background Color", red, green, blue, alpha))
 	{
 		Camera *cam = win->camera[tg->index];
 		if(cam != NULL)
@@ -69694,7 +71329,7 @@ void	thumb_text_color_button_cb(Fl_Widget *w, void *v)
 	int green = 200;
 	int blue = 200;
 	int alpha = 255;
-	if(my_color_chooser("Text Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Text Color", red, green, blue, alpha))
 	{
 		Camera *cam = win->camera[tg->index];
 		if(cam != NULL)
@@ -70747,7 +72382,7 @@ void	standalone_window_popup_cb(Fl_Widget *w, void *v)
 	}
 }
 
-StandaloneDisplay::StandaloneDisplay(MyWin *in_win, Camera *in_cam, int ww, int hh, char *lbl) : DragWindow(ww, hh, lbl)
+StandaloneDisplay::StandaloneDisplay(MyWin *in_win, Camera *in_cam, int ww, int hh, char *lbl) : DragWindow(in_win, ww, hh, lbl)
 {
 	end();
 	my_window = in_win;
@@ -71933,6 +73568,8 @@ void	my_slider_reset_cb(Fl_Widget *w, void *v)
 
 MySlider::MySlider(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl, MyButton *in_reset, int in_value_placement) : Fl_Slider(xx, yy, ww, hh, lbl)
 {
+int		loop;
+
 	my_window = in_win;
 	initial_value = 0.0;
 	type(FL_HOR_NICE_SLIDER);
@@ -71940,6 +73577,9 @@ MySlider::MySlider(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl, MyB
 	color(BLACK);
 	labelcolor(WHITE);
 	box(FL_FLAT_BOX);
+	popup = NULL;
+	shortcut_down = 0;
+	shortcut_up = 0;
 
 	in_slider = 0;
 	value_placement = in_value_placement;
@@ -71976,10 +73616,25 @@ MySlider::MySlider(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl, MyB
 		reset->callback(my_slider_reset_cb, this);
 		reset->copy_tooltip("Reset to default value");
 	}
+	char path[4096];
+	create_path_to_widget(this, path);
+	if(my_window != NULL)
+	{
+		for(loop = 0;loop < my_window->slider_shortcut_cnt;loop++)
+		{
+			if(strcmp(path, my_window->slider_shortcut[loop].path) == 0)
+			{
+				shortcut_down = my_window->slider_shortcut[loop].down;
+				shortcut_up = my_window->slider_shortcut[loop].up;
+			}
+		}
+		my_window->RegisterSlider(this);
+	}
 }
 
 MySlider::~MySlider()
 {
+	my_window->RemoveSlider(this);
 }
 
 void	MySlider::draw()
@@ -72037,20 +73692,27 @@ int	MySlider::handle(int event)
 	int flag = 0;
 	if(event == FL_ENTER)
 	{
+		take_focus();
 		in_slider = 1;
 		redraw();
+		flag = 1;
 	}
 	else if(event == FL_LEAVE)
 	{
 		in_slider = 0;
 		redraw();
+		flag = 1;
 	}
 	else if(event == FL_FOCUS)
 	{
+		in_slider = 1;
+		redraw();
 		flag = 1;
 	}
 	else if(event == FL_UNFOCUS)
 	{
+		in_slider = 0;
+		redraw();
 		flag = 1;
 	}
 	else if(event == FL_MOUSEWHEEL)
@@ -72082,11 +73744,113 @@ int	MySlider::handle(int event)
 			}
 		}
 	}
+	else if(event == FL_PUSH)
+	{
+		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
+		{
+			popup = new PopupMenu(my_window, x(), y(), 160, 300);
+			popup->browser->callback(my_slider_popup_cb, this);
+			popup->browser->add("Assign Shortcut", this);
+			popup->browser->add("Cancel", this);
+
+			popup->Fit();
+			popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+			popup->set_modal();
+			Fl_Group *grp = Fl_Group::current();
+			Fl_Group::current(0);
+			popup->show();
+			flag = 1;
+		}
+	}
+	else if(event == FL_KEYBOARD)
+	{
+		int key = Fl::event_key();
+		if((key == shortcut_down) || (key == FL_Left))
+		{
+			double dec = step();
+			if(dec == 0.0)
+			{
+				dec = (maximum() - minimum()) / w();
+			}
+			double val = value();
+			val -= dec;
+			value(val);
+			do_callback();
+			flag = 1;
+		}
+		else if((key == shortcut_up) || (key == FL_Right))
+		{
+			double inc = step();
+			if(inc == 0.0)
+			{
+				inc = (maximum() - minimum()) / w();
+			}
+			double val = value();
+			val += inc;
+			value(val);
+			do_callback();
+			flag = 1;
+		}
+		else if(key == FL_Home)
+		{
+			value(initial_value);
+			do_callback();
+			flag = 1;
+		}
+		else if(key == FL_Page_Up)
+		{
+			double inc = step();
+			if(inc == 0.0)
+			{
+				inc = (maximum() - minimum()) / w();
+			}
+			inc *= 4.0;
+			double val = value();
+			val += inc;
+			value(val);
+			do_callback();
+			flag = 1;
+		}
+		else if(key == FL_Page_Down)
+		{
+			double dec = step();
+			if(dec == 0.0)
+			{
+				dec = (maximum() - minimum()) / w();
+			}
+			dec *= 4.0;
+			double val = value();
+			val -= dec;
+			value(val);
+			do_callback();
+			flag = 1;
+		}
+	}
 	if(flag == 0)
 	{
 		flag = Fl_Slider::handle(event);
 	}
 	return(flag);
+}
+
+void	MySlider::ShortcutDown(int key)
+{
+	shortcut_down = key;
+}
+
+int	MySlider::ShortcutDown()
+{
+	return(shortcut_down);
+}
+
+void	MySlider::ShortcutUp(int key)
+{
+	shortcut_up = key;
+}
+
+int	MySlider::ShortcutUp()
+{
+	return(shortcut_up);
 }
 
 // SECTION ************************************** VIDEO SETTINGS WINDOW *******************************************************
@@ -72139,7 +73903,7 @@ void	settings_close_cb(Fl_Widget *w, void *v)
 	if(v != NULL)
 	{
 		VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-		MyWin *win = sw->main_win;
+		MyWin *win = sw->my_window;
 		win->SaveVideoSettings();
 		sw->hide();
 	}
@@ -72199,7 +73963,7 @@ void	load_system_video_settings_from_file(MyWin *win)
 				const char *error_ptr = cJSON_GetErrorPtr();
 				if(error_ptr != NULL)
 				{
-					fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+					fprintf(stderr, "Error: JSON Error in video_settings.json before: %s\n", error_ptr);
 				}
 			}
 			else
@@ -72365,7 +74129,7 @@ void	html_background_transparent_cb(Fl_Widget *w, void *v)
 {
 	MyLightButton *b = (MyLightButton *)w;
 	VideoSettingsWindow *vsw = (VideoSettingsWindow *)v;
-	MyWin *win = (MyWin *)vsw->main_win;
+	MyWin *win = (MyWin *)vsw->my_window;
 	if(win != NULL)
 	{
 		win->html_background = b->value();
@@ -72376,7 +74140,7 @@ void	clip_format_cb(Fl_Widget *w, void *v)
 {
 	MyLightButton *b = (MyLightButton *)w;
 	VideoSettingsWindow *vsw = (VideoSettingsWindow *)v;
-	MyWin *win = (MyWin *)vsw->main_win;
+	MyWin *win = (MyWin *)vsw->my_window;
 	if(win != NULL)
 	{
 		win->clip_format = b->value();
@@ -72387,7 +74151,7 @@ void	no_overwrite_cb(Fl_Widget *w, void *v)
 {
 	MyLightButton *b = (MyLightButton *)w;
 	VideoSettingsWindow *vsw = (VideoSettingsWindow *)v;
-	MyWin *win = (MyWin *)vsw->main_win;
+	MyWin *win = (MyWin *)vsw->my_window;
 	if(win != NULL)
 	{
 		win->no_overwrite = b->value();
@@ -72398,7 +74162,7 @@ void	follow_mode_cb(Fl_Widget *w, void *v)
 {
 	MyLightButton *b = (MyLightButton *)w;
 	VideoSettingsWindow *vsw = (VideoSettingsWindow *)v;
-	MyWin *win = (MyWin *)vsw->main_win;
+	MyWin *win = (MyWin *)vsw->my_window;
 	if(win != NULL)
 	{
 		if(b == vsw->display_recording_button)
@@ -72432,7 +74196,7 @@ void	follow_mode_cb(Fl_Widget *w, void *v)
 void	out_function(char *ptr)
 {
 static int	cnt = 0;
-char		buf[4096];
+char		buf[8192];
 
 	if(global_log_window != NULL)
 	{
@@ -72463,7 +74227,7 @@ char		buf[4096];
 		const int col_widths[2] = {250, 0};
 		browser->column_char('\t');
 		browser->column_widths(col_widths);
-		sprintf(buf, "@B%d%s\t@B%d %s", color_nn, out1, color_nn, out2);
+		sprintf(buf, "@B%d%s\t %s", color_nn, out1, out2);
 		browser->add(buf);
 		int num = browser->size();
 		browser->bottomline(num);
@@ -72565,7 +74329,7 @@ void	disable_slow_codecs_cb(Fl_Widget *w, void *v)
 void	timestamp_default_cb(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	int val = sw->timestamp_default->value();
 	win->timestamp = val;
 }
@@ -72573,7 +74337,7 @@ void	timestamp_default_cb(Fl_Widget *w, void *v)
 void	timestamp_format_cb(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	char *str = (char *)sw->timestamp_format->value();
 	if(str != NULL)
@@ -72585,13 +74349,13 @@ void	timestamp_format_cb(Fl_Widget *w, void *v)
 void	timestamp_color_cb(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	int rr = 255;
 	int gg = 240;
 	int bb = 128;
 	int aa = 255;
-	my_color_chooser("Timestamp Text Color", rr, gg, bb, aa);
+	my_color_chooser(win, "Timestamp Text Color", rr, gg, bb, aa);
 	win->timestamp_rr = rr;
 	win->timestamp_gg = gg;
 	win->timestamp_bb = bb;
@@ -72603,13 +74367,13 @@ void	timestamp_color_cb(Fl_Widget *w, void *v)
 void	timestamp_background_color_cb(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	int rr = 0;
 	int gg = 0;
 	int bb = 0;
 	int aa = 0;
-	my_color_chooser("Timestamp Background Color", rr, gg, bb, aa);
+	my_color_chooser(win, "Timestamp Background Color", rr, gg, bb, aa);
 	win->timestamp_background_rr = rr;
 	win->timestamp_background_gg = gg;
 	win->timestamp_background_bb = bb;
@@ -72621,7 +74385,7 @@ void	timestamp_background_color_cb(Fl_Widget *w, void *v)
 void	timestamp_font_size_cb(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	char *str = (char *)sw->timestamp_font_size->value();
 	if(str != NULL)
 	{
@@ -72636,7 +74400,7 @@ void	timestamp_font_size_cb(Fl_Widget *w, void *v)
 void	timestamp_position_cb(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	char *str = (char *)sw->timestamp_position_x->value();
 	if(str != NULL)
 	{
@@ -72662,7 +74426,7 @@ void	video_settings_resolution_cb(Fl_Widget *w, void *v)
 char	buf[256];
 
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	char *str = (char *)sw->output_w->value();
 	if(str != NULL)
@@ -72707,7 +74471,7 @@ char	buf[256];
 void	video_settings_virtual_output_resolution_cb(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	char *str = (char *)sw->virtual_output_w->value();
 	if(str != NULL)
@@ -72732,7 +74496,7 @@ void	video_settings_virtual_output_resolution_cb(Fl_Widget *w, void *v)
 void	camera_settings_alias_cb(Fl_Widget *w, void *v)
 {
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	char *str = (char *)sw->cam_alias->value();
 	if(str != NULL)
@@ -72744,7 +74508,7 @@ void	camera_settings_alias_cb(Fl_Widget *w, void *v)
 void	video_settings_virtual_output_format_cb(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(sw->virtual_format_yuyv->value())
 	{
 		win->virtual_output_format = VIRTUAL_OUTPUT_FORMAT_YUYV;
@@ -72769,7 +74533,7 @@ void	camera_settings_set_hardware_resolution_cb(Fl_Widget *w, void *v)
 int	loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	if(cam->cap != NULL)
 	{
@@ -72792,7 +74556,7 @@ void	camera_settings_resolution_cb(Fl_Widget *w, void *v)
 int	loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(sw->apply_to_all_button->value())
 	{
 		for(loop = 0;loop < win->source_cnt;loop++)
@@ -72850,7 +74614,7 @@ void	video_settings_copy_from_display(Fl_Widget *w, void *v)
 char	buf[256];
 
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	if(cam != NULL)
 	{
@@ -72879,7 +74643,7 @@ char	buf[256];
 void	video_settings_copy_to_display(Fl_Widget *w, void *v)
 {
 	VideoSettingsWindow *sw = (VideoSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	Camera *cam = win->DisplayedCamera();
 	if(cam != NULL)
 	{
@@ -72902,13 +74666,13 @@ VideoSettingsWindow::VideoSettingsWindow(MyWin *in_win) : Dialog(in_win, 360, 20
 {
 char	buf[256];
 
-	main_win = in_win;
-	Camera *cam = main_win->DisplayedCamera();
+	my_window = in_win;
+	Camera *cam = my_window->DisplayedCamera();
 	int new_yp = 20;
 
-	if((main_win->disregard_settings & 1) != 1)
+	if((my_window->disregard_settings & 1) != 1)
 	{
-		load_system_video_settings_from_file(main_win);
+		load_system_video_settings_from_file(my_window);
 	}
 	last_x = 0;
 	last_y = 0;
@@ -72933,7 +74697,7 @@ char	buf[256];
 	output_w->labelsize(12);
 	output_w->textsize(11);
 	output_w->cursor_color(WHITE);
-	sprintf(buf, "%d", main_win->output_width);
+	sprintf(buf, "%d", my_window->output_width);
 	output_w->value(buf);
 	output_w->copy_tooltip("Width of the output stream");
 	output_w->callback(video_settings_resolution_cb, this);
@@ -72946,12 +74710,12 @@ char	buf[256];
 	output_h->labelsize(12);
 	output_h->textsize(11);
 	output_h->cursor_color(WHITE);
-	sprintf(buf, "%d", main_win->output_height);
+	sprintf(buf, "%d", my_window->output_height);
 	output_h->value(buf);
 	output_h->copy_tooltip("Height of the output stream");
 	output_h->callback(video_settings_resolution_cb, this);
 
-	copy_from_display = new MyButton(main_win, 330, yp, 120, 20, "Copy From Display");
+	copy_from_display = new MyButton(my_window, 330, yp, 120, 20, "Copy From Display");
 	copy_from_display->box(FL_FRAME_BOX);
 	copy_from_display->color(BLACK);
 	copy_from_display->labelcolor(YELLOW);
@@ -72959,7 +74723,7 @@ char	buf[256];
 	copy_from_display->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	copy_from_display->callback(video_settings_copy_from_display, this);
 
-	copy_to_display = new MyButton(main_win, 460, yp, 120, 20, "Copy To Display");
+	copy_to_display = new MyButton(my_window, 460, yp, 120, 20, "Copy To Display");
 	copy_to_display->box(FL_FRAME_BOX);
 	copy_to_display->color(BLACK);
 	copy_to_display->labelcolor(YELLOW);
@@ -72968,14 +74732,14 @@ char	buf[256];
 	copy_to_display->callback(video_settings_copy_to_display, this);
 	yp += 45;
 
-	timestamp_default = new MyToggleButton(main_win, 200, yp + 2, 16, 16, "Timestamp");
+	timestamp_default = new MyToggleButton(my_window, 200, yp + 2, 16, 16, "Timestamp");
 	timestamp_default->box(FL_FRAME_BOX);
 	timestamp_default->color(BLACK);
 	timestamp_default->down_color(WHITE);
 	timestamp_default->align(FL_ALIGN_LEFT);
 	timestamp_default->labelcolor(YELLOW);
 	timestamp_default->labelsize(12);
-	timestamp_default->value(main_win->timestamp);
+	timestamp_default->value(my_window->timestamp);
 	timestamp_default->copy_tooltip("Embed a timestamp on the output");
 	timestamp_default->callback(timestamp_default_cb, this);
 
@@ -72988,26 +74752,26 @@ char	buf[256];
 	timestamp_format->cursor_color(WHITE);
 	timestamp_format->labelcolor(YELLOW);
 	timestamp_format->align(FL_ALIGN_TOP | FL_ALIGN_CENTER);
-	timestamp_format->value(main_win->timestamp_format);
+	timestamp_format->value(my_window->timestamp_format);
 	timestamp_format->copy_tooltip("Format of the timestamp");
 	timestamp_format->callback(timestamp_format_cb, this);
 
-	timestamp_color_button = new MyButton(main_win, 681, yp, 20, 20, "F");
+	timestamp_color_button = new MyButton(my_window, 681, yp, 20, 20, "F");
 	timestamp_color_button->box(FL_FRAME_BOX);
-	int rr = main_win->timestamp_rr;
-	int gg = main_win->timestamp_gg;
-	int bb = main_win->timestamp_bb;
+	int rr = my_window->timestamp_rr;
+	int gg = my_window->timestamp_gg;
+	int bb = my_window->timestamp_bb;
 	timestamp_color_button->color(fl_rgb_color(rr, gg, bb));
 	timestamp_color_button->labelcolor(YELLOW);
 	timestamp_color_button->labelsize(9);
 	timestamp_color_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	timestamp_color_button->callback(timestamp_color_cb, this);
 
-	timestamp_background_color_button = new MyButton(main_win, 702, yp, 20, 20, "B");
+	timestamp_background_color_button = new MyButton(my_window, 702, yp, 20, 20, "B");
 	timestamp_background_color_button->box(FL_FRAME_BOX);
-	rr = main_win->timestamp_background_rr;
-	gg = main_win->timestamp_background_gg;
-	bb = main_win->timestamp_background_bb;
+	rr = my_window->timestamp_background_rr;
+	gg = my_window->timestamp_background_gg;
+	bb = my_window->timestamp_background_bb;
 	timestamp_background_color_button->color(fl_rgb_color(rr, gg, bb));
 	timestamp_background_color_button->labelcolor(YELLOW);
 	timestamp_background_color_button->labelsize(9);
@@ -73044,7 +74808,7 @@ char	buf[256];
 	timestamp_font_size->labelsize(12);
 	timestamp_font_size->textsize(11);
 	timestamp_font_size->cursor_color(WHITE);
-	sprintf(buf, "%d", (int)main_win->timestamp_font_sz);
+	sprintf(buf, "%d", (int)my_window->timestamp_font_sz);
 	timestamp_font_size->value(buf);
 	timestamp_font_size->labelcolor(YELLOW);
 	timestamp_font_size->copy_tooltip("Change the font size of the timestamp");
@@ -73057,7 +74821,7 @@ char	buf[256];
 	timestamp_position_x->labelsize(12);
 	timestamp_position_x->textsize(11);
 	timestamp_position_x->cursor_color(WHITE);
-	sprintf(buf, "%d", (int)main_win->timestamp_position_x);
+	sprintf(buf, "%d", (int)my_window->timestamp_position_x);
 	timestamp_position_x->value(buf);
 	timestamp_position_x->labelcolor(YELLOW);
 	timestamp_position_x->copy_tooltip("Horizontal position of the timestamp");
@@ -73070,41 +74834,41 @@ char	buf[256];
 	timestamp_position_y->labelsize(12);
 	timestamp_position_y->textsize(11);
 	timestamp_position_y->cursor_color(WHITE);
-	sprintf(buf, "%d", (int)main_win->timestamp_position_y);
+	sprintf(buf, "%d", (int)my_window->timestamp_position_y);
 	timestamp_position_y->value(buf);
 	timestamp_position_y->labelcolor(YELLOW);
 	timestamp_position_y->copy_tooltip("Vertical position of the timestamp");
 	timestamp_position_y->callback(timestamp_position_cb, this);
 	yp += 35;
 
-	fps_slider = new MySlider(main_win, 200, yp, 500, 25, "FPS");
+	fps_slider = new MySlider(my_window, 200, yp, 500, 25, "FPS");
 	fps_slider->range(0.0, 100.0);
 	fps_slider->value(0.0);
 	fps_slider->step(0.5);
 	fps_slider->initial_value = 0.0;
 	fps_slider->labelsize(12);
 	fps_slider->copy_tooltip("Target FPS of the output");
-	fps_slider->callback(fps_slider_cb, main_win);
+	fps_slider->callback(fps_slider_cb, my_window);
 
 	yp += 25;
-	encode_fps_slider = new MySlider(main_win, 200, yp, 500, 25, "Encode FPS (factor)");
+	encode_fps_slider = new MySlider(my_window, 200, yp, 500, 25, "Encode FPS (factor)");
 	encode_fps_slider->range(0.01, 25.0);
 	encode_fps_slider->value(1.0);
 	encode_fps_slider->step(0.01);
 	encode_fps_slider->initial_value = 1.0;
 	encode_fps_slider->labelsize(12);
 	encode_fps_slider->copy_tooltip("Encoding FPS of the output");
-	encode_fps_slider->callback(encode_fps_cb, main_win);
+	encode_fps_slider->callback(encode_fps_cb, my_window);
 
 	yp += 25;
-	minimum_fps_slider = new MySlider(main_win, 200, yp, 500, 25, "Minimum FPS");
+	minimum_fps_slider = new MySlider(my_window, 200, yp, 500, 25, "Minimum FPS");
 	minimum_fps_slider->range(0.01, 60.0);
 	minimum_fps_slider->value(24.0);
 	minimum_fps_slider->step(1.0);
 	minimum_fps_slider->initial_value = 24.0;
 	minimum_fps_slider->labelsize(12);
 	minimum_fps_slider->copy_tooltip("Set a minimum FPS for the output");
-	minimum_fps_slider->callback(minimum_fps_cb, main_win);
+	minimum_fps_slider->callback(minimum_fps_cb, my_window);
 	yp += 30;
 
 	Fl_Group *virtual_output_format_group = new Fl_Group(200, yp, 180, 20, "Virtual Output Format");
@@ -73112,7 +74876,7 @@ char	buf[256];
 	virtual_output_format_group->labelsize(12);
 	virtual_output_format_group->labelcolor(YELLOW);
 
-	virtual_format_yuyv = new MyLightButton(main_win, 200, yp, 60, 20, "YUYV");
+	virtual_format_yuyv = new MyLightButton(my_window, 200, yp, 60, 20, "YUYV");
 	virtual_format_yuyv->box(FL_FRAME_BOX);
 	virtual_format_yuyv->color(BLACK);
 	virtual_format_yuyv->labelcolor(YELLOW);
@@ -73123,7 +74887,7 @@ char	buf[256];
 	virtual_format_yuyv->copy_tooltip("Send frame to virtual camera in YUYV format");
 	virtual_format_yuyv->callback(video_settings_virtual_output_format_cb, this);
 
-	virtual_format_rgb = new MyLightButton(main_win, 260, yp, 60, 20, "RGB");
+	virtual_format_rgb = new MyLightButton(my_window, 260, yp, 60, 20, "RGB");
 	virtual_format_rgb->box(FL_FRAME_BOX);
 	virtual_format_rgb->color(BLACK);
 	virtual_format_rgb->labelcolor(YELLOW);
@@ -73134,7 +74898,7 @@ char	buf[256];
 	virtual_format_rgb->copy_tooltip("Send frame to virtual camera in RGB24 format");
 	virtual_format_rgb->callback(video_settings_virtual_output_format_cb, this);
 
-	virtual_format_bgr = new MyLightButton(main_win, 320, yp, 60, 20, "BGR");
+	virtual_format_bgr = new MyLightButton(my_window, 320, yp, 60, 20, "BGR");
 	virtual_format_bgr->box(FL_FRAME_BOX);
 	virtual_format_bgr->color(BLACK);
 	virtual_format_bgr->labelcolor(YELLOW);
@@ -73155,7 +74919,7 @@ char	buf[256];
 	virtual_output_w->labelsize(12);
 	virtual_output_w->textsize(11);
 	virtual_output_w->cursor_color(WHITE);
-	sprintf(buf, "%d", main_win->virtual_output_width);
+	sprintf(buf, "%d", my_window->virtual_output_width);
 	virtual_output_w->value(buf);
 	virtual_output_w->when(FL_WHEN_CHANGED);
 	virtual_output_w->copy_tooltip("Width of the virtual camera output stream");
@@ -73169,7 +74933,7 @@ char	buf[256];
 	virtual_output_h->labelsize(12);
 	virtual_output_h->textsize(11);
 	virtual_output_h->cursor_color(WHITE);
-	sprintf(buf, "%d", main_win->virtual_output_height);
+	sprintf(buf, "%d", my_window->virtual_output_height);
 	virtual_output_h->value(buf);
 	virtual_output_h->when(FL_WHEN_CHANGED);
 	virtual_output_h->copy_tooltip("Height of the virtual camera output stream");
@@ -73177,45 +74941,45 @@ char	buf[256];
 
 	yp += 30;
 	int row_start = yp;
-	realtime_encoding_button = new MyLightButton(main_win, 200, yp, 120, 20, "Realtime Encoding");
+	realtime_encoding_button = new MyLightButton(my_window, 200, yp, 120, 20, "Realtime Encoding");
 	realtime_encoding_button->box(FL_FRAME_BOX);
 	realtime_encoding_button->color(BLACK);
 	realtime_encoding_button->labelcolor(YELLOW);
 	realtime_encoding_button->labelsize(9);
 	realtime_encoding_button->align(FL_ALIGN_CENTER);
-	realtime_encoding_button->value(main_win->muxing);
+	realtime_encoding_button->value(my_window->muxing);
 	realtime_encoding_button->copy_tooltip("Encode while recording");
-	realtime_encoding_button->callback(realtime_encoding_cb, main_win);
+	realtime_encoding_button->callback(realtime_encoding_cb, my_window);
 	yp += 22;
-	embed_pip_button = new MyLightButton(main_win, 200, yp, 120, 20, "Embed PIP");
+	embed_pip_button = new MyLightButton(my_window, 200, yp, 120, 20, "Embed PIP");
 	embed_pip_button->box(FL_FRAME_BOX);
 	embed_pip_button->color(BLACK);
 	embed_pip_button->labelcolor(YELLOW);
 	embed_pip_button->labelsize(9);
 	embed_pip_button->align(FL_ALIGN_CENTER);
-	embed_pip_button->value(main_win->embed_pip);
+	embed_pip_button->value(my_window->embed_pip);
 	embed_pip_button->copy_tooltip("Embed a picture in picture window onto the main video recording");
-	embed_pip_button->callback(embed_pip_cb, main_win);
+	embed_pip_button->callback(embed_pip_cb, my_window);
 	yp += 22;
-	gather_codecs_button = new MyButton(main_win, 200, yp, 120, 20, "Gather Codecs");
+	gather_codecs_button = new MyButton(my_window, 200, yp, 120, 20, "Gather Codecs");
 	gather_codecs_button->box(FL_FRAME_BOX);
 	gather_codecs_button->color(BLACK);
 	gather_codecs_button->labelcolor(YELLOW);
 	gather_codecs_button->labelsize(9);
 	gather_codecs_button->align(FL_ALIGN_CENTER);
 	gather_codecs_button->copy_tooltip("Query and test codec combinations");
-	gather_codecs_button->callback(gather_codecs_cb, main_win);
+	gather_codecs_button->callback(gather_codecs_cb, my_window);
 	yp += 22;
-	benchmark_codecs_button = new MyButton(main_win, 200, yp, 120, 20, "Benchmark Codecs");
+	benchmark_codecs_button = new MyButton(my_window, 200, yp, 120, 20, "Benchmark Codecs");
 	benchmark_codecs_button->box(FL_FRAME_BOX);
 	benchmark_codecs_button->color(BLACK);
 	benchmark_codecs_button->labelcolor(YELLOW);
 	benchmark_codecs_button->labelsize(9);
 	benchmark_codecs_button->align(FL_ALIGN_CENTER);
 	benchmark_codecs_button->copy_tooltip("Benchmark codec combinations. Warning: May take a considerable amount of time.");
-	benchmark_codecs_button->callback(benchmark_codecs_cb, main_win);
+	benchmark_codecs_button->callback(benchmark_codecs_cb, my_window);
 	yp += 22;
-	disable_slow_codecs_button = new MyLightButton(main_win, 200, yp, 120, 20, "Disable Slow Codecs");
+	disable_slow_codecs_button = new MyLightButton(my_window, 200, yp, 120, 20, "Disable Slow Codecs");
 	disable_slow_codecs_button->box(FL_FRAME_BOX);
 	disable_slow_codecs_button->color(BLACK);
 	disable_slow_codecs_button->labelcolor(YELLOW);
@@ -73223,66 +74987,66 @@ char	buf[256];
 	disable_slow_codecs_button->value(1);
 	disable_slow_codecs_button->align(FL_ALIGN_CENTER);
 	disable_slow_codecs_button->copy_tooltip("If a file of slow codecs has been created by 'Benchmark Codecs',\ndisable codec combinations that are not capable or realtime encoding.");
-	disable_slow_codecs_button->callback(disable_slow_codecs_cb, main_win);
+	disable_slow_codecs_button->callback(disable_slow_codecs_cb, my_window);
 	disable_slow_codecs_button->deactivate();
-	if(main_win->bad_codec_combo_cnt > 0)
+	if(my_window->bad_codec_combo_cnt > 0)
 	{
 		disable_slow_codecs_button->activate();
 	}
 	yp = row_start;
-	create_tag_file_button = new MyLightButton(main_win, 330, yp, 120, 20, "Create Tag File");
+	create_tag_file_button = new MyLightButton(my_window, 330, yp, 120, 20, "Create Tag File");
 	create_tag_file_button->box(FL_FRAME_BOX);
 	create_tag_file_button->color(BLACK);
 	create_tag_file_button->labelcolor(YELLOW);
 	create_tag_file_button->labelsize(9);
 	create_tag_file_button->align(FL_ALIGN_CENTER);
-	create_tag_file_button->value(main_win->tag_recognized);
+	create_tag_file_button->value(my_window->tag_recognized);
 	create_tag_file_button->copy_tooltip("Create an ASCII file with recognized objects found in the video");
-	create_tag_file_button->callback(create_tag_file_cb, main_win);
+	create_tag_file_button->callback(create_tag_file_cb, my_window);
 	yp += 22;
-	record_all_button = new MyLightButton(main_win, 330, yp, 120, 20, "Record Desktop");
+	record_all_button = new MyLightButton(my_window, 330, yp, 120, 20, "Record Desktop");
 	record_all_button->box(FL_FRAME_BOX);
 	record_all_button->color(BLACK);
 	record_all_button->labelcolor(YELLOW);
 	record_all_button->labelsize(9);
 	record_all_button->align(FL_ALIGN_CENTER);
-	record_all_button->value(main_win->record_all);
+	record_all_button->value(my_window->record_all);
 	record_all_button->copy_tooltip("Record the desktop");
-	record_all_button->callback(record_all_cb, main_win);
+	record_all_button->callback(record_all_cb, my_window);
 	yp += 22;
-	frame_scaling_button = new MyLightButton(main_win, 330, yp, 120, 20, "Frame Scaled Output");
+	frame_scaling_button = new MyLightButton(my_window, 330, yp, 120, 20, "Frame Scaled Output");
 	frame_scaling_button->box(FL_FRAME_BOX);
 	frame_scaling_button->color(BLACK);
 	frame_scaling_button->labelcolor(YELLOW);
 	frame_scaling_button->labelsize(9);
 	frame_scaling_button->align(FL_ALIGN_CENTER);
-	frame_scaling_button->value(main_win->frame_scaling);
+	frame_scaling_button->value(my_window->frame_scaling);
 	frame_scaling_button->copy_tooltip("Rather than stretching the recorded camera, place frames around it to meet output size");
-	frame_scaling_button->callback(frame_scaling_cb, main_win);
+	frame_scaling_button->callback(frame_scaling_cb, my_window);
 	yp += 22;
-	crop_scaling_button = new MyLightButton(main_win, 330, yp, 120, 20, "Crop Scaling");
+	crop_scaling_button = new MyLightButton(my_window, 330, yp, 120, 20, "Crop Scaling");
 	crop_scaling_button->box(FL_FRAME_BOX);
 	crop_scaling_button->color(BLACK);
 	crop_scaling_button->labelcolor(YELLOW);
 	crop_scaling_button->labelsize(9);
 	crop_scaling_button->align(FL_ALIGN_CENTER);
-	crop_scaling_button->value(main_win->crop_scaling);
+	crop_scaling_button->value(my_window->crop_scaling);
 	crop_scaling_button->copy_tooltip("If the output resolution and the input do not share the same aspect ratio, rather than stretching the recorded video, crop it to the output resolution");
-	crop_scaling_button->callback(crop_scaling_cb, main_win);
+	crop_scaling_button->callback(crop_scaling_cb, my_window);
 	yp += 22;
-	crop_output_button = new MyLightButton(main_win, 330, yp, 120, 20, "Crop Output");
+	crop_output_button = new MyLightButton(my_window, 330, yp, 120, 20, "Crop Output");
 	crop_output_button->box(FL_FRAME_BOX);
 	crop_output_button->color(BLACK);
 	crop_output_button->labelcolor(YELLOW);
 	crop_output_button->labelsize(9);
 	crop_output_button->align(FL_ALIGN_CENTER);
-	crop_output_button->value(main_win->crop_output);
+	crop_output_button->value(my_window->crop_output);
 	crop_output_button->copy_tooltip("If the output resolution is lower than the input resolution, crop the output video");
-	crop_output_button->callback(crop_output_cb, main_win);
+	crop_output_button->callback(crop_output_cb, my_window);
 	yp += 22;
 
 	yp = row_start;
-	display_recording_button = new MyLightButton(main_win, 460, yp, 120, 20, "Display Recording");
+	display_recording_button = new MyLightButton(my_window, 460, yp, 120, 20, "Display Recording");
 	display_recording_button->box(FL_FRAME_BOX);
 	display_recording_button->color(BLACK);
 	display_recording_button->labelcolor(YELLOW);
@@ -73290,13 +75054,13 @@ char	buf[256];
 	display_recording_button->align(FL_ALIGN_CENTER);
 	display_recording_button->value(0);
 	display_recording_button->copy_tooltip("Always display the recording camera");
-	if(main_win->follow_mode == FOLLOW_MODE_DISPLAY_RECORDING_CAMERA)
+	if(my_window->follow_mode == FOLLOW_MODE_DISPLAY_RECORDING_CAMERA)
 	{
 		display_recording_button->value(1);
 	}
 	display_recording_button->callback(follow_mode_cb, this);
 	yp += 22;
-	recording_follow_display_button = new MyLightButton(main_win, 460, yp, 120, 20, "Record Displayed");
+	recording_follow_display_button = new MyLightButton(my_window, 460, yp, 120, 20, "Record Displayed");
 	recording_follow_display_button->box(FL_FRAME_BOX);
 	recording_follow_display_button->color(BLACK);
 	recording_follow_display_button->labelcolor(YELLOW);
@@ -73304,49 +75068,49 @@ char	buf[256];
 	recording_follow_display_button->align(FL_ALIGN_CENTER);
 	recording_follow_display_button->value(0);
 	recording_follow_display_button->copy_tooltip("Always display the recording camera");
-	if(main_win->follow_mode == FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+	if(my_window->follow_mode == FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
 	{
 		recording_follow_display_button->value(1);
 	}
 	recording_follow_display_button->callback(follow_mode_cb, this);
 	yp += 22;
 
-	html_background_transparent = new MyLightButton(main_win, 460, yp, 120, 20, "HTML Transparent");
+	html_background_transparent = new MyLightButton(my_window, 460, yp, 120, 20, "HTML Transparent");
 	html_background_transparent->box(FL_FRAME_BOX);
 	html_background_transparent->color(BLACK);
 	html_background_transparent->labelcolor(YELLOW);
 	html_background_transparent->labelsize(9);
 	html_background_transparent->align(FL_ALIGN_CENTER);
-	html_background_transparent->value(main_win->html_background);
+	html_background_transparent->value(my_window->html_background);
 	html_background_transparent->copy_tooltip("Make the background of HTML sources transparent");
 	html_background_transparent->callback(html_background_transparent_cb, this);
 	yp += 22;
 
-	clip_format = new MyLightButton(main_win, 460, yp, 120, 20, "Clip Format");
+	clip_format = new MyLightButton(my_window, 460, yp, 120, 20, "Clip Format");
 	clip_format->box(FL_FRAME_BOX);
 	clip_format->color(BLACK);
 	clip_format->labelcolor(YELLOW);
 	clip_format->labelsize(9);
 	clip_format->align(FL_ALIGN_CENTER);
-	clip_format->value(main_win->clip_format);
+	clip_format->value(my_window->clip_format);
 	clip_format->copy_tooltip("Rather than producing a single file, the Record button starts a new file each time it is selected. It is critical that the filename include timestamp formatting to prevent one video recording over the last.");
 	clip_format->callback(clip_format_cb, this);
 	yp += 22;
 
-	no_overwrite = new MyLightButton(main_win, 460, yp, 120, 20, "No File Overwrite");
+	no_overwrite = new MyLightButton(my_window, 460, yp, 120, 20, "No File Overwrite");
 	no_overwrite->box(FL_FRAME_BOX);
 	no_overwrite->color(BLACK);
 	no_overwrite->labelcolor(YELLOW);
 	no_overwrite->labelsize(9);
 	no_overwrite->align(FL_ALIGN_CENTER);
-	no_overwrite->value(main_win->clip_format);
+	no_overwrite->value(my_window->clip_format);
 	no_overwrite->copy_tooltip("With this enabled, do not overwrite an existing file.");
-	no_overwrite->value(main_win->no_overwrite);
+	no_overwrite->value(my_window->no_overwrite);
 	no_overwrite->callback(no_overwrite_cb, this);
 	yp += 22;
 
 	yp += 32;
-	MyButton *close = new MyButton(main_win, 70, yp, 100, 30, "Close");
+	MyButton *close = new MyButton(my_window, 70, yp, 100, 30, "Close");
 	close->box(FL_FRAME_BOX);
 	close->color(BLACK);
 	close->labelcolor(YELLOW);
@@ -73394,18 +75158,18 @@ int	VideoSettingsWindow::handle(int event)
 
 void	VideoSettingsWindow::Update()
 {
-	if(main_win != NULL)
+	if(my_window != NULL)
 	{
-		Camera *cam = main_win->DisplayedCamera();
+		Camera *cam = my_window->DisplayedCamera();
 		if(cam != NULL)
 		{
 			fps_slider->value(cam->fps);
 		}
-		encode_fps_slider->value(main_win->speed_factor);
-		minimum_fps_slider->value(main_win->minimum_fps);
+		encode_fps_slider->value(my_window->speed_factor);
+		minimum_fps_slider->value(my_window->minimum_fps);
 
-		if((main_win->recorded_frames > 0)
-		&& (main_win->clip_format == 0))
+		if((my_window->recorded_frames > 0)
+		&& (my_window->clip_format == 0))
 		{
 			output_w->deactivate();
 			output_h->deactivate();
@@ -73423,26 +75187,26 @@ void	VideoSettingsWindow::Update()
 			minimum_fps_slider->activate();
 			realtime_encoding_button->activate();
 		}
-		if(main_win->virtual_output_format == VIRTUAL_OUTPUT_FORMAT_YUYV)
+		if(my_window->virtual_output_format == VIRTUAL_OUTPUT_FORMAT_YUYV)
 		{
 			virtual_format_yuyv->value(1);
 			virtual_format_bgr->value(0);
 			virtual_format_rgb->value(0);
 		}
-		else if(main_win->virtual_output_format == VIRTUAL_OUTPUT_FORMAT_BGR)
+		else if(my_window->virtual_output_format == VIRTUAL_OUTPUT_FORMAT_BGR)
 		{
 			virtual_format_bgr->value(1);
 			virtual_format_yuyv->value(0);
 			virtual_format_rgb->value(0);
 		}
-		else if(main_win->virtual_output_format == VIRTUAL_OUTPUT_FORMAT_RGB)
+		else if(my_window->virtual_output_format == VIRTUAL_OUTPUT_FORMAT_RGB)
 		{
 			virtual_format_rgb->value(1);
 			virtual_format_yuyv->value(0);
 			virtual_format_bgr->value(0);
 		}
 		disable_slow_codecs_button->deactivate();
-		if(main_win->bad_codec_combo_cnt > 0)
+		if(my_window->bad_codec_combo_cnt > 0)
 		{
 			disable_slow_codecs_button->activate();
 		}
@@ -73499,6 +75263,7 @@ MiscVideoSettingsWindow::MiscVideoSettingsWindow(MyWin *in_win) : Dialog(in_win,
 	int font_sz = 9;
 
 	int yp = 20 + new_yp;
+	Fl_Window::label("Video Settings");
 
 	contrast_slider = new MySlider(my_window, 200, yp, 500, 25, "Contrast");
 	contrast_slider->range(0.0, 1.0);
@@ -73613,7 +75378,7 @@ void	capture_interval_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73654,7 +75419,7 @@ void	retrieve_interval_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73694,7 +75459,7 @@ void	load_from_saved_camera_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		Camera *cam = win->DisplayedCamera();
@@ -73716,7 +75481,7 @@ void	motion_threshold_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73756,7 +75521,7 @@ void	threshold_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73796,7 +75561,7 @@ void	recognition_interval_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73836,7 +75601,7 @@ void	contrast_slider_cb(Fl_Widget *w, void *v)
 int	loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73876,7 +75641,7 @@ void	brightness_slider_cb(Fl_Widget *w, void *v)
 int	loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73916,7 +75681,7 @@ void	saturation_slider_cb(Fl_Widget *w, void *v)
 int	loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73956,7 +75721,7 @@ void	hue_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -73997,7 +75762,7 @@ void	intensity_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -74037,7 +75802,7 @@ void	red_intensity_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -74078,7 +75843,7 @@ void	green_intensity_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -74118,7 +75883,7 @@ void	blue_intensity_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -74158,7 +75923,7 @@ void	alpha_intensity_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -74198,7 +75963,7 @@ void	aspect_x_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -74238,7 +76003,7 @@ void	aspect_y_slider_cb(Fl_Widget *w, void *v)
 int loop;
 
 	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
-	MyWin *win = sw->main_win;
+	MyWin *win = sw->my_window;
 	if(win != NULL)
 	{
 		if(sw->apply_to_all_button->value())
@@ -74277,14 +76042,15 @@ CameraSettingsWindow::CameraSettingsWindow(MyWin *in_win) : Dialog(in_win, 360, 
 {
 char	buf[256];
 
-	main_win = in_win;
-	Camera *cam = main_win->DisplayedCamera();
+	my_window = in_win;
+	Camera *cam = my_window->DisplayedCamera();
+	Fl_Window::label("Camera Settings");
 
 	int new_yp = 20;
 
-	if((main_win->disregard_settings & 1) != 1)
+	if((my_window->disregard_settings & 1) != 1)
 	{
-		load_system_video_settings_from_file(main_win);
+		load_system_video_settings_from_file(my_window);
 	}
 	last_x = 0;
 	last_y = 0;
@@ -74373,7 +76139,7 @@ char	buf[256];
 		sprintf(buf, "%d", (int)cam->height);
 		hardware_h->value(buf);
 	}
-	MyButton *set_hardware_resolution_button = new MyButton(main_win, 555, yp, 40, 20, "Set");
+	MyButton *set_hardware_resolution_button = new MyButton(my_window, 555, yp, 40, 20, "Set");
 	set_hardware_resolution_button->box(FL_FRAME_BOX);
 	set_hardware_resolution_button->color(BLACK);
 	set_hardware_resolution_button->labelcolor(YELLOW);
@@ -74382,7 +76148,7 @@ char	buf[256];
 	set_hardware_resolution_button->callback(camera_settings_set_hardware_resolution_cb, this);
 
 	yp += 35;
-	contrast_slider = new MySlider(main_win, 200, yp, 500, 25, "Contrast");
+	contrast_slider = new MySlider(my_window, 200, yp, 500, 25, "Contrast");
 	contrast_slider->range(0.0, 1.0);
 	contrast_slider->value(0.5);
 	contrast_slider->initial_value = 0.5;
@@ -74391,7 +76157,7 @@ char	buf[256];
 	contrast_slider->callback(contrast_slider_cb, this);
 	contrast_slider->copy_tooltip("Contrast applied to the image after it is received from the camera.");
 	yp += 25;
-	brightness_slider = new MySlider(main_win, 200, yp, 500, 25, "Brightness");
+	brightness_slider = new MySlider(my_window, 200, yp, 500, 25, "Brightness");
 	brightness_slider->range(0.0, 1.0);
 	brightness_slider->value(0.5);
 	brightness_slider->initial_value = 0.5;
@@ -74400,7 +76166,7 @@ char	buf[256];
 	brightness_slider->copy_tooltip("Brightness applied to the image after it is received from the camera.");
 	brightness_slider->callback(brightness_slider_cb, this);
 	yp += 25;
-	saturation_slider = new MySlider(main_win, 200, yp, 500, 25, "Saturation");
+	saturation_slider = new MySlider(my_window, 200, yp, 500, 25, "Saturation");
 	saturation_slider->range(0.0, 2.0);
 	saturation_slider->value(1.0);
 	saturation_slider->initial_value = 1.0;
@@ -74409,7 +76175,7 @@ char	buf[256];
 	saturation_slider->copy_tooltip("Color saturation applied to the image after it is received from the camera.");
 	saturation_slider->callback(saturation_slider_cb, this);
 	yp += 25;
-	hue_slider = new MySlider(main_win, 200, yp, 500, 25, "Hue");
+	hue_slider = new MySlider(my_window, 200, yp, 500, 25, "Hue");
 	hue_slider->range(0.0, 2.0);
 	hue_slider->value(1.0);
 	hue_slider->initial_value = 1.0;
@@ -74418,7 +76184,7 @@ char	buf[256];
 	hue_slider->copy_tooltip("Hue adjustment applied to the image after it is received from the camera.");
 	hue_slider->callback(hue_slider_cb, this);
 	yp += 25;
-	intensity_slider = new MySlider(main_win, 200, yp, 500, 25, "Value");
+	intensity_slider = new MySlider(my_window, 200, yp, 500, 25, "Value");
 	intensity_slider->range(0.0, 2.0);
 	intensity_slider->value(1.0);
 	intensity_slider->initial_value = 1.0;
@@ -74427,7 +76193,7 @@ char	buf[256];
 	intensity_slider->copy_tooltip("Color intensity applied to the image after it is received from the camera.");
 	intensity_slider->callback(intensity_slider_cb, this);
 	yp += 25;
-	red_intensity_slider = new MySlider(main_win, 200, yp, 500, 25, "Red Value");
+	red_intensity_slider = new MySlider(my_window, 200, yp, 500, 25, "Red Value");
 	red_intensity_slider->range(0.0, 2.0);
 	red_intensity_slider->value(1.0);
 	red_intensity_slider->initial_value = 1.0;
@@ -74436,7 +76202,7 @@ char	buf[256];
 	red_intensity_slider->copy_tooltip("Red intensity applied to the image after it is received from the camera.");
 	red_intensity_slider->callback(red_intensity_slider_cb, this);
 	yp += 25;
-	green_intensity_slider = new MySlider(main_win, 200, yp, 500, 25, "Green Value");
+	green_intensity_slider = new MySlider(my_window, 200, yp, 500, 25, "Green Value");
 	green_intensity_slider->range(0.0, 2.0);
 	green_intensity_slider->value(1.0);
 	green_intensity_slider->initial_value = 1.0;
@@ -74445,7 +76211,7 @@ char	buf[256];
 	green_intensity_slider->copy_tooltip("Green intensity applied to the image after it is received from the camera.");
 	green_intensity_slider->callback(green_intensity_slider_cb, this);
 	yp += 25;
-	blue_intensity_slider = new MySlider(main_win, 200, yp, 500, 25, "Blue Value");
+	blue_intensity_slider = new MySlider(my_window, 200, yp, 500, 25, "Blue Value");
 	blue_intensity_slider->range(0.0, 2.0);
 	blue_intensity_slider->value(1.0);
 	blue_intensity_slider->initial_value = 1.0;
@@ -74454,7 +76220,7 @@ char	buf[256];
 	blue_intensity_slider->copy_tooltip("Blue intensity applied to the image after it is received from the camera.");
 	blue_intensity_slider->callback(blue_intensity_slider_cb, this);
 	yp += 25;
-	alpha_intensity_slider = new MySlider(main_win, 200, yp, 500, 25, "Alpha Value");
+	alpha_intensity_slider = new MySlider(my_window, 200, yp, 500, 25, "Alpha Value");
 	alpha_intensity_slider->range(0.0, 2.0);
 	alpha_intensity_slider->value(1.0);
 	alpha_intensity_slider->initial_value = 1.0;
@@ -74463,7 +76229,7 @@ char	buf[256];
 	alpha_intensity_slider->copy_tooltip("Alpha intensity applied to the image after it is received from the camera.");
 	alpha_intensity_slider->callback(alpha_intensity_slider_cb, this);
 	yp += 25;
-	aspect_x_slider = new MySlider(main_win, 200, yp, 500, 25, "Aspect Width");
+	aspect_x_slider = new MySlider(my_window, 200, yp, 500, 25, "Aspect Width");
 	aspect_x_slider->range(0.0, 2.0);
 	aspect_x_slider->value(1.0);
 	aspect_x_slider->initial_value = 1.0;
@@ -74472,7 +76238,7 @@ char	buf[256];
 	aspect_x_slider->copy_tooltip("Aspect ratio adjustment. This will stretch the image. Cropping is not applied.");
 	aspect_x_slider->callback(aspect_x_slider_cb, this);
 	yp += 25;
-	aspect_y_slider = new MySlider(main_win, 200, yp, 500, 25, "Aspect Height");
+	aspect_y_slider = new MySlider(my_window, 200, yp, 500, 25, "Aspect Height");
 	aspect_y_slider->range(0.0, 2.0);
 	aspect_y_slider->value(1.0);
 	aspect_y_slider->initial_value = 1.0;
@@ -74482,7 +76248,7 @@ char	buf[256];
 	aspect_y_slider->callback(aspect_y_slider_cb, this);
 
 	yp += 25;
-	motion_threshold_slider = new MySlider(main_win, 200, yp, 500, 25, "Motion Threshold");
+	motion_threshold_slider = new MySlider(my_window, 200, yp, 500, 25, "Motion Threshold");
 	motion_threshold_slider->range(10.0, 10000.0);
 	motion_threshold_slider->value(100.0);
 	motion_threshold_slider->initial_value = 100.0;
@@ -74492,7 +76258,7 @@ char	buf[256];
 	motion_threshold_slider->callback(motion_threshold_slider_cb, this);
 
 	yp += 25;
-	recognition_threshold_slider = new MySlider(main_win, 200, yp, 500, 25, "Object Recog. Threshold");
+	recognition_threshold_slider = new MySlider(my_window, 200, yp, 500, 25, "Object Recog. Threshold");
 	recognition_threshold_slider->range(0.0, 1.0);
 	recognition_threshold_slider->value(0.5);
 	recognition_threshold_slider->initial_value = 0.5;
@@ -74502,7 +76268,7 @@ char	buf[256];
 	recognition_threshold_slider->callback(threshold_slider_cb, this);
 
 	yp += 25;
-	recognition_interval_slider = new MySlider(main_win, 200, yp, 500, 25, "Object Recog. Interval");
+	recognition_interval_slider = new MySlider(my_window, 200, yp, 500, 25, "Object Recog. Interval");
 	recognition_interval_slider->range(1, 100);
 	recognition_interval_slider->value(10);
 	recognition_interval_slider->step(1);
@@ -74513,7 +76279,7 @@ char	buf[256];
 	recognition_interval_slider->callback(recognition_interval_cb, this);
 
 	yp += 25;
-	capture_interval_slider = new MySlider(main_win, 200, yp, 500, 25, "Capture Interval");
+	capture_interval_slider = new MySlider(my_window, 200, yp, 500, 25, "Capture Interval");
 	capture_interval_slider->range(0.1, 60.0);
 	capture_interval_slider->value(0.0);
 	capture_interval_slider->step(0.1);
@@ -74524,7 +76290,7 @@ char	buf[256];
 	capture_interval_slider->callback(capture_interval_cb, this);
 
 	yp += 25;
-	retrieve_interval_slider = new MySlider(main_win, 200, yp, 500, 25, "Retrieve Interval");
+	retrieve_interval_slider = new MySlider(my_window, 200, yp, 500, 25, "Retrieve Interval");
 	retrieve_interval_slider->range(1.0, 1000000.0);
 	retrieve_interval_slider->value(10000.0);
 	retrieve_interval_slider->step(10000.0);
@@ -74536,14 +76302,14 @@ char	buf[256];
 	yp += 25;
 
 	yp += 44;
-	apply_to_all_button = new MyToggleButton(main_win, 70, yp, 100, 22, "Apply to All");
+	apply_to_all_button = new MyToggleButton(my_window, 70, yp, 100, 22, "Apply to All");
 	apply_to_all_button->box(FL_FRAME_BOX);
 	apply_to_all_button->color(BLACK);
 	apply_to_all_button->labelcolor(YELLOW);
 	apply_to_all_button->labelsize(font_sz + 1);
 	apply_to_all_button->copy_tooltip("Apply subsequent changes to all active cameras.");
 
-	load_from = new MyButton(main_win, 170, yp, 100, 22, "Load");
+	load_from = new MyButton(my_window, 170, yp, 100, 22, "Load");
 	load_from->box(FL_FRAME_BOX);
 	load_from->color(BLACK);
 	load_from->labelcolor(YELLOW);
@@ -74552,7 +76318,7 @@ char	buf[256];
 	load_from->callback(load_from_saved_camera_cb, this);
 	yp += 24;
 
-	MyButton *close = new MyButton(main_win, 70, yp + 2, 100, 22, "Close");
+	MyButton *close = new MyButton(my_window, 70, yp + 2, 100, 22, "Close");
 	close->box(FL_FRAME_BOX);
 	close->color(BLACK);
 	close->labelcolor(YELLOW);
@@ -74623,9 +76389,9 @@ void	CameraSettingsWindow::Update()
 {
 char	buf[256];
 
-	if(main_win != NULL)
+	if(my_window != NULL)
 	{
-		Camera *cam = main_win->DisplayedCamera();
+		Camera *cam = my_window->DisplayedCamera();
 		if(cam != NULL)
 		{
 			char *str = "";
@@ -74671,7 +76437,7 @@ char	buf[256];
 void	snapshot_filename_format_cb(Fl_Widget *w, void *v)
 {
 	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
-	MyWin *my_win = win->main_win;
+	MyWin *my_win = win->my_window;
 	if(my_win != NULL)
 	{
 		Camera *cam = my_win->DisplayedCamera();
@@ -74682,10 +76448,20 @@ void	snapshot_filename_format_cb(Fl_Widget *w, void *v)
 	}
 }
 
+void	universal_snapshot_filename_format_cb(Fl_Widget *w, void *v)
+{
+	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
+	MyWin *my_win = win->my_window;
+	if(my_win != NULL)
+	{
+		strcpy(my_win->snapshot_filename_format, win->universal_filename_format->value());
+	}
+}
+
 void	snapshot_initial_delay_slider_cb(Fl_Widget *w, void *v)
 {
 	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
-	MyWin *my_win = win->main_win;
+	MyWin *my_win = win->my_window;
 	if(my_win != NULL)
 	{
 		Camera *cam = my_win->DisplayedCamera();
@@ -74696,10 +76472,43 @@ void	snapshot_initial_delay_slider_cb(Fl_Widget *w, void *v)
 	}
 }
 
+void	snapshot_copy_to_copy_buffer_cb(Fl_Widget *w, void *v)
+{
+	MyLightButton *b = (MyLightButton *)w;
+	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
+	MyWin *my_win = win->my_window;
+	if(my_win != NULL)
+	{
+		my_win->snapshot_copy_to_copy_buffer = b->value();
+	}
+}
+
+void	snapshot_entire_desktop_cb(Fl_Widget *w, void *v)
+{
+	MyLightButton *b = (MyLightButton *)w;
+	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
+	MyWin *my_win = win->my_window;
+	if(my_win != NULL)
+	{
+		my_win->snapshot_entire_desktop = b->value();
+	}
+}
+
+void	snapshot_main_window_cb(Fl_Widget *w, void *v)
+{
+	MyLightButton *b = (MyLightButton *)w;
+	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
+	MyWin *my_win = win->my_window;
+	if(my_win != NULL)
+	{
+		my_win->snapshot_main_window = b->value();
+	}
+}
+
 void	snapshot_repeat_delay_slider_cb(Fl_Widget *w, void *v)
 {
 	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
-	MyWin *my_win = win->main_win;
+	MyWin *my_win = win->my_window;
 	if(my_win != NULL)
 	{
 		Camera *cam = my_win->DisplayedCamera();
@@ -74715,7 +76524,7 @@ void	snapshot_repeat_delay_slider_cb(Fl_Widget *w, void *v)
 void	snapshot_scale_slider_cb(Fl_Widget *w, void *v)
 {
 	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
-	MyWin *my_win = win->main_win;
+	MyWin *my_win = win->my_window;
 	if(my_win != NULL)
 	{
 		Camera *cam = my_win->DisplayedCamera();
@@ -74730,7 +76539,7 @@ void	snapshot_scale_slider_cb(Fl_Widget *w, void *v)
 void	snapshot_trigger_cb(Fl_Widget *w, void *v)
 {
 	SnapshotSettingWindow *win = (SnapshotSettingWindow *)v;
-	MyWin *my_win = win->main_win;
+	MyWin *my_win = win->my_window;
 	if(my_win != NULL)
 	{
 		Camera *cam = my_win->DisplayedCamera();
@@ -74756,12 +76565,12 @@ void	snapshot_trigger_cb(Fl_Widget *w, void *v)
 	}
 }
 
-SnapshotSettingWindow::SnapshotSettingWindow(MyWin *in_win) : Dialog(in_win, 360, 200, 600, 370, "Snapshot Settings")
+SnapshotSettingWindow::SnapshotSettingWindow(MyWin *in_win) : Dialog(in_win, 360, 200, 600, 440, "Snapshot Settings")
 {
 char	buf[256];
 
-	main_win = in_win;
-	Camera *cam = main_win->DisplayedCamera();
+	my_window = in_win;
+	Camera *cam = my_window->DisplayedCamera();
 
 	int new_yp = 20;
 	int yp = 22 + new_yp;
@@ -74769,7 +76578,7 @@ char	buf[256];
 	last_y = 0;
 	resize(x(), y(), w(), h());
 
-	filename_format = new Fl_Input(100, yp, 462, 20, "Filename");
+	filename_format = new Fl_Input(150, yp, 412, 20, "Filename (for camera)");
 	filename_format->box(FL_FRAME_BOX);
 	filename_format->color(BLACK);
 	filename_format->textcolor(WHITE);
@@ -74786,8 +76595,29 @@ char	buf[256];
 	{
 		filename_format->value("");
 	}
-	filename_format->copy_tooltip("The filename for the image file. Special codes (see below) can be inserted in the path to create dynamic filenames.");
+	filename_format->copy_tooltip("The filename for the image file created by this camera. Special codes (see below) can be inserted in the path to create dynamic filenames.");
 	filename_format->callback(snapshot_filename_format_cb, this);
+	yp += 32;
+
+	universal_filename_format = new Fl_Input(150, yp, 412, 20, "Filename (for previwers)");
+	universal_filename_format->box(FL_FRAME_BOX);
+	universal_filename_format->color(BLACK);
+	universal_filename_format->textcolor(WHITE);
+	universal_filename_format->labelsize(11);
+	universal_filename_format->textsize(11);
+	universal_filename_format->cursor_color(WHITE);
+	universal_filename_format->labelcolor(YELLOW);
+	universal_filename_format->when(FL_WHEN_CHANGED);
+	if(cam != NULL)
+	{
+		filename_format->value(my_window->snapshot_filename_format);
+	}
+	else
+	{
+		filename_format->value("");
+	}
+	universal_filename_format->copy_tooltip("The filename for image files created by previewers. Special codes (see below) can be inserted in the path to create dynamic filenames.");
+	universal_filename_format->callback(universal_snapshot_filename_format_cb, this);
 	yp += 32;
 
 	Fl_Box *instruction = new Fl_Box(10, yp, 560, 100);
@@ -74812,10 +76642,10 @@ char	buf[256];
 		"%S = current time in seconds\n"
 		"%frame = recorded frames\t\t"
 		"%source = path to video source\n\n"
-		"So: \"snapshot_%Y_%M_%D_%h_%m_%s.flv\" will produce \"snapshot_2024_1_22_13_6_31.flv\" on January 22nd, 2024");
+		"So: \"snapshot_%Y_%M_%D_%h_%m_%s.flv\" will produce \"snapshot_2026_1_22_13_6_31.flv\" on January 22nd, 2026");
 	yp += 120;
 
-	initial_delay_slider = new MySlider(main_win, 100, yp, 450, 20, "Initial Delay");
+	initial_delay_slider = new MySlider(my_window, 100, yp, 450, 20, "Initial Delay");
 	initial_delay_slider->range(0.0, 60.0);
 	initial_delay_slider->value(0.0);
 	initial_delay_slider->step(1.0);
@@ -74826,7 +76656,7 @@ char	buf[256];
 	initial_delay_slider->callback(snapshot_initial_delay_slider_cb, this);
 	yp += 30;
 
-	repeat_seconds_delay_slider = new MySlider(main_win, 100, yp, 450, 20, "Repeat (sec.)");
+	repeat_seconds_delay_slider = new MySlider(my_window, 100, yp, 450, 20, "Repeat (sec.)");
 	repeat_seconds_delay_slider->range(0.0, 60.0);
 	repeat_seconds_delay_slider->value(0.0);
 	repeat_seconds_delay_slider->step(1.0);
@@ -74837,7 +76667,7 @@ char	buf[256];
 	repeat_seconds_delay_slider->callback(snapshot_repeat_delay_slider_cb, this);
 	yp += 22;
 
-	repeat_minutes_delay_slider = new MySlider(main_win, 100, yp, 450, 20, "Repeat (min.)");
+	repeat_minutes_delay_slider = new MySlider(my_window, 100, yp, 450, 20, "Repeat (min.)");
 	repeat_minutes_delay_slider->range(0.0, 60.0);
 	repeat_minutes_delay_slider->value(0.0);
 	repeat_minutes_delay_slider->step(1.0);
@@ -74848,9 +76678,44 @@ char	buf[256];
 	repeat_minutes_delay_slider->callback(snapshot_repeat_delay_slider_cb, this);
 	yp += 30;
 
+	copy_to_copy_buffer = new MyLightButton(my_window, 50, yp, 120, 20, "Copy to Copy Buffer");
+	copy_to_copy_buffer->box(FL_FRAME_BOX);
+	copy_to_copy_buffer->color(BLACK);
+	copy_to_copy_buffer->labelcolor(YELLOW);
+	copy_to_copy_buffer->labelsize(9);
+	copy_to_copy_buffer->align(FL_ALIGN_CENTER);
+	copy_to_copy_buffer->copy_tooltip("Copy the image to the copy buffer.");
+	copy_to_copy_buffer->value(my_window->snapshot_copy_to_copy_buffer);
+	copy_to_copy_buffer->callback(snapshot_copy_to_copy_buffer_cb, this);
+
+	MyGroup *radio = new MyGroup(180, yp, 500, 20);
+	snapshot_entire_desktop = new MyLightButton(my_window, 180, yp, 120, 20, "Snapshot Desktop");
+	snapshot_entire_desktop->box(FL_FRAME_BOX);
+	snapshot_entire_desktop->color(BLACK);
+	snapshot_entire_desktop->labelcolor(YELLOW);
+	snapshot_entire_desktop->labelsize(9);
+	snapshot_entire_desktop->type(FL_RADIO_BUTTON);
+	snapshot_entire_desktop->align(FL_ALIGN_CENTER);
+	snapshot_entire_desktop->copy_tooltip("Take a snapshot of the entire desktop.");
+	snapshot_entire_desktop->value(my_window->snapshot_entire_desktop);
+	snapshot_entire_desktop->callback(snapshot_entire_desktop_cb, this);
+
+	snapshot_main_window = new MyLightButton(my_window, 305, yp, 120, 20, "Snapshot DVPTZ");
+	snapshot_main_window->box(FL_FRAME_BOX);
+	snapshot_main_window->color(BLACK);
+	snapshot_main_window->labelcolor(YELLOW);
+	snapshot_main_window->labelsize(9);
+	snapshot_main_window->type(FL_RADIO_BUTTON);
+	snapshot_main_window->align(FL_ALIGN_CENTER);
+	snapshot_main_window->copy_tooltip("Take a snapshot of the main dvptz window.");
+	snapshot_main_window->value(my_window->snapshot_main_window);
+	snapshot_main_window->callback(snapshot_main_window_cb, this);
+	radio->end();
+	yp += 35;
+
 	int xp = 50;
-	MyGroup *radio = new MyGroup(xp, yp, 500, 20);
-	snapshot_trigger_on_button = new MyLightButton(main_win, xp, yp, 120, 20, "Trigger on Button");
+	radio = new MyGroup(xp, yp, 500, 20);
+	snapshot_trigger_on_button = new MyLightButton(my_window, xp, yp, 120, 20, "Trigger on Button");
 	snapshot_trigger_on_button->box(FL_FRAME_BOX);
 	snapshot_trigger_on_button->color(BLACK);
 	snapshot_trigger_on_button->labelcolor(YELLOW);
@@ -74862,7 +76727,7 @@ char	buf[256];
 	snapshot_trigger_on_button->callback(snapshot_trigger_cb, this);
 	xp += 125;
 
-	snapshot_trigger_on_start = new MyLightButton(main_win, xp, yp, 120, 20, "Trigger on Start");
+	snapshot_trigger_on_start = new MyLightButton(my_window, xp, yp, 120, 20, "Trigger on Start");
 	snapshot_trigger_on_start->box(FL_FRAME_BOX);
 	snapshot_trigger_on_start->color(BLACK);
 	snapshot_trigger_on_start->labelcolor(YELLOW);
@@ -74873,7 +76738,7 @@ char	buf[256];
 	snapshot_trigger_on_start->callback(snapshot_trigger_cb, this);
 	xp += 125;
 
-	snapshot_trigger_on_record = new MyLightButton(main_win, xp, yp, 120, 20, "Trigger on Record");
+	snapshot_trigger_on_record = new MyLightButton(my_window, xp, yp, 120, 20, "Trigger on Record");
 	snapshot_trigger_on_record->box(FL_FRAME_BOX);
 	snapshot_trigger_on_record->color(BLACK);
 	snapshot_trigger_on_record->labelcolor(YELLOW);
@@ -74884,7 +76749,7 @@ char	buf[256];
 	snapshot_trigger_on_record->callback(snapshot_trigger_cb, this);
 	xp += 125;
 
-	snapshot_continuous = new MyLightButton(main_win, xp, yp, 120, 20, "Continuous");
+	snapshot_continuous = new MyLightButton(my_window, xp, yp, 120, 20, "Continuous");
 	snapshot_continuous->box(FL_FRAME_BOX);
 	snapshot_continuous->color(BLACK);
 	snapshot_continuous->labelcolor(YELLOW);
@@ -74914,7 +76779,7 @@ char	buf[256];
 			snapshot_continuous->value(1);
 		}
 	}
-	scale_slider = new MySlider(main_win, 100, yp, 450, 20, "Scale");
+	scale_slider = new MySlider(my_window, 100, yp, 450, 20, "Scale");
 	scale_slider->range(0.05, 1.0);
 	if(cam != NULL)
 	{
@@ -74932,7 +76797,7 @@ char	buf[256];
 	scale_slider->callback(snapshot_scale_slider_cb, this);
 	yp += 40;
 
-	MyButton *close = new MyButton(main_win, 70, yp, 60, 22, "Close");
+	MyButton *close = new MyButton(my_window, 70, yp, 60, 22, "Close");
 	close->box(FL_FRAME_BOX);
 	close->color(BLACK);
 	close->labelcolor(YELLOW);
@@ -75000,12 +76865,13 @@ int	SnapshotSettingWindow::handle(int event)
 
 void	SnapshotSettingWindow::Update()
 {
-	if(main_win != NULL)
+	if(my_window != NULL)
 	{
-		Camera *cam = main_win->DisplayedCamera();
+		Camera *cam = my_window->DisplayedCamera();
 		if(cam != NULL)
 		{
 			filename_format->value(cam->snapshot_filename_format);
+			universal_filename_format->value(my_window->snapshot_filename_format);
 			initial_delay_slider->value(cam->snapshot_initial_delay);
 
 			int nn = cam->snapshot_repeat_delay;
@@ -75032,6 +76898,9 @@ void	SnapshotSettingWindow::Update()
 			{
 				snapshot_continuous->value(1);
 			}
+			copy_to_copy_buffer->value(my_window->snapshot_copy_to_copy_buffer);
+			snapshot_entire_desktop->value(my_window->snapshot_entire_desktop);
+			snapshot_main_window->value(my_window->snapshot_main_window);
 		}
 	}
 }
@@ -75050,7 +76919,10 @@ char	buf[256];
 	gsw->my_window->retain_cameras = gsw->retain_cameras_button->value();
 	gsw->my_window->retain_audio = gsw->retain_audio_button->value();
 	gsw->my_window->retain_ptz = gsw->retain_ptz_button->value();
-	gsw->my_window->lock_ptz_mouse_move = gsw->lock_ptz_mouse_button->value();
+	if(gsw->my_window->ptz_mode != 0)
+	{
+		gsw->my_window->lock_ptz_mouse_move = gsw->lock_ptz_mouse_button->value();
+	}
 	if(gsw->reverse_panels_button->value() == 1)
 	{
 		gsw->my_window->button_group_side = SIDE_LEFT;
@@ -75226,16 +77098,18 @@ void	gui_setting_status_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
-	int red = gsw->my_window->status_color_r;
-	int green = gsw->my_window->status_color_g;
-	int blue = gsw->my_window->status_color_b;
-	int alpha = gsw->my_window->status_color_a;
-	if(my_color_chooser("Status Color", red, green, blue, alpha))
+	MyWin *win = gsw->my_window;
+
+	int red = win->status_color_r;
+	int green = win->status_color_g;
+	int blue = win->status_color_b;
+	int alpha = win->status_color_a;
+	if(my_color_chooser(win, "Status Color", red, green, blue, alpha))
 	{
-		gsw->my_window->status_color_r = red;
-		gsw->my_window->status_color_g = green;
-		gsw->my_window->status_color_b = blue;
-		gsw->my_window->status_color_a = alpha;
+		win->status_color_r = red;
+		win->status_color_g = green;
+		win->status_color_b = blue;
+		win->status_color_a = alpha;
 		b->color(fl_rgb_color(red, green, blue));
 		b->redraw();
 	}
@@ -75245,11 +77119,13 @@ void	gui_setting_background_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->background_color_r;
 	int green = gsw->background_color_g;
 	int blue = gsw->background_color_b;
 	int alpha = gsw->background_color_a;
-	if(my_color_chooser("Background Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Background Color", red, green, blue, alpha))
 	{
 		gsw->background_color_r = red;
 		gsw->background_color_g = green;
@@ -75264,11 +77140,13 @@ void	gui_setting_text_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->text_color_r;
 	int green = gsw->text_color_g;
 	int blue = gsw->text_color_b;
 	int alpha = gsw->text_color_a;
-	if(my_color_chooser("Text Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Text Color", red, green, blue, alpha))
 	{
 		gsw->text_color_r = red;
 		gsw->text_color_g = green;
@@ -75283,11 +77161,13 @@ void	gui_setting_highlight_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->highlight_color_r;
 	int green = gsw->highlight_color_g;
 	int blue = gsw->highlight_color_b;
 	int alpha = gsw->highlight_color_a;
-	if(my_color_chooser("Highlight Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Highlight Color", red, green, blue, alpha))
 	{
 		gsw->highlight_color_r = red;
 		gsw->highlight_color_g = green;
@@ -75302,11 +77182,13 @@ void	gui_setting_gray_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->gray_color_r;
 	int green = gsw->gray_color_g;
 	int blue = gsw->gray_color_b;
 	int alpha = gsw->gray_color_a;
-	if(my_color_chooser("Gray Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Gray Color", red, green, blue, alpha))
 	{
 		gsw->gray_color_r = red;
 		gsw->gray_color_g = green;
@@ -75321,11 +77203,13 @@ void	gui_setting_dark_gray_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->dark_gray_color_r;
 	int green = gsw->dark_gray_color_g;
 	int blue = gsw->dark_gray_color_b;
 	int alpha = gsw->dark_gray_color_a;
-	if(my_color_chooser("Dark Gray Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Dark Gray Color", red, green, blue, alpha))
 	{
 		gsw->dark_gray_color_r = red;
 		gsw->dark_gray_color_g = green;
@@ -75340,11 +77224,13 @@ void	gui_setting_red_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->red_color_r;
 	int green = gsw->red_color_g;
 	int blue = gsw->red_color_b;
 	int alpha = gsw->red_color_a;
-	if(my_color_chooser("Red Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Red Color", red, green, blue, alpha))
 	{
 		gsw->red_color_r = red;
 		gsw->red_color_g = green;
@@ -75359,11 +77245,13 @@ void	gui_setting_dark_red_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->dark_red_color_r;
 	int green = gsw->dark_red_color_g;
 	int blue = gsw->dark_red_color_b;
 	int alpha = gsw->dark_red_color_a;
-	if(my_color_chooser("Dark Red Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Dark Red Color", red, green, blue, alpha))
 	{
 		gsw->dark_red_color_r = red;
 		gsw->dark_red_color_g = green;
@@ -75378,11 +77266,13 @@ void	gui_setting_blue_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->blue_color_r;
 	int green = gsw->blue_color_g;
 	int blue = gsw->blue_color_b;
 	int alpha = gsw->blue_color_a;
-	if(my_color_chooser("Blue Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Blue Color", red, green, blue, alpha))
 	{
 		gsw->blue_color_r = red;
 		gsw->blue_color_g = green;
@@ -75397,11 +77287,13 @@ void	gui_setting_dark_blue_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->dark_blue_color_r;
 	int green = gsw->dark_blue_color_g;
 	int blue = gsw->dark_blue_color_b;
 	int alpha = gsw->dark_blue_color_a;
-	if(my_color_chooser("Dark Blue Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Dark Blue Color", red, green, blue, alpha))
 	{
 		gsw->dark_blue_color_r = red;
 		gsw->dark_blue_color_g = green;
@@ -75416,11 +77308,13 @@ void	gui_setting_cyan_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
 	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
 	int red = gsw->cyan_color_r;
 	int green = gsw->cyan_color_g;
 	int blue = gsw->cyan_color_b;
 	int alpha = gsw->cyan_color_a;
-	if(my_color_chooser("Cyan Color", red, green, blue, alpha))
+	if(my_color_chooser(win, "Cyan Color", red, green, blue, alpha))
 	{
 		gsw->cyan_color_r = red;
 		gsw->cyan_color_g = green;
@@ -75555,15 +77449,19 @@ int	loop;
 	retain_ptz_button->align(FL_ALIGN_CENTER);
 	retain_ptz_button->value(my_window->retain_ptz);
 	yp += 22;
-	if(my_window->ptz_mode != 0)
+	lock_ptz_mouse_button = new MyLightButton(my_window, 10, yp, 160, 20, "Lock PTZ Mouse Move");
+	lock_ptz_mouse_button->box(FL_FRAME_BOX);
+	lock_ptz_mouse_button->color(BLACK);
+	lock_ptz_mouse_button->labelcolor(YELLOW);
+	lock_ptz_mouse_button->labelsize(9);
+	lock_ptz_mouse_button->align(FL_ALIGN_CENTER);
+	lock_ptz_mouse_button->value(my_window->lock_ptz_mouse_move);
+	if(my_window->ptz_mode == 0)
 	{
-		lock_ptz_mouse_button = new MyLightButton(my_window, 10, yp, 160, 20, "Lock PTZ Mouse Move");
-		lock_ptz_mouse_button->box(FL_FRAME_BOX);
-		lock_ptz_mouse_button->color(BLACK);
-		lock_ptz_mouse_button->labelcolor(YELLOW);
-		lock_ptz_mouse_button->labelsize(9);
-		lock_ptz_mouse_button->align(FL_ALIGN_CENTER);
-		lock_ptz_mouse_button->value(my_window->lock_ptz_mouse_move);
+		lock_ptz_mouse_button->hide();
+	}
+	else
+	{
 		yp += 22;
 	}
 	retain_all_button = new MyLightButton(my_window, 10, yp, 160, 20, "Retain All Panels");
@@ -77306,13 +79204,59 @@ void	transition_plugin_cb(Fl_Widget *w, void *v)
 	tw->my_window->SaveTransition();
 }
 
-TransitionWindow::TransitionWindow(MyWin *in_win) : Dialog(in_win, 780, 180, "Transitions")
+void	transition_speed_slider_cb(Fl_Widget *w, void *v)
+{
+	TransitionWindow *tw = (TransitionWindow *)v;
+	MySlider *slider = (MySlider *)w;
+	double val = slider->value();
+	tw->my_window->transition_interval = val;
+	tw->my_window->SaveTransition();
+}
+
+void	transition_color_button_cb(Fl_Widget *w, void *v)
+{
+	TransitionWindow *tw = (TransitionWindow *)v;
+	uchar red = 0;
+	uchar green = 0;
+	uchar blue = 0;
+	Fl::get_color(tw->my_window->transition_color, red, green, blue);
+	int rr = red;
+	int gg = green;
+	int bb = blue;
+	int aa = 255;
+	if(my_color_chooser(tw->my_window, "Transition Color", rr, gg, bb, aa))
+	{
+		tw->my_window->transition_color = fl_rgb_color(rr, gg, bb);
+		tw->Update();
+	}
+}
+
+TransitionWindow::TransitionWindow(MyWin *in_win) : Dialog(in_win, 780, 200, "Transitions")
 {
 int	loop;
 
 	my_window = in_win;
 	int new_yp = 20;
 	resize(x(), y(), w(), h());
+
+	transition_speed_slider = new MySlider(my_window, 100, new_yp, w() - 180, 20, "Speed");
+	transition_speed_slider->range(0.1, 1.0);
+	transition_speed_slider->value(0.5);
+	transition_speed_slider->initial_value = 0.1;
+	transition_speed_slider->labelsize(11);
+	transition_speed_slider->labelcolor(YELLOW);
+	transition_speed_slider->copy_tooltip("Speed of the transition from one camera to the next.");
+	transition_speed_slider->callback(transition_speed_slider_cb, this);
+
+	set_color = new MyButton(my_window, w() - 70, 24, 12, 12);
+	set_color->box(FL_FRAME_BOX);
+	set_color->align(FL_ALIGN_RIGHT);
+	set_color->color(my_window->transition_color);
+	set_color->labelsize(8);
+	set_color->copy_tooltip("Set the transition color");
+	set_color->callback(transition_color_button_cb, this);
+	
+	new_yp += 25;
 
 	int x_pos = 10;
 	Fl_PNG_Image *none = new Fl_PNG_Image("Images/transition_none.png");
@@ -77450,6 +79394,9 @@ int	loop;
 void	TransitionWindow::Update()
 {
 	selection->show();
+	transition_speed_slider->value(my_window->transition_interval);
+	set_color->color(my_window->transition_color);
+	
 	if(my_window->transition == TRANSITION_NONE)
 	{
 		none_button->value(1);
@@ -77858,7 +79805,7 @@ void	trigger_window_clear_cb(Fl_Widget *w, void *v)
 int	loop;
 
 	TriggerWindow *tw = (TriggerWindow *)v;
-	Camera *cam = tw->main_win->DisplayedCamera();
+	Camera *cam = tw->my_window->DisplayedCamera();
 	if(cam != NULL)
 	{
 		cam->schedule_day = 0;
@@ -77896,7 +79843,7 @@ int	loop;
 
 	MyToggleButton *button = (MyToggleButton *)b;
 	TriggerWindow *tw = (TriggerWindow *)v;
-	Camera *cam = tw->main_win->DisplayedCamera();
+	Camera *cam = tw->my_window->DisplayedCamera();
 	if(cam != NULL)
 	{
 		cam->schedule_day = 0;
@@ -77928,7 +79875,7 @@ int	loop;
 
 	MyLightButton *button = (MyLightButton *)b;
 	TriggerWindow *tw = (TriggerWindow *)v;
-	Camera *cam = tw->main_win->DisplayedCamera();
+	Camera *cam = tw->my_window->DisplayedCamera();
 	if(cam != NULL)
 	{
 		cam->schedule_start = 0;
@@ -77973,13 +79920,78 @@ int	loop;
 
 void	darkness_slider_cb(Fl_Widget *b, void *v)
 {
-	MyLightButton *button = (MyLightButton *)b;
+	MySlider *slider = (MySlider *)b;
 	TriggerWindow *tw = (TriggerWindow *)v;
-	Camera *cam = tw->main_win->DisplayedCamera();
+	Camera *cam = tw->my_window->DisplayedCamera();
 	if(cam != NULL)
 	{
 		double val = tw->darkness_slider->value();
 		cam->darkness_trigger = val;
+	}
+}
+
+void	sound_slider_cb(Fl_Widget *b, void *v)
+{
+	MySlider *slider = (MySlider *)b;
+	TriggerWindow *tw = (TriggerWindow *)v;
+	Camera *cam = tw->my_window->DisplayedCamera();
+	if(cam != NULL)
+	{
+		double val = tw->volume_slider->value();
+		cam->sound_trigger = val;
+	}
+}
+
+void	sustain_slider_cb(Fl_Widget *b, void *v)
+{
+	MySlider *slider = (MySlider *)b;
+	TriggerWindow *tw = (TriggerWindow *)v;
+	Camera *cam = tw->my_window->DisplayedCamera();
+	if(cam != NULL)
+	{
+		double val = tw->sustain_slider->value();
+		cam->sustain_recording = (int)val;
+	}
+}
+
+void	audio_alias_trigger_cb(Fl_Widget *b, void *v)
+{
+int		loop;
+
+	TriggerWindow *tw = (TriggerWindow *)v;
+	MyWin *win = tw->my_window;
+	Camera *cam = win->DisplayedCamera();
+	if(cam != NULL)
+	{
+		int nn = cam->trigger_mic_list_cnt;
+		for(loop = 0;loop < nn;loop++)
+		{
+			if(cam->trigger_mic_list[loop] != NULL)
+			{
+				free(cam->trigger_mic_list[loop]);
+				cam->trigger_mic_list[loop] = NULL;
+			}
+		}
+		cam->trigger_mic_list_cnt = 0;
+		nn = tw->audio_alias_button_cnt;
+		int cnt = 0;
+		for(loop = 0;loop < nn;loop++)
+		{
+			MyLightButton *bb = tw->audio_alias[loop];
+			if(bb != NULL)
+			{
+				if(bb->value())
+				{
+					char *name = (char *)bb->label();
+					if(name != NULL)
+					{
+						cam->trigger_mic_list[cnt] = strdup(name);
+						cnt++;
+					}
+				}
+			}
+		}
+		cam->trigger_mic_list_cnt = cnt;
 	}
 }
 
@@ -77989,7 +80001,7 @@ int	loop;
 int	inner;
 
 	TriggerWindow *tw = (TriggerWindow *)v;
-	MyWin *win = tw->main_win;
+	MyWin *win = tw->my_window;
 	if(win != NULL)
 	{
 		Camera *cam = win->DisplayedCamera();
@@ -78019,53 +80031,66 @@ int	loop;
 
 	MyLightButton *button = (MyLightButton *)b;
 	TriggerWindow *tw = (TriggerWindow *)v;
-	Camera *cam = tw->main_win->DisplayedCamera();
+	Camera *cam = tw->my_window->DisplayedCamera();
 	if(cam != NULL)
 	{
 		cam->record_trigger = 0;
-		if(tw->trigger[BUTTON_ON_RECORD_BUTTON]->value())
+		if((button == tw->trigger[BUTTON_ON_RECORD_BUTTON])
+		&& (tw->trigger[BUTTON_ON_RECORD_BUTTON]->value()))
 		{
 			cam->record_trigger = ON_RECORD_BUTTON;
 			if(button == tw->trigger[BUTTON_ON_RECORD_BUTTON])
 			{
-				for(loop = 1;loop < 7;loop++)
+				for(loop = 1;loop < TRIGGER_BUTTON_LIMIT;loop++)
 				{
 					tw->trigger[loop]->value(0);
 				}
 			}
 		}
-		if(tw->trigger[BUTTON_ON_DETECT_OBJECT]->value())
+		if((button == tw->trigger[BUTTON_ON_DETECT_OBJECT])
+		&& (tw->trigger[BUTTON_ON_DETECT_OBJECT]->value()))
 		{
 			cam->record_trigger |= ON_DETECT_OBJECT;
 			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
 		}
-		if(tw->trigger[BUTTON_ON_DETECT_MOTION]->value())
+		if((button == tw->trigger[BUTTON_ON_DETECT_MOTION])
+		&& (tw->trigger[BUTTON_ON_DETECT_MOTION]->value()))
 		{
 			cam->record_trigger |= ON_DETECT_MOTION;
 			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
 		}
-		if(tw->trigger[BUTTON_ON_DETECT_LIGHT]->value())
+		if((button == tw->trigger[BUTTON_ON_DETECT_LIGHT])
+		&& (tw->trigger[BUTTON_ON_DETECT_LIGHT]->value()))
 		{
 			cam->record_trigger |= ON_DETECT_LIGHT;
 			cam->record_trigger &= ~ON_DETECT_DARK;
 			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
 			tw->trigger[BUTTON_ON_DETECT_DARK]->value(0);
 		}
-		if(tw->trigger[BUTTON_ON_DETECT_DARK]->value())
+		if((button == tw->trigger[BUTTON_ON_DETECT_DARK])
+		&& (tw->trigger[BUTTON_ON_DETECT_DARK]->value()))
 		{
 			cam->record_trigger |= ON_DETECT_DARK;
 			cam->record_trigger &= ~ON_DETECT_LIGHT;
 			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
 			tw->trigger[BUTTON_ON_DETECT_LIGHT]->value(0);
 		}
-		if(tw->trigger[BUTTON_ON_TRIGGER_CAMERA]->value())
+		if((button == tw->trigger[BUTTON_ON_TRIGGER_CAMERA])
+		&& (tw->trigger[BUTTON_ON_TRIGGER_CAMERA]->value()))
 		{
 			cam->record_trigger |= ON_TRIGGER_CAMERA;
 			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
 		}
-		if(tw->trigger[BUTTON_ON_SCHEDULE]->value())
+		if((button == tw->trigger[BUTTON_ON_SCHEDULE])
+		&& (tw->trigger[BUTTON_ON_SCHEDULE]->value()))
 		{
 			cam->record_trigger |= ON_SCHEDULE;
+			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+		}
+		if((button == tw->trigger[BUTTON_ON_SOUND])
+		&& (tw->trigger[BUTTON_ON_SOUND]->value()))
+		{
+			cam->record_trigger |= ON_DETECT_SOUND;
 			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
 		}
 	}
@@ -78101,21 +80126,23 @@ int	inner;
 	}
 }
 
-TriggerWindow::TriggerWindow(MyWin *in_win) : Dialog(in_win, 400, 300, 430, 450, "Triggers")
+TriggerWindow::TriggerWindow(MyWin *in_win) : Dialog(in_win, 400, 300, 430, 480, "Triggers")
 {
 int	loop;
 
 	static char *day_label[7] = { "S", "M", "T", "W", "T", "F", "S" }; 
-	static char *trigger_label[7] = { 
+	static char *trigger_label[TRIGGER_BUTTON_LIMIT] = { 
 		"On Record Button",
 		"On Schedule",
 		"On Detect Light",
 		"On Detect Dark",
 		"On Detect Motion",
 		"On Detect Object",
-		"On Trigger Camera"
+		"On Trigger Camera",
+		"On Sound"
 	};
-	main_win = in_win;
+	my_window = in_win;
+	Camera *cam = my_window->DisplayedCamera();
 	int new_yp = 20;
 	last_x = 0;
 	last_y = 0;
@@ -78131,7 +80158,7 @@ int	loop;
 	yp += 21;
 	for(loop = 0;loop < 7;loop++)
 	{
-		day[loop] = new MyToggleButton(main_win, xp, yp, 20, 20, day_label[loop]);
+		day[loop] = new MyToggleButton(my_window, xp, yp, 20, 20, day_label[loop]);
 		day[loop]->color(BLACK);
 		day[loop]->labelcolor(YELLOW);
 		day[loop]->labelsize(11);
@@ -78176,14 +80203,14 @@ int	loop;
 	stop_time->callback(schedule_trigger_cb, this);
 	yp += 30;
 
-	MyButton *darkness = new MyButton(main_win, xp, yp, 140, 20, "Light/Dark");
+	MyButton *darkness = new MyButton(my_window, xp, yp, 140, 20, "Light/Dark");
 	darkness->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
 	darkness->box(FL_FLAT_BOX);
 	darkness->labelsize(11);
 	darkness->color(BLACK);
 	darkness->labelcolor(YELLOW);
 	yp += 21;
-	darkness_slider = new MySlider(main_win, xp, yp, 150, 20, "", darkness);
+	darkness_slider = new MySlider(my_window, xp, yp, 150, 20, "", darkness);
 	darkness_slider->range(0.0, 1.0);
 	darkness_slider->value(0.5);
 	darkness_slider->initial_value = 0.5;
@@ -78191,8 +80218,76 @@ int	loop;
 	darkness_slider->labelcolor(YELLOW);
 	darkness_slider->copy_tooltip("Set the trigger point for recording based on light/dark");
 	darkness_slider->callback(darkness_slider_cb, this);
-	yp += 34;
+	yp += 24;
 
+	MyButton *volume = new MyButton(my_window, xp, yp, 140, 20, "Volume");
+	volume->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	volume->box(FL_FLAT_BOX);
+	volume->labelsize(11);
+	volume->color(BLACK);
+	volume->labelcolor(YELLOW);
+	yp += 21;
+	volume_slider = new MySlider(my_window, xp, yp, 150, 20, "", volume);
+	volume_slider->range(0.0, 1.0);
+	volume_slider->value(0.5);
+	volume_slider->initial_value = 0.5;
+	volume_slider->labelsize(11);
+	volume_slider->labelcolor(YELLOW);
+	volume_slider->copy_tooltip("Set the trigger point for recording based on detected sound");
+	volume_slider->callback(sound_slider_cb, this);
+	yp += 24;
+
+	MyButton *sustain = new MyButton(my_window, xp, yp, 140, 20, "Sustain After Trigger");
+	sustain->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	sustain->box(FL_FLAT_BOX);
+	sustain->labelsize(11);
+	sustain->color(BLACK);
+	sustain->labelcolor(YELLOW);
+	yp += 21;
+	sustain_slider = new MySlider(my_window, xp, yp, 150, 20, "", volume);
+	sustain_slider->range(0.0, 100.0);
+	sustain_slider->value(12.0);
+	sustain_slider->step(1.0);
+	sustain_slider->initial_value = 12.0;
+	sustain_slider->labelsize(11);
+	sustain_slider->labelcolor(YELLOW);
+	sustain_slider->copy_tooltip("Sustain recording after being triggered in seconds");
+	sustain_slider->callback(sustain_slider_cb, this);
+	yp += 28;
+
+	char buf[4096];
+	int cnt = 0;
+	Fl_Box *aliases = new Fl_Box(xp, yp, 140, 20, "Audio Aliases");
+	aliases->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	aliases->box(FL_FLAT_BOX);
+	aliases->labelsize(11);
+	aliases->color(BLACK);
+	aliases->labelcolor(WHITE);
+	yp += 21;
+	for(loop = 0;loop < my_window->pulse_microphone_cnt;loop++)
+	{
+		if(my_window->pulse_microphone[loop] != NULL)
+		{
+			if(cnt < 128)
+			{
+				strncpy(buf, my_window->pulse_microphone[loop]->alias, 4096);
+				audio_alias[cnt] = new MyLightButton(my_window, xp, yp, 150, 20);
+				audio_alias[cnt]->box(FL_FRAME_BOX);
+				audio_alias[cnt]->color(BLACK);
+				audio_alias[cnt]->labelcolor(YELLOW);
+				audio_alias[cnt]->labelsize(9);
+				audio_alias[cnt]->align(FL_ALIGN_CENTER);
+				audio_alias[cnt]->copy_tooltip("Alias of the audio device to listen to for triggering");
+				audio_alias[cnt]->copy_label(buf);
+				audio_alias[cnt]->value(1);
+				audio_alias[cnt]->callback(audio_alias_trigger_cb, this);
+				cnt++;
+				yp += 20;
+			}
+		}
+	}
+	audio_alias_button_cnt = cnt;
+	yp += 28;
 	xp = 20;
 	Fl_Box *condition = new Fl_Box(xp, yp, 140, 20, "Conditions");
 	condition->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
@@ -78201,9 +80296,9 @@ int	loop;
 	condition->color(BLACK);
 	condition->labelcolor(WHITE);
 	yp += 21;
-	for(loop = 0;loop < 7;loop++)
+	for(loop = 0;loop < TRIGGER_BUTTON_LIMIT;loop++)
 	{
-		trigger[loop] = new MyLightButton(main_win, xp, yp, 150, 20, trigger_label[loop]);
+		trigger[loop] = new MyLightButton(my_window, xp, yp, 150, 20, trigger_label[loop]);
 		trigger[loop]->box(FL_FRAME_BOX);
 		trigger[loop]->color(BLACK);
 		trigger[loop]->labelcolor(YELLOW);
@@ -78213,7 +80308,7 @@ int	loop;
 		trigger[loop]->callback(record_trigger_cb, this);
 		if(loop == BUTTON_ON_DETECT_OBJECT)
 		{
-			if((main_win->net.empty()) || (main_win->use_dnn_cuda == 0))
+			if((my_window->net.empty()) || (my_window->use_dnn_cuda == 0))
 			{
 				trigger[loop]->deactivate();
 			}
@@ -78241,28 +80336,29 @@ int	loop;
 		thumbnail[loop]->camera = in_win->camera[loop];
 		nyy += 90;
 	}
-	clear = new MyButton(main_win, w() - 190, 10 + new_yp, 50, 20, "Clear");
+	clear = new MyButton(my_window, w() - 190, 10 + new_yp, 50, 20, "Clear");
 	clear->box(FL_NO_BOX);
 	clear->labelcolor(YELLOW);
 	clear->labelsize(11);
 	clear->copy_tooltip("Clear selected record trigger conditions.");
 	clear->callback(trigger_window_clear_cb, this);
 
-	copy_to_all = new MyButton(main_win, w() - 140, 10 + new_yp, 70, 20, "Copy to All");
+	copy_to_all = new MyButton(my_window, w() - 140, 10 + new_yp, 70, 20, "Copy to All");
 	copy_to_all->box(FL_NO_BOX);
 	copy_to_all->labelcolor(YELLOW);
 	copy_to_all->labelsize(11);
 	copy_to_all->copy_tooltip("Copy these trigger settings to all camaras.");
 	copy_to_all->callback(trigger_copy_to_all_cameras, this);
 
-	done = new MyButton(main_win, w() - 70, 10 + new_yp, 50, 20, "Done");
+	done = new MyButton(my_window, w() - 70, 10 + new_yp, 50, 20, "Done");
 	done->box(FL_NO_BOX);
 	done->labelcolor(YELLOW);
 	done->labelsize(11);
 	done->copy_tooltip("Close the dialog. Trigger conditions will be tested after Record is selected.");
-	done->callback(trigger_window_cb, main_win);
+	done->callback(trigger_window_cb, my_window);
 
 	end();
+	resize(x(), y(), w(), yp + 20);
 	Update();
 }
 
@@ -78282,8 +80378,8 @@ int	TriggerWindow::handle(int event)
 		int key = Fl::event_key();
 		if(key == FL_Escape)
 		{
-			main_win->trigger_select_mode = 0;
-			main_win->trigger_button->copy_label("Trigger Conditions");
+			my_window->trigger_select_mode = 0;
+			my_window->trigger_button->copy_label("Trigger Conditions");
 			hide();
 			flag = 1;
 		}
@@ -78308,10 +80404,10 @@ void	TriggerWindow::show()
 
 void	TriggerWindow::hide()
 {
-	main_win->trigger_select_mode = 0;
-	if(main_win->trigger_button != NULL)
+	my_window->trigger_select_mode = 0;
+	if(my_window->trigger_button != NULL)
 	{
-		main_win->trigger_button->copy_label("Trigger Conditions");
+		my_window->trigger_button->copy_label("Trigger Conditions");
 	}
 	Dialog::hide();
 }
@@ -78321,7 +80417,7 @@ void	TriggerWindow::Update()
 int		loop;
 char	buf[256];
 
-	Camera *cam = main_win->DisplayedCamera();
+	Camera *cam = my_window->DisplayedCamera();
 	if(cam != NULL)
 	{
 		for(loop = 0;loop < 7;loop++)
@@ -78356,7 +80452,7 @@ char	buf[256];
 			}
 			if(loop == BUTTON_ON_DETECT_OBJECT)
 			{
-				if((main_win->net.empty()) || (main_win->use_dnn_cuda == 0))
+				if((my_window->net.empty()) || (my_window->use_dnn_cuda == 0))
 				{
 					trigger[loop]->deactivate();
 				}
@@ -78374,6 +80470,24 @@ char	buf[256];
 				if(xx > w())
 				{
 					resize(x(), y(), xx, h());
+				}
+			}
+		}
+		darkness_slider->value(cam->darkness_trigger);
+		volume_slider->value(cam->sound_trigger);
+		sustain_slider->value(cam->sustain_recording);
+		for(loop = 0;loop < audio_alias_button_cnt;loop++)
+		{
+			if(audio_alias[loop] != NULL)
+			{
+				audio_alias[loop]->value(0);
+				char *lbl = (char *)audio_alias[loop]->label();
+				if(lbl != NULL)
+				{
+					if(cam->IsMyTriggerMic(lbl) > -1)
+					{
+						audio_alias[loop]->value(1);
+					}
 				}
 			}
 		}
@@ -80629,7 +82743,7 @@ char	local_path[4096];
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in %s before: %s\n", path, error_ptr);
 			}
 		}
 		else
@@ -80932,6 +83046,8 @@ void	show_help()
 	printf("dvptz --width=640\n\n");
 	printf("# Set preferred video height to 480\n");
 	printf("dvptz --height=480\n\n");
+	printf("# Set the delay time for onscreen messages during startup, in millionths of a second.\n");
+	printf("dvptz --message_delay=10000\n\n");
 	printf("# Scale the interface to system wide screen scaling.\n");
 	printf("dvptz --auto_scale\n\n");
 	printf("# Remove the main window border.\n");
@@ -80992,18 +83108,10 @@ void	show_help()
 	printf("dvptz --ptz_home.\n\n");
 	printf("# Initialize object detection. Without this object detection is not offered.\n");
 	printf("dvptz --object_detect\n\n");
-	printf("# Use alternate DNN/YOLO files for recognition. If anyone one of these is provided,\n");
-	printf("# the other two must also be present. The default values are:\n");
-	printf("# \t\"yolov3-openimages.cfg\"\n");
-	printf("# \t\"yolov3-openimages.weights\"\n");
-	printf("# \t\"openimages.names\"\n");
-	printf("# Or, depending on the value of --yolo_model=\n");
-	printf("# \t\"yolov3.cfg\"\n");
-	printf("# \t\"yolov3.weights\"\n");
-	printf("# \t\"coco.names\"\n");
-	printf("dvptz --yolo_cfg=cfg_filename --yolo_weights=weights_filename --yolo_names=names_filename\n\n");
-	printf("# Use the default YOLO filenames for COCO or OpenImages. This defaults to OpenImages.\n");
-	printf("dvptz --yolo_model=coco\n\n");
+	printf("# Use alternate DNN/YOLO files for recognition.\n");
+	printf("# \t\"Models/yolov8m-oiv7.onnx\"\n");
+	printf("# \t\"open_images.txt\"\n");
+	printf("dvptz --yolo_onnx=onnx_filename --yolo_names=names_filename\n\n");
 	printf("# If JPEG streaming is turned on, stream the current camera's image to\n");
 	printf("# a custom server running at www.example.com on port 20000. Port 20001\n");
 	printf("# will be used as the PTZ control port. If port 10000 was selected\n");
@@ -81091,7 +83199,7 @@ void	show_help()
 	printf("dvptz --use_stderr\n\n");
 }
 
-void	parse_ptz_source_string(char *in_path, char *path, char *alias, char *lock_alias, char *bind_alias, int& lock_number, int& prefer_ndi_ptz, int& prefer_v4l, int& auto_focus, int& auto_exposure, int& accelerate, int& click_pt, int& digital_zoom, int& soft_memory, int& backlight, int& follow, int& reverse_h, int& reverse_v)
+void	parse_ptz_source_string(char *in_path, char *path, char *alias, char *lock_alias, char *bind_alias, int& lock_number, int& prefer_ndi_ptz, int& prefer_v4l, int& auto_focus, int& auto_exposure, int& accelerate, int& click_pt, int& digital_zoom, int& soft_memory, int& backlight, int& follow, int& reverse_h, int& reverse_v, int& start_position)
 {
 char tmp[4092];
 
@@ -81109,6 +83217,7 @@ char tmp[4092];
 	reverse_h = 0;
 	reverse_v = 0;
 	lock_number = 0;
+	start_position = -1;
 	strcpy(lock_alias, "");
 	strcpy(bind_alias, "");
 	strcpy(alias, "");
@@ -81186,6 +83295,22 @@ char tmp[4092];
 			strcpy(alias, cp2);
 			cp++;
 		}
+		else if(strncmp(cp, "[position=", strlen("[position=")) == 0)
+		{
+			*cp = '\0';
+			cp += strlen("[position=");
+			char *cp2 = cp;
+			while((*cp != '\0') && (*cp != ']'))
+			{
+				cp++;
+			}
+			if(*cp == ']')
+			{
+				*cp = '\0';
+			}
+			start_position = atoi(cp2);
+			cp++;
+		}
 		else if(strncmp(cp, "[ndi]", strlen("[ndi]")) == 0)
 		{
 			cp += strlen("[ndi]");
@@ -81254,7 +83379,7 @@ char tmp[4092];
 	strcpy(path, orig_cp);
 }
 
-MyWin *StartMain(int updates)
+MyWin *StartMain(int updates, int fast_start = 0)
 {
 void	enumerate_codecs();
 void	enumerate_test(MyWin *in_win, void (*output_cb)(char *), int test_w, int test_h, int test_fps, int test_hz);
@@ -81269,9 +83394,12 @@ int			load_state = 1;
 char		local_buf[32768];
 
 	start_win->use_updates = updates;
-	sleep(2);
-	start_win->Update("Starting...");
-	sleep(1);
+	if(fast_start == 0)
+	{
+		sleep(2);
+		start_win->Update("Starting...");
+		sleep(1);
+	}
 	int argc = global_argc;
 	int source_cnt = 0;
 	int audio_source_cnt = 0;
@@ -81304,10 +83432,8 @@ char		local_buf[32768];
 	int	use_follow_mode = FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY;
 	int use_transition = 0;
 	int use_ptz_home_on_launch = 0;
-	char *use_yolo_cfg = NULL;
-	char *use_yolo_weights = NULL;
+	char *use_yolo_onnx = NULL;
 	char *use_yolo_names = NULL;
-	int use_yolo_model = USE_YOLO_MODEL_OPEN_IMAGES;
 	char *use_ptz_device_path[NUMBER_OF_INTERFACES];
 	char *use_ptz_lock_alias[NUMBER_OF_INTERFACES][NUMBER_OF_CAMERAS];
 	char *use_ptz_alias[NUMBER_OF_INTERFACES];
@@ -81324,6 +83450,7 @@ char		local_buf[32768];
 	int	use_ptz_follow[NUMBER_OF_INTERFACES];
 	int	use_ptz_reverse_h[NUMBER_OF_INTERFACES];
 	int	use_ptz_reverse_v[NUMBER_OF_INTERFACES];
+	int	use_ptz_start_position[NUMBER_OF_INTERFACES];
 	char *use_jpeg_streaming = NULL;
 	int use_streaming = 0;
 	char *use_stream_url = NULL;
@@ -81351,6 +83478,7 @@ char		local_buf[32768];
 		use_ptz_follow[loop] = 0;
 		use_ptz_reverse_h[loop] = 0;
 		use_ptz_reverse_v[loop] = 0;
+		use_ptz_start_position[loop] = -1;
 	}
 	int use_ptz_device_path_cnt = 0;
 	char new_mux_format[256];
@@ -81404,6 +83532,8 @@ char		local_buf[32768];
 	double use_cycle_cameras = 0.0;
 	char use_encode_summary_file[4096];
 	int use_fullscreen = 0;
+	int use_fast_start = 0;
+	int use_fast_start_record = 0;
 	strcpy(use_encode_summary_file, "");
 	start_win->Update("Parsing Command Line Arguments...");
 	if(argc > 1)
@@ -81414,8 +83544,6 @@ char		local_buf[32768];
 			argv[loop] = global_argv[loop];
 			if(argv[loop] != NULL)
 			{
-				sprintf(local_buf, "Argument: %s", argv[loop]);
-				start_win->Update(local_buf);
 				if(strncmp(argv[loop], "--source=", strlen("--source=")) == 0)
 				{
 					if(source_cnt < 128)
@@ -81431,6 +83559,15 @@ char		local_buf[32768];
 						audio_source[audio_source_cnt] = strdup(argv[loop] + strlen("--audio_source="));
 						audio_source_cnt++;
 					}
+				}
+				else if(strncmp(argv[loop], "--fast_start=record", strlen("--fast_start=record")) == 0)
+				{
+					use_fast_start = 1;
+					use_fast_start_record = 1;
+				}
+				else if(strncmp(argv[loop], "--fast_start", strlen("--fast_start")) == 0)
+				{
+					use_fast_start = 1;
 				}
 				else if(strncmp(argv[loop], "--fullscreen", strlen("--fullscreen")) == 0)
 				{
@@ -81651,6 +83788,7 @@ char		local_buf[32768];
 						int follow = 0;
 						int reverse_h = 0;
 						int reverse_v = 0;
+						int start_position = -1;
 						parse_ptz_source_string(argv[loop]
 							, resulting_path
 							, alias, lock_alias
@@ -81667,7 +83805,8 @@ char		local_buf[32768];
 							, backlight
 							, follow
 							, reverse_h
-							, reverse_v);
+							, reverse_v
+							, start_position);
 						sprintf(local_buf, "Testing PTZ %s", resulting_path);
 						start_win->Update(local_buf);
 						int rr = TestPTZPort(resulting_path);
@@ -81689,6 +83828,7 @@ char		local_buf[32768];
 							use_ptz_follow[use_ptz_device_path_cnt] = follow;
 							use_ptz_reverse_h[use_ptz_device_path_cnt] = reverse_h;
 							use_ptz_reverse_v[use_ptz_device_path_cnt] = reverse_v;
+							use_ptz_start_position[use_ptz_device_path_cnt] = start_position;
 							use_ptz_device_path_cnt++;
 							sprintf(local_buf, "PTZ Found at %s", resulting_path);
 							start_win->Update(local_buf);
@@ -81703,25 +83843,13 @@ char		local_buf[32768];
 				{
 					use_ptz_home_on_launch = 1;
 				}
-				else if(strncmp(argv[loop], "--yolo_cfg=", strlen("--yolo_cfg=")) == 0)
+				else if(strncmp(argv[loop], "--yolo_onnx=", strlen("--yolo_onnx=")) == 0)
 				{
-					use_yolo_cfg = argv[loop] + strlen("--yolo_cfg=");
-				}
-				else if(strncmp(argv[loop], "--yolo_weights=", strlen("--yolo_weights=")) == 0)
-				{
-					use_yolo_weights = argv[loop] + strlen("--yolo_weights=");
+					use_yolo_onnx = argv[loop] + strlen("--yolo_onnx=");
 				}
 				else if(strncmp(argv[loop], "--yolo_names=", strlen("--yolo_names=")) == 0)
 				{
 					use_yolo_names = argv[loop] + strlen("--yolo_names=");
-				}
-				else if(strncmp(argv[loop], "--yolo_model=", strlen("--yolo_model=")) == 0)
-				{
-					char *cp = argv[loop] + strlen("--yolo_model=");
-					if(strcasecmp(cp, "coco") == 0)
-					{
-						use_yolo_model = USE_YOLO_MODEL_COCO;
-					}
 				}
 				else if(strncmp(argv[loop], "--jpeg_streaming=", strlen("--jpeg_streaming=")) == 0)
 				{
@@ -82037,100 +84165,103 @@ char		local_buf[32768];
 			}
 		}
 	}
-	start_win->Update("Opening plugins");
-	global_capture_plugin_handle = dlopen(global_capture_plugin_file, RTLD_NOW);
-	if(global_capture_plugin_handle != NULL)
+	if(fast_start == 0)
 	{
-		sprintf(local_buf, "Opening capture plugin file: %s", global_capture_plugin_file);
-		start_win->Update(local_buf);
-		void_capture_init_capture = (void *)dlsym(global_capture_plugin_handle, "init_capture");
-		void_capture_capture = (void *)dlsym(global_capture_plugin_handle, "capture");
-		void_capture_finish_capture = (void *)dlsym(global_capture_plugin_handle, "finish_capture");
-		if((void_capture_init_capture != NULL)
-		&& (void_capture_capture != NULL)	
-		&& (void_capture_finish_capture != NULL))
+		start_win->Update("Opening plugins");
+		global_capture_plugin_handle = dlopen(global_capture_plugin_file, RTLD_NOW);
+		if(global_capture_plugin_handle != NULL)
 		{
-			int (*capture_init)();
-			capture_init = (int (*)())void_capture_init_capture;
-			int nn = capture_init();
-		}
-	}
-	int cnt = 0;
-	for(outer = 0;outer < global_filter_plugin_file_cnt;outer++)
-	{
-		sprintf(local_buf, "Opening filter plugin file: %s", global_filter_plugin_file[outer]);
-		start_win->Update(local_buf);
-		global_plugin_handle[outer] = dlopen(global_filter_plugin_file[outer], RTLD_NOW);
-		if(global_plugin_handle[outer] != NULL)
-		{
-			void_pseudo_camera = (void *)dlsym(global_plugin_handle[outer], "pseudo_camera");
-			void_handle_events = (void *)dlsym(global_plugin_handle[outer], "handle_events");
-			for(loop = 0;loop < global_filter_plugin_cnt;loop++)
-			{
-				void_filter_plugin[cnt] = (void *)dlsym(global_plugin_handle[outer], global_filter_plugin[loop]);
-				if(void_filter_plugin[cnt] != NULL)
-				{
-					cnt++;
-				}
-			}
-			for(loop = 0;loop < global_audio_filter_plugin_cnt;loop++)
-			{
-				void_audio_filter_plugin[cnt] = (void *)dlsym(global_plugin_handle[outer], global_audio_filter_plugin[loop]);
-				if(void_audio_filter_plugin[cnt] != NULL)
-				{
-					cnt++;
-				}
-			}
-		}
-	}
-	global_filter_plugin_cnt = cnt;
-	cnt = 0;
-	for(outer = 0;outer < global_transition_plugin_file_cnt;outer++)
-	{
-		sprintf(local_buf, "Opening transition plugin file: %s", global_transition_plugin_file[outer]);
-		start_win->Update(local_buf);
-		global_transition_plugin_handle[outer] = dlopen(global_transition_plugin_file[outer], RTLD_NOW);
-		if(global_transition_plugin_handle[outer] != NULL)
-		{
-			void_transition_plugin = (void *)dlsym(global_transition_plugin_handle[outer], global_transition_plugin);
-		}
-	}
-	if(scan_for_ptz == 1)
-	{
-		start_win->Update("Scanning for PTZ");
-		char *final[256];
-		int nn = ScanViableTTYPorts(final);
-		sprintf(local_buf, "PTZs found: %d", nn);
-		start_win->Update(local_buf);
-		for(loop = 0;loop < nn;loop++)
-		{
-			sprintf(local_buf, "%d of %d PTZ found: %s", loop, nn, final[loop]);
+			sprintf(local_buf, "Opening capture plugin file: %s", global_capture_plugin_file);
 			start_win->Update(local_buf);
-			for(inner = 0;inner < NUMBER_OF_CAMERAS;inner++)
+			void_capture_init_capture = (void *)dlsym(global_capture_plugin_handle, "init_capture");
+			void_capture_capture = (void *)dlsym(global_capture_plugin_handle, "capture");
+			void_capture_finish_capture = (void *)dlsym(global_capture_plugin_handle, "finish_capture");
+			if((void_capture_init_capture != NULL)
+			&& (void_capture_capture != NULL)	
+			&& (void_capture_finish_capture != NULL))
 			{
-				use_ptz_lock_alias[use_ptz_device_path_cnt][inner] = strdup("");
+				int (*capture_init)();
+				capture_init = (int (*)())void_capture_init_capture;
+				int nn = capture_init();
 			}
-			use_ptz_bind_alias[use_ptz_device_path_cnt] = strdup("");
-			use_ptz_alias[use_ptz_device_path_cnt] = strdup("");
-			use_ptz_device_path[use_ptz_device_path_cnt] = strdup(final[loop]);
-			use_ptz_prefer_ndi[use_ptz_device_path_cnt] = 0;
-			use_ptz_prefer_v4l[use_ptz_device_path_cnt] = 0;
-			use_ptz_auto_focus[use_ptz_device_path_cnt] = 0;
-			use_ptz_auto_exposure[use_ptz_device_path_cnt] = 0;
-			use_ptz_accelerate[use_ptz_device_path_cnt] = 0;
-			use_ptz_click_pt[use_ptz_device_path_cnt] = 0;
-			use_ptz_digital_zoom[use_ptz_device_path_cnt] = 0;
-			use_ptz_soft_memory[use_ptz_device_path_cnt] = 0;
-			use_ptz_backlight[use_ptz_device_path_cnt] = 0;
-			use_ptz_follow[use_ptz_device_path_cnt] = 0;
-			use_ptz_reverse_h[use_ptz_device_path_cnt] = 0;
-			use_ptz_reverse_v[use_ptz_device_path_cnt] = 0;
-			use_ptz_device_path_cnt++;
-			free(final[loop]);
 		}
+		int cnt = 0;
+		for(outer = 0;outer < global_filter_plugin_file_cnt;outer++)
+		{
+			sprintf(local_buf, "Opening filter plugin file: %s", global_filter_plugin_file[outer]);
+			start_win->Update(local_buf);
+			global_plugin_handle[outer] = dlopen(global_filter_plugin_file[outer], RTLD_NOW);
+			if(global_plugin_handle[outer] != NULL)
+			{
+				void_pseudo_camera = (void *)dlsym(global_plugin_handle[outer], "pseudo_camera");
+				void_handle_events = (void *)dlsym(global_plugin_handle[outer], "handle_events");
+				for(loop = 0;loop < global_filter_plugin_cnt;loop++)
+				{
+					void_filter_plugin[cnt] = (void *)dlsym(global_plugin_handle[outer], global_filter_plugin[loop]);
+					if(void_filter_plugin[cnt] != NULL)
+					{
+						cnt++;
+					}
+				}
+				for(loop = 0;loop < global_audio_filter_plugin_cnt;loop++)
+				{
+					void_audio_filter_plugin[cnt] = (void *)dlsym(global_plugin_handle[outer], global_audio_filter_plugin[loop]);
+					if(void_audio_filter_plugin[cnt] != NULL)
+					{
+						cnt++;
+					}
+				}
+			}
+		}
+		global_filter_plugin_cnt = cnt;
+		cnt = 0;
+		for(outer = 0;outer < global_transition_plugin_file_cnt;outer++)
+		{
+			sprintf(local_buf, "Opening transition plugin file: %s", global_transition_plugin_file[outer]);
+			start_win->Update(local_buf);
+			global_transition_plugin_handle[outer] = dlopen(global_transition_plugin_file[outer], RTLD_NOW);
+			if(global_transition_plugin_handle[outer] != NULL)
+			{
+				void_transition_plugin = (void *)dlsym(global_transition_plugin_handle[outer], global_transition_plugin);
+			}
+		}
+		if(scan_for_ptz == 1)
+		{
+			start_win->Update("Scanning for PTZ");
+			char *final[256];
+			int nn = ScanViableTTYPorts(final);
+			sprintf(local_buf, "PTZs found: %d", nn);
+			start_win->Update(local_buf);
+			for(loop = 0;loop < nn;loop++)
+			{
+				sprintf(local_buf, "%d of %d PTZ found: %s", loop, nn, final[loop]);
+				start_win->Update(local_buf);
+				for(inner = 0;inner < NUMBER_OF_CAMERAS;inner++)
+				{
+					use_ptz_lock_alias[use_ptz_device_path_cnt][inner] = strdup("");
+				}
+				use_ptz_bind_alias[use_ptz_device_path_cnt] = strdup("");
+				use_ptz_alias[use_ptz_device_path_cnt] = strdup("");
+				use_ptz_device_path[use_ptz_device_path_cnt] = strdup(final[loop]);
+				use_ptz_prefer_ndi[use_ptz_device_path_cnt] = 0;
+				use_ptz_prefer_v4l[use_ptz_device_path_cnt] = 0;
+				use_ptz_auto_focus[use_ptz_device_path_cnt] = 0;
+				use_ptz_auto_exposure[use_ptz_device_path_cnt] = 0;
+				use_ptz_accelerate[use_ptz_device_path_cnt] = 0;
+				use_ptz_click_pt[use_ptz_device_path_cnt] = 0;
+				use_ptz_digital_zoom[use_ptz_device_path_cnt] = 0;
+				use_ptz_soft_memory[use_ptz_device_path_cnt] = 0;
+				use_ptz_backlight[use_ptz_device_path_cnt] = 0;
+				use_ptz_follow[use_ptz_device_path_cnt] = 0;
+				use_ptz_reverse_h[use_ptz_device_path_cnt] = 0;
+				use_ptz_reverse_v[use_ptz_device_path_cnt] = 0;
+				use_ptz_start_position[use_ptz_device_path_cnt] = -1;
+				use_ptz_device_path_cnt++;
+				free(final[loop]);
+			}
+		}
+		list_shared_exports(start_win, "Plugins");
 	}
-	list_shared_exports(start_win, "Plugins");
-
 	if(auto_scale == 1)
 	{
 		double use_scale = (double)Fl::h() / 1080.0;
@@ -82159,17 +84290,20 @@ char		local_buf[32768];
 		}
 		default_window_height = Fl::h() - (nn / 2);
 	}
-	if((global_my_format_cnt == 0) && (query_codecs == 1))
+	if(fast_start == 0)
 	{
-		start_win->Update("Querying CODECS");
-		enumerate_codecs();
-		if(test_codecs == 1)
+		if((global_my_format_cnt == 0) && (query_codecs == 1))
 		{
-			if(new_output_width == -1)
-				new_output_width = new_width;
-			if(new_output_height == -1)
-				new_output_height = new_height;
-			enumerate_test(NULL, NULL, new_output_width, new_output_height, (int)new_fps, use_streaming_audio_quality);
+			start_win->Update("Querying CODECS");
+			enumerate_codecs();
+			if(test_codecs == 1)
+			{
+				if(new_output_width == -1)
+					new_output_width = new_width;
+				if(new_output_height == -1)
+					new_output_height = new_height;
+				enumerate_test(NULL, NULL, new_output_width, new_output_height, (int)new_fps, use_streaming_audio_quality);
+			}
 		}
 	}
 	if(load_state == 1)
@@ -82233,11 +84367,10 @@ char		local_buf[32768];
 		, use_ptz_follow
 		, use_ptz_reverse_h
 		, use_ptz_reverse_v
+		, use_ptz_start_position
 		, use_ptz_alias
 		, use_ptz_home_on_launch
-		, use_yolo_model
-		, use_yolo_cfg
-		, use_yolo_weights
+		, use_yolo_onnx
 		, use_yolo_names
 		, use_jpeg_streaming
 		, use_streaming
@@ -82273,6 +84406,7 @@ char		local_buf[32768];
 		, use_joystick_path
 		, use_borderless
 		, use_cycle_cameras
+		, use_fast_start
 		, "DVPTZ");
 	win->color(WHITE);
 	win->end();
@@ -82353,9 +84487,6 @@ char		local_buf[32768];
 		win->SelectCamera(use_select_camera);
 	}
 	start_win->Update("Opening supplemental windows");
-	TriggerWindow *tw = new TriggerWindow(win);
-	win->trigger_window = tw;
-	tw->hide();
 
 	start_win->Update("Opening Status Window");
 	win->status_window = new StatusWindow(win, 400, 200, "Status");
@@ -82496,6 +84627,10 @@ char		local_buf[32768];
 			win->LoadJSON("default_setup.json");
 		}
 	}
+	TriggerWindow *tw = new TriggerWindow(win);
+	win->trigger_window = tw;
+	tw->hide();
+
 	if(start_win->message_delay > 0)
 	{
 		usleep(start_win->message_delay);
@@ -82517,6 +84652,10 @@ char		local_buf[32768];
 	if(win->continuous_audio_scan == 1)
 	{
 		create_task((int (*)(int *))ongoing_audio_scan_thread, (void *)win);
+	}
+	if(use_fast_start_record == 1)
+	{
+		Fl::add_timeout(1.0, fast_start_record_cb, win);
 	}
 	return(win);
 }
@@ -82706,7 +84845,8 @@ struct tm	*tm;
 
 	int html = 0;
 	int placard = 1;
-	int message_delay = 0;
+	int fast_start = 0;
+	int message_delay = 100000;
 	int run_it = 1;
 	int ndi_notice = 0;
 	int use_stderr = 0;
@@ -82733,6 +84873,13 @@ struct tm	*tm;
 		{
 			placard = 0;
 		}
+		if(strncmp(argv[loop], "--fast_start", strlen("--fast_start")) == 0)
+		{
+			fast_start = 1;
+			placard = 0;
+			global_html = 0;
+			run_it = 0;
+		}
 		global_argv[loop] = strdup(argv[loop]);
 		global_argc = argc;
 	}
@@ -82751,11 +84898,47 @@ struct tm	*tm;
 			{
 				void (*init_cef)(int, int, char **);
 				init_cef = (void (*)(int, int, char **))void_initialize_cef;
-				if((access("icudtl.dat", F_OK) == F_OK)
-				&& (access("v8_context_snapshot.bin", F_OK) == F_OK)
-				&& (access("resources.pak", F_OK) == F_OK)
-				&& (access("chrome_100_percent.pak", F_OK) == F_OK)
-				&& (access("chrome_200_percent.pak", F_OK) == F_OK))
+
+				Dl_info info;
+				char full_path[4096];
+				char dir_path[4096];
+				strcpy(full_path, "");
+				strcpy(dir_path, "");
+
+				dladdr(void_initialize_cef, &info);
+				strcpy(full_path, info.dli_fname);
+				const char *file_start = fl_filename_name(full_path);
+				size_t len = file_start - full_path;
+				strncpy(dir_path, full_path, len);
+
+				char test_path[8192];
+				int no_go = 0;
+				sprintf(test_path, "%s%s", dir_path, "icudtl.dat");
+				if(access(test_path, F_OK) != F_OK)
+				{
+					no_go = 1;
+				}
+				sprintf(test_path, "%s%s", dir_path, "v8_context_snapshot.bin");
+				if(access(test_path, F_OK) != F_OK)
+				{
+					no_go = 1;
+				}
+				sprintf(test_path, "%s%s", dir_path, "resources.pak");
+				if(access(test_path, F_OK) != F_OK)
+				{
+					no_go = 1;
+				}
+				sprintf(test_path, "%s%s", dir_path, "chrome_100_percent.pak");
+				if(access(test_path, F_OK) != F_OK)
+				{
+					no_go = 1;
+				}
+				sprintf(test_path, "%s%s", dir_path, "chrome_200_percent.pak");
+				if(access(test_path, F_OK) != F_OK)
+				{
+					no_go = 1;
+				}
+				if(no_go == 0)
 				{
 					init_cef(global_html, argc, argv);
 				}
@@ -82776,26 +84959,29 @@ struct tm	*tm;
 			}
 		}
 	}
-	global_osg_handle = dlopen("libosg_camera.so", RTLD_NOW);
-	if(global_osg_handle != NULL)
+	if(fast_start == 0)
 	{
-		void_OSG_get_scene_data = (void *)dlsym(global_osg_handle, "OSG_get_scene_data");
-		void_OSG_Translate = (void *)dlsym(global_osg_handle, "OSG_Translate");
-		void_OSG_Rotate = (void *)dlsym(global_osg_handle, "OSG_Rotate");
-		void_OSG_Scale = (void *)dlsym(global_osg_handle, "OSG_Scale");
-		void_OSG_open_osg = (void *)dlsym(global_osg_handle, "OSG_open_osg");
-		if((void_OSG_Translate != NULL)
-		&& (void_OSG_Rotate != NULL)
-		&& (void_OSG_Scale != NULL)
-		&& (void_OSG_open_osg != NULL))
+		global_osg_handle = dlopen("libosg_camera.so", RTLD_NOW);
+		if(global_osg_handle != NULL)
 		{
-			global_osg_enabled = 1;
+			void_OSG_get_scene_data = (void *)dlsym(global_osg_handle, "OSG_get_scene_data");
+			void_OSG_Translate = (void *)dlsym(global_osg_handle, "OSG_Translate");
+			void_OSG_Rotate = (void *)dlsym(global_osg_handle, "OSG_Rotate");
+			void_OSG_Scale = (void *)dlsym(global_osg_handle, "OSG_Scale");
+			void_OSG_open_osg = (void *)dlsym(global_osg_handle, "OSG_open_osg");
+			if((void_OSG_Translate != NULL)
+			&& (void_OSG_Rotate != NULL)
+			&& (void_OSG_Scale != NULL)
+			&& (void_OSG_open_osg != NULL))
+			{
+				global_osg_enabled = 1;
+			}
 		}
 	}
+	int no_go = 0;
 	NDILib = NULL;
 	hNDILib = NULL;
 	DynamicallyLoadNDILibrary("libndi.so");
-	int no_go = 0;
 	if(NDILib != NULL)
 	{
 		if(!NDILib->NDIlib_initialize())
@@ -82878,25 +85064,27 @@ struct tm	*tm;
 		{
 			global_folder_mat = Mat(folder_WIDTH, folder_HEIGHT, CV_8UC4, folder_bytes);
 		}
-		if(access("color_palette.json", F_OK) == 0)
+		if(fast_start == 0)
 		{
-			load_global_palette_as_JSON();
-		}
-		else
-		{
-			for(loop = 0;loop < 32;loop++)
+			if(access("color_palette.json", F_OK) == 0)
 			{
-				global_palette_red[loop] = (int)(drand48() * 255.0);
-				global_palette_green[loop] = (int)(drand48() * 255.0);
-				global_palette_blue[loop] = (int)(drand48() * 255.0);
-				global_palette_alpha[loop] = 255;
+				load_global_palette_as_JSON();
 			}
-			save_global_palette_as_JSON();
+			else
+			{
+				for(loop = 0;loop < 32;loop++)
+				{
+					global_palette_red[loop] = (int)(drand48() * 255.0);
+					global_palette_green[loop] = (int)(drand48() * 255.0);
+					global_palette_blue[loop] = (int)(drand48() * 255.0);
+					global_palette_alpha[loop] = 255;
+				}
+				save_global_palette_as_JSON();
+			}
 		}
 		start_win = new StartWindow(message_delay, use_stderr, 0, 0, ww, hh, global_argc + 1, "Starting");
 		start_win->box(FL_FLAT_BOX);
 		start_win->show();
-
 		if(placard == 1)
 		{
 			int	pipe_in = -1;
@@ -82941,7 +85129,7 @@ struct tm	*tm;
 		else
 		{
 			start_win->hide();
-			MyWin *my_window = StartMain(0);
+			MyWin *my_window = StartMain(0, fast_start);
 			my_window->show();
 			Fl::run();
 		}

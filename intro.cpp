@@ -9,6 +9,7 @@
 #include <FL/Fl.H>
 #include <FL/Fl_Window.H>
 #include <FL/Fl_Double_Window.H>
+#include <FL/Fl_Hold_Browser.H>
 #include <FL/platform.H>
 #include <FL/fl_draw.H>
 

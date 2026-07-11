@@ -1,4 +1,4 @@
-#define	DVPTZ_VERSION_NUMBER		"0.1.001"
+#define	DVPTZ_VERSION_NUMBER		"0.1.002"
 #define	CURRENT_YEAR				2026
 
 class	GenericPopupMenu : public Fl_Window
@@ -16,4 +16,3 @@ public:
 	Fl_Hold_Browser	*browser;
 	time_t			start_time;
 };
-

@@ -7,8 +7,8 @@ CEF_PATH=/home/laser/Downloads/OffScreenCEF/thirdparty/cef_binary
 
 MARCH=-m64
 
-# DBUG=-O3 $(MARCH) -D_FILE_OFFSET_BITS=64
-DBUG=-ggdb $(MARCH) -D_FILE_OFFSET_BITS=64 -DDEBUG=1
+DBUG=-O3 $(MARCH) -D_FILE_OFFSET_BITS=64
+# DBUG=-ggdb $(MARCH) -D_FILE_OFFSET_BITS=64 -DDEBUG=1
 
 EXAMPLES = dvptz intro
 
@@ -17,7 +17,7 @@ EXAMPLES = dvptz intro
 MCXX=clang++
 MCC=clang
 
-INCS = folder.h argv_split.h dr_mp3.h embed_app.h html_window.h muxer.h PulseAudio.h dvptz.h dr_flac.h dr_wav.h image_memory.h osg.h render_html.h vlc_window.h video_player.h
+INCS = folder.h argv_split.h dr_mp3.h embed_app.h html_window.h muxer.h PulseAudio.h dvptz.h dr_flac.h dr_wav.h image_memory.h osg.h render_html.h vlc_window.h video_player.h common.h
 
 CFLAGS = $(DBUG) -fno-diagnostics-color -Wno-deprecated-declarations -Wno-unused-result -Wno-write-strings -c -DFLTK_HAVE_CAIRO -D_GNU_SOURCE -D_REENTRANT -DFLTK_1_1 -I. -I/usr/include/python3.10 -I/usr/local/include/opencv4 -I/usr/local/include -I/usr/X11R6/include -I/usr/include/cairo -I/usr/local/include/ndi -I/usr/local/include/lunasvg -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/harfbuzz -I/usr/include/pango-1.0
 
@@ -94,7 +94,7 @@ vlc_window.o: vlc_window.cpp
 	@echo "Compile VLC Window"
 	$(MCXX) $(CFLAGS) vlc_window.cpp
 
-video_player.o: video_player.cpp
+video_player.o: video_player.cpp video_player.h common.h
 	@echo
 	@echo "Compile Video Player"
 	$(MCXX) $(CFLAGS) video_player.cpp
@@ -121,7 +121,7 @@ embed_app.o : embed_app.cpp $(INCS)
 
 dvptz.o: dvptz.cpp $(INCS) 
 	@echo
-	@echo "Compile CowCam"
+	@echo "Compile dvptz"
 	$(MCXX) -D__STDC_CONSTANT_MACROS $(CFLAGS) -I$(CEF_PATH) -I$(CEF_PATH)/include dvptz.cpp 
 
 networking.o: networking.cpp $(INCS)

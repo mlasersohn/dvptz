@@ -46,7 +46,6 @@ public:
 			if((w != use_w) || (h != use_h))
 			{
 				free(raw);
-				// size_t
 				raw = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
 			}
 			memcpy(raw, buffer, static_cast<size_t>((size_t)w * (size_t)h * 4));
@@ -214,13 +213,27 @@ private:
 	IMPLEMENT_REFCOUNTING(BrowserClient);
 };
 
+class MyApp : public CefApp 
+{
+public:
+	void OnBeforeCommandLineProcessing( const CefString& process_type, CefRefPtr<CefCommandLine> command_line) override 
+	{
+		// Append the switch directly without manual string management
+		command_line->AppendSwitch("disable-gpu-sandbox");
+
+		CefString disable_dcheck = "disable-dcheck";
+		command_line->AppendSwitch(disable_dcheck);
+	}
+	IMPLEMENT_REFCOUNTING(MyApp);
+};
+
 class   HTML_Win
 {
 public:
 		HTML_Win(char *in_url, char *in_html, int transparent_background, char *in_extra_css, char *in_extra_js_once, char *in_extra_js_always, int ww, int hh);
 		~HTML_Win();
 
-	void    Draw();
+	void	Draw();
 	int	initialize(int argc, char **argv);
 	int	load(char *address, char *html_contents, int transparent_background, char *extra_css, char *extra_js_once, char *extra_js_always);
 	int	shutdown();

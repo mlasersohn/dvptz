@@ -80,7 +80,7 @@ typedef struct OutputStream
 class	Muxer
 {
 public:
-		Muxer(MyWin *, ReviewWin *, int);
+		Muxer(MyWin *, Camera *, ReviewWin *, int);
 		~Muxer();
 
 	double	Open(int audio_dev, double rate, int channels);
@@ -112,6 +112,8 @@ public:
 	MyWin	*my_window;
 	PulseMixer	*mixer;
 	ReviewWin	*review;
+	char		filename[4096];
+	Camera		*camera;
 	int	number_of_audio_samples;
 	int	encode_audio;
 	int	encode_video;

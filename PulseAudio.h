@@ -45,6 +45,7 @@ public:
 	double		volume2;
 	char		*device;
 	double		average;
+	SAMPLE		local_peak;
 	int			is_microphone;
 	void		*p_mp3;
 	void		*p_wav;
