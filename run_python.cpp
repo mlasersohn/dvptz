@@ -5,6 +5,7 @@
 
 #include "Python.h"
 #include "numpy/arrayobject.h"
+// COW COW #include "/home/laser/.local/lib/python3.10/site-packages/numpy/_core/include/numpy/arrayobject.h"
 
 #include "opencv2/opencv.hpp"
 

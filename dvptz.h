@@ -51,6 +51,7 @@
 #define	PTZ_ABSOLUTE_POSITION	29
 #define	PTZ_FOCUS		30
 #define	PTZ_ZOOM_AND_FOCUS	31
+#define	PTZ_CLEAR			32
 
 #define	PTZ_LITTLE_MOTION_MODE			0
 #define	PTZ_LITTLE_ZOOM_MODE			1
@@ -217,7 +218,8 @@
 #define	MY_KEY_OPEN_PTZ							59
 #define	MY_KEY_VOLUME_UP						60
 #define	MY_KEY_VOLUME_DOWN						61
-#define	MY_KEY_CYCLE_CROSSHAIR					62
+#define	MY_KEY_CYCLE_UP_CROSSHAIR				62
+#define	MY_KEY_CYCLE_DOWN_CROSSHAIR				63
 
 #define	FILTER_TYPE_VIDEO			0
 #define	FILTER_TYPE_AUDIO			1
@@ -481,6 +483,30 @@
 #define	GRID10_CROSSHAIR_MODE	6
 #define	GRID20_CROSSHAIR_MODE	7
 #define	RULER_CROSSHAIR_MODE	8
+#define	MEASURE_CROSSHAIR_MODE	9
+
+#define	PTZ_MIDDLE_MOUSE_DIGITAL_SCALING			0
+#define	PTZ_MIDDLE_MOUSE_ZOOMING					1
+#define	PTZ_MIDDLE_MOUSE_FOCUS						2
+#define	PTZ_MIDDLE_MOUSE_ZOOM_WITH_SPEED_CONTROL	3
+#define	PTZ_MIDDLE_MOUSE_TRANSPARENCY				4
+
+// Experimental algo to pan/tilt to center mouse click position
+#define POSITION_POLL_USLEEP		50000	// 50ms between position inquiries
+#define PAN_TILT_TOLERANCE			4		// stop when within this many units
+#define PAN_SPEED_MAX				12		// VISCA pan speed range: 1-18
+#define TILT_SPEED_MAX				8		// VISCA tilt speed range: 1-14
+#define PAN_SPEED_FLOOR				1		// minimum speed so motion doesn't stall near target
+#define TILT_SPEED_FLOOR			1
+#define PROPORTIONAL_SPAN			200		// error magnitude at which we hit max speed
+
+typedef struct
+{
+    volatile int      pan_delta;
+    volatile int      tilt_delta;
+    volatile uint32_t sequence;
+} RelativeTargetRequest_t;
+// COW COW
 
 typedef struct 
 {
@@ -530,6 +556,8 @@ class	HoverMenu;
 class	NewPTZWindow;
 class	SampleBox;
 class	VideoWindow;
+
+struct TileRect { int x, y, w, h; };
 
 class	SliderShortcutEntry
 {
@@ -3244,134 +3272,147 @@ public:
 class	Camera
 {
 public:
-					Camera(MyWin *in_win, int id, char *source, int num, double forced_fps, int requested_w, int requested_h, int rr = 0, int gg = 0, int bb = 0, int aa = 0, int t_rr = 255, int t_gg = 255, int t_bb = 255, int t_aa = 255, int chroma_color = CHROMA_ON_GREEN);
-					~Camera();
-	void			Resize(int ww, int hh);
-	void			Capture(int test_only = 0);
-	void			VideoEffects();
-	void			ZoomBoxDisplay();
-	VideoCapture    *CreateCameraCapture(char *source, int num);
-	void			StartCapture();
-	void			SnapshotFrame();
-	int				DetectObjects(int *, int *, int *, int *);
-	int				PostProcessRecognition(Mat &frame, Mat &outs, int *out_x, int *out_y, int *width, int *height);
-	int				Record();
-	int				SetBackendFlag(char *);
-	void			V4L_Command(int command);
-	void			V4L_RepeatCommand(int command);
-	int				V4L_Test();
-	int				V4L_Test2();
-	void			V4L_Motion(int direction);
-	void			PrepImageForNet(Mat in_mat);
-	void			AddPIP(PIP *);
-	void			AddPIPByCamera(Camera *in_cam, int in_embed);
-	void			RemovePIPByCamera(Camera *in_cam);
-	void			DrawPIP();
-	void			CompressImageWindowList();
-	void			AddImageWindow(Camera *cam);
-	void			OffsetPositionImageWindows(int off_x, int off_y);
-	void			OffsetScaleImageWindows(double factor_w, double factor_h);
-	void			RenderTextToMat(Mat *mat, char *text, int sx = -1, int sy = -1);
-	void			TextExtents(Mat *mat, char *lit, int& ext_w, int& ext_h);
-	void			CairoClock(Mat& mat, int show_digits, int xx, int yy, int ww, int hh, int in_hour, int in_min, int in_sec);
-	void			ScrollTextList(char *);
-	void			GrabSlideshow();
-	void			GrabWindow();
-	void			PositionAllButtonized();
-	void			AddImmediate(Immediate *in);
-	int				RemoveImmediate(Immediate *ptr);
-	int				FindImmediate(Immediate *ptr);
-	Immediate		*EventInImmediate();
-	void			GrabWindowImage(Window win, Mat& use_mat);
-	void			ColorIntensity(Mat frame, double red, double green, double blue, double alpha);
-	void			ShowImmediateList();
-	void			HideImmediateList();
-	void			DrawImageWindowsBefore(int current_layer, int check_only, Mat& in_mat, int& moving_element, int& someone_is_dragging);
-	void			DrawImageWindowsAfter();
-	void			HighlightImageWindows();
-	void			DrawEmbeddedPIP();
-	void			DrawImageWindowGrid(int grid_size);
-	void			DisplayAVWindow();
-	double			FocusScore(Mat use_mat);
-	void			SetSystemAlias();
-	void			ColorIt();
-	int				CheckRecursion(Camera *dest);
-	int				CheckRecurseChildren(Camera *in, Camera *find);
-	void			SetCairo();
-	void			DrawFilterDialogs();
-	void			RunFilters();
-	void			RunInstruments();
-	void			LowerALayer(int use_layer);
-	void			RaiseALayer(int use_layer);
-	int				FindLeft(void *sample, int layer, int xx, int yy, int ww, int hh);
-	int				FindRight(void *sample, int layer, int xx, int yy, int ww, int hh);
-	int				FindTop(void *sample, int layer, int xx, int yy, int ww, int hh);
-	int				FindBottom(void *sample, int layer, int xx, int yy, int ww, int hh);
-	void			PasteMat(Mat mat, int cx, int cy);
-	void			MiscCopyCommands();
-	void			BlurDetectedRegions();
-	void			DrawShapes();
-	void			HighlightShapes();
-	void			SaveImmediate(char *filename);
-	void			LoadImmediate(char *filename);
-	void			TimestampFrame();
-	void			TriggerSnapshot();
-	void			UnTriggerSnapshot();
-	void			GrabThisWindow();
-	void			RecordOn();
-	void			RecordOff();
-	int				Triggers();
-	int				ScheduleTrigger();
-	int				DarknessTrigger();
-	int				MotionTrigger();
-	int				Test4Motion();
-	int				ObjectTrigger();
-	int				SoundTrigger();
-	void			PaintRecognizedObjects(int test_run);
-	void			CaptureLoop();
-	void			TransferHotMat(Mat& in_mat);
-	void			Freeze();
-	void			Defrost();
-	void			RecvNDI(Mat& in_mat);
-	void			NDI_URL();
-	void			SaveAsJSON(FILE *fp);
-	void			ActivateBoundMics();
-	void			BindMics();
-	void			UnBindMics();
-	int				TriggerAlert();
-	int				DisplayAlert();
-	void			ReadVectorFile(Mat& mat, char *filename);
-	void			TestObjectDetection();
-	void			SetObjectInAllOtherCameras();
-	int				EventInFilter();
-	void			InsertAfter(Camera *dest);
-	void			InsertAsZero();
-	void			AddStandaloneDisplay(StandaloneDisplay *sd);
-	void			InitializeVariables();
-	void			Info();
-	char			*TypeString();
-	void			RotateFrame90(int direction, int time);
-	void			ImprintAlias();
-	int				TemplateMatch(Mat template_image, int& location_x, int& location_y);
-	void			PTZ_MoveToTemplate();
-	void			PTZ_CancelMovement();
-	void			RenderScrollingText(char *cp, int local_mode, int local_speed, int local_pause, int start_x, int start_y, int stop_x, int stop_y, int cycle, int restrict);
-	int				CountCollected();
-	void			ClearCollected();
-	void			ResizeAllCollectedRelative(void *use, int dx, int dy, int dw, int dh);
-	void			ZipLeftCollected();
-	void			GrowLeftCollected();
-	void			ZipRightCollected();
-	void			GrowRightCollected();
-	void			ZipUpCollected();
-	void			GrowUpCollected();
-	void			ZipDownCollected();
-	void			GrowDownCollected();
-	void			RestoreCollected();
-	void			DeleteCollected();
-	void			HideCollected();
-	void			ShowCollected();
-	int				IsMyTriggerMic(char *name);
+							Camera(MyWin *in_win, int id, char *source, int num, double forced_fps, int requested_w, int requested_h, int rr = 0, int gg = 0, int bb = 0, int aa = 0, int t_rr = 255, int t_gg = 255, int t_bb = 255, int t_aa = 255, int chroma_color = CHROMA_ON_GREEN);
+							~Camera();
+	void					Resize(int ww, int hh);
+	void					Capture(int test_only = 0);
+	void					VideoEffects();
+	void					ZoomBoxDisplay();
+	VideoCapture		    *CreateCameraCapture(char *source, int num);
+	void					StartCapture();
+	void					SnapshotFrame();
+	int						DetectObjects(int *, int *, int *, int *);
+	int						PostProcessRecognition(Mat &frame, Mat &outs, int *out_x, int *out_y, int *width, int *height);
+	int						DetectObjectsTiled(int *out_x, int *out_y, int *second_x, int *second_y);
+	int						FinalizeDetections(std::vector<int> &classIds, std::vector<float> &confidences, std::vector<cv::Rect> &boxes, int *out_x, int *out_y, int *second_x, int *second_y);
+	void					DecodeTileDetections(Mat &output, int tileOffsetX, int tileOffsetY, std::vector<int> &classIds, std::vector<float> &confidences, std::vector<cv::Rect> &boxes);
+	std::vector<TileRect>	MakeTiles(int frameW, int frameH, int tileSize, float overlapFrac);
+	int						Record();
+	int						SetBackendFlag(char *);
+	void					V4L_Command(int command);
+	void					V4L_RepeatCommand(int command);
+	int						V4L_Test();
+	int						V4L_Test2();
+	void					V4L_Motion(int direction);
+	void					PrepImageForNet(Mat in_mat);
+	void					AddPIP(PIP *);
+	void					AddPIPByCamera(Camera *in_cam, int in_embed);
+	void					RemovePIPByCamera(Camera *in_cam);
+	void					DrawPIP();
+	void					CompressImageWindowList();
+	void					AddImageWindow(Camera *cam);
+	void					OffsetPositionImageWindows(int off_x, int off_y);
+	void					OffsetScaleImageWindows(double factor_w, double factor_h);
+	void					RenderTextToMat(Mat *mat, char *text, int sx = -1, int sy = -1);
+	void					TextExtents(Mat *mat, char *lit, int& ext_w, int& ext_h);
+	void					CairoClock(Mat& mat, int show_digits, int xx, int yy, int ww, int hh, int in_hour, int in_min, int in_sec);
+	void					ScrollTextList(char *);
+	void					GrabSlideshow();
+	void					GrabWindow();
+	void					PositionAllButtonized();
+	void					AddImmediate(Immediate *in);
+	int						RemoveImmediate(Immediate *ptr);
+	int						FindImmediate(Immediate *ptr);
+	Immediate				*EventInImmediate();
+	void					GrabWindowImage(Window win, Mat& use_mat);
+	void					ColorIntensity(Mat frame, double red, double green, double blue, double alpha);
+	void					ShowImmediateList();
+	void					HideImmediateList();
+	void					DrawImageWindowsBefore(int current_layer, int check_only, Mat& in_mat, int& moving_element, int& someone_is_dragging);
+	void					DrawImageWindowsAfter();
+	void					HighlightImageWindows();
+	void					DrawEmbeddedPIP();
+	void					DrawImageWindowGrid(int grid_size);
+	void					DisplayAVWindow();
+	double					FocusScore(Mat use_mat);
+	void					SetSystemAlias();
+	void					ColorIt();
+	int						CheckRecursion(Camera *dest);
+	int						CheckRecurseChildren(Camera *in, Camera *find);
+	void					SetCairo();
+	void					DrawFilterDialogs();
+	void					RunFilters();
+	void					RunInstruments();
+	void					LowerALayer(int use_layer);
+	void					RaiseALayer(int use_layer);
+	int						FindLeft(void *sample, int layer, int xx, int yy, int ww, int hh);
+	int						FindRight(void *sample, int layer, int xx, int yy, int ww, int hh);
+	int						FindTop(void *sample, int layer, int xx, int yy, int ww, int hh);
+	int						FindBottom(void *sample, int layer, int xx, int yy, int ww, int hh);
+	void					PasteMat(Mat mat, int cx, int cy);
+	void					MiscCopyCommands();
+	void					BlurDetectedRegions();
+	void					DrawShapes();
+	void					HighlightShapes();
+	void					SaveImmediate(char *filename);
+	void					LoadImmediate(char *filename);
+	void					TimestampFrame();
+	void					TriggerSnapshot();
+	void					UnTriggerSnapshot();
+	void					GrabThisWindow();
+	void					RecordOn();
+	void					RecordOff();
+	int						Triggers();
+	int						ScheduleTrigger();
+	int						DarknessTrigger();
+	int						MotionTrigger();
+	int						Test4Motion();
+	int						ObjectTrigger();
+	int						SoundTrigger();
+	void					PaintRecognizedObjects(int test_run);
+	void					CaptureLoop();
+	void					TransferHotMat(Mat& in_mat);
+	void					Freeze();
+	void					Defrost();
+	void					RecvNDI(Mat& in_mat);
+	void					NDI_URL();
+	void					SaveAsJSON(FILE *fp);
+	void					ActivateBoundMics();
+	void					BindMics();
+	void					UnBindMics();
+	int						TriggerAlert();
+	int						DisplayAlert();
+	void					ReadVectorFile(Mat& mat, char *filename);
+	void					TestObjectDetection();
+	void					SetObjectInAllOtherCameras();
+	int						EventInFilter();
+	void					InsertAfter(Camera *dest);
+	void					InsertAsZero();
+	void					AddStandaloneDisplay(StandaloneDisplay *sd);
+	void					InitializeVariables();
+	void					Info();
+	char					*TypeString();
+	void					RotateFrame90(int direction, int time);
+	void					ImprintAlias();
+	int						TemplateMatch(Mat template_image, int& location_x, int& location_y);
+	void					PTZ_MoveToTemplate();
+	void					PTZ_CancelMovement();
+	void					RenderScrollingText(char *cp, int local_mode, int local_speed, int local_pause, int start_x, int start_y, int stop_x, int stop_y, int cycle, int restrict);
+	int						CountCollected();
+	void					ClearCollected();
+	void					ResizeAllCollectedRelative(void *use, int dx, int dy, int dw, int dh);
+	void					ZipLeftCollected();
+	void					GrowLeftCollected();
+	void					ZipRightCollected();
+	void					GrowRightCollected();
+	void					ZipUpCollected();
+	void					GrowUpCollected();
+	void					ZipDownCollected();
+	void					GrowDownCollected();
+	void					RestoreCollected();
+	void					DeleteCollected();
+	void					HideCollected();
+	void					ShowCollected();
+	int						IsMyTriggerMic(char *name);
+	void					StartDetectingObjects();
+	int						CheckObjectTrigger();
+	void					StopDetectingObjects();
+	int						IsDetectingObjects();
+	
+	int					stop_detecting_objects;
+	int					detecting_objects;
+	int					object_triggered;
+	pthread_mutex_t		capture_mutex;
 
 	Mat					template_image;
 	Mat					utility_mat;
@@ -3439,6 +3480,8 @@ public:
 	int					id;
 	int					orig_width;
 	int					orig_height;
+	int					starting_width;
+	int					starting_height;
 	int					capture_effects;
 	VideoCapture		*cap;
 	XImage				*shared_image;
@@ -3480,10 +3523,12 @@ public:
 	int					analog;
 	int					analog_size;
 	int					military_clock;
+	int					use_tiled_detection;
 	DetectedObject		detected_object[10];
 	int					detected_object_cnt;
 	int					detected_object_countdown;
 	int					object_index[1024];
+	int					following_object;
 	char				format_code[256];
 	char				*extra_url;
 	char				*extra_css;
@@ -3709,6 +3754,12 @@ public:
 	char				*blend_alias_one;
 	char				*blend_alias_two;
 	double				blend_amount;
+
+	int					recog_min_x;
+	int					recog_min_y;
+	int					recog_max_x;
+	int					recog_max_y;
+	int					recog_retain_cnt;
 };
 
 class	NewPTZWindow : public Dialog
@@ -3989,18 +4040,6 @@ public:
 	Fl_Input			*stop;
 	MyButton			*cancel;
 	MyButton			*accept;
-};
-
-class	AliasWindow : public Dialog
-{
-public:		
-				AliasWindow(MyWin *in_win);
-				~AliasWindow();
-	int			handle(int event);
-	void		show();
-
-	Fl_Input	*alias;
-	MyWin		*my_window;
 };
 
 class	DynamicStringWindow : public Dialog
@@ -4558,6 +4597,8 @@ public:
 			, int use_borderless
 			, double use_cycle_cameras
 			, int use_fast
+			, int use_threaded_object_recognition
+			, int use_tiled_object_recognition
 			, char *lbl);
 		~MyWin();
 	void	Shutdown();
@@ -4585,7 +4626,6 @@ public:
 	int			FindMovement(Camera *in_cam, int, int *, int *, int *, int *, int, int, int, int);
 	void		copy_interest(unsigned char *dest, unsigned char *src, int sz, int sx, int sy, int ex, int ey);
 	void		MakeNewSourceWindow();
-	void		MakeAliasWindow();
 	void		MakeDynamicStringWindow();
 	int			SetupCamera(char *source, char *alias, int req_w, int req_h, int font_sz, char *font_name = NULL, int rr = 0, int gg = 0, int bb = 0, int aa = 0, int t_rr = 255, int t_gg = 255, int t_bb = 255, int t_aa = 255, int chroma_color = CHROMA_ON_GREEN);
 	void		ResizeCapture(int source_n, int ww, int hh);
@@ -4865,7 +4905,8 @@ public:
 	void				ParseJSONPTZ_Windows(cJSON *json);
 	void				CloseMuxByFilename(char *in_filename);
 	void				DrawCrosshairs(Camera *cam);
-	void				CycleCrosshair();
+	void				CycleUpCrosshair();
+	void				CycleDownCrosshair();
 	void				LoadSliderShortcuts(char *filename);
 	void				SaveSliderShortcuts(char *filename);
 	void				AddSliderShortcut(char *path, int down, int up);
@@ -4943,6 +4984,7 @@ public:
 	int			image_sy;
 	int			recording;
 	int			init_detect;
+	int			tiled_detection;
 	int			use_mousewheel;
 	int			mouse_moving;
 	int			resize_capture;
@@ -5026,6 +5068,7 @@ public:
 	int			im_drawing_mode;
 	char		*recognize_class_name[1024];
 	int			recognize_class_cnt;
+	int			threading_object_recognition;
 	char		yolo_onnx_filename[4096];
 	char		yolo_names_filename[4096];
 	int			tag_recognized;
@@ -5139,6 +5182,7 @@ public:
 	int						initial_current_fps_y;
 	int						initial_video_out_x;
 	int						initial_video_out_y;
+	int						exit_warning;
 
 	PulseMicrophone	*pulse_microphone[128];
 	int				pulse_microphone_cnt;
@@ -5206,7 +5250,6 @@ public:
 	MenuButton	*edit_source_button;
 	MenuButton	*edit_output_button;
 	MenuButton	*select_output_button;
-	MenuButton	*alias_button;
 	MenuButton	*reset_camera_button;
 	MenuButton	*flip_horizontal_button;
 	MenuButton	*flip_vertical_button;
@@ -5277,7 +5320,6 @@ public:
 	TriggerWindow				*trigger_window;
 	StatusWindow				*status_window;
 	NewSourceWindow				*new_source_window;
-	AliasWindow					*alias_window;
 	DynamicStringWindow			*dynamic_string_window;
 	FltkPluginWindow			*fltk_plugin_window;
 	CommandKeySettingsWindow	*command_key_settings;
@@ -5338,7 +5380,6 @@ public:
 	int		dragging;
 	int		motion_debug;
 	int		split;
-	int		showing_alias_window;
 	int		encoding_frame_cnt;
 	int		redraw_cnt;
 	Net		net;
@@ -5398,7 +5439,7 @@ public:
 	pthread_mutex_t		ndi_send_mutex;
 	pthread_mutex_t		muxer_mutex;
 	pthread_mutex_t		visca_mutex;
-	pthread_cond_t		visca_cond;
+	sem_t				semaphore;
 	double				ptz_travel_x;
 	double				ptz_travel_y;
 	int					ptz_follow;

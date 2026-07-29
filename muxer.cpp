@@ -400,6 +400,19 @@ void print_codec_info(const AVCodec* codec)
             }
         }
         std::cout << "\nSupported Channel Layouts:" << std::endl;
+#if MUXER_HAS_NEW_CHANNEL_LAYOUT
+        if(codec->ch_layouts)
+		{
+            const AVChannelLayout* p = codec->ch_layouts;
+            while(p->nb_channels != 0)
+			{
+                char buf[128];
+                av_channel_layout_describe(p, buf, sizeof(buf));
+                std::cout << " - " << buf << std::endl;
+                p++;
+            }
+        }
+#else
         if(codec->channel_layouts) 
 		{
             const uint64_t* p = codec->channel_layouts;
@@ -411,6 +424,7 @@ void print_codec_info(const AVCodec* codec)
                 p++;
             }
         }
+#endif
     }
     std::cout << "-------------------------" << std::endl;
 }
@@ -489,27 +503,7 @@ void Muxer::add_stream(int use_nvidia, OutputStream *ost, AVFormatContext *oc, c
 				}
 				if(c->sample_rate != -1)
 				{
-					c->channels = av_get_channel_layout_nb_channels(c->channel_layout);
-					if(used_channels == 1)
-					{
-						c->channel_layout = AV_CH_LAYOUT_MONO;
-					}
-					else
-					{
-						c->channel_layout = AV_CH_LAYOUT_STEREO;
-					}
-					if((*codec)->channel_layouts) 
-					{
-						c->channel_layout = (*codec)->channel_layouts[0];
-						for(i = 0; (*codec)->channel_layouts[i]; i++) 
-						{
-							if((*codec)->channel_layouts[i] == AV_CH_LAYOUT_STEREO)
-							{
-								c->channel_layout = AV_CH_LAYOUT_STEREO;
-							}
-						}
-					}
-					c->channels = av_get_channel_layout_nb_channels(c->channel_layout);
+					mux_configure_codec_channels(c, *codec, used_channels);
 					ost->st->time_base = (AVRational){ 1, c->sample_rate };
 				}
 				else
@@ -584,7 +578,7 @@ void Muxer::add_stream(int use_nvidia, OutputStream *ost, AVFormatContext *oc, c
 }
 
 // audio output
-AVFrame *Muxer::alloc_audio_frame(enum AVSampleFormat sample_fmt, uint64_t channel_layout, int sample_rate, int nb_samples)
+AVFrame *Muxer::alloc_audio_frame(enum AVSampleFormat sample_fmt, int nb_channels, int sample_rate, int nb_samples)
 {
 int ret;
 
@@ -592,7 +586,7 @@ int ret;
 	if(frame) 
 	{
 		frame->format = sample_fmt;
-		frame->channel_layout = channel_layout;
+		mux_set_frame_channel_layout(frame, nb_channels);
 		frame->sample_rate = sample_rate;
 		frame->nb_samples = nb_samples;
 		if(nb_samples) 
@@ -647,14 +641,14 @@ AVDictionary *opt = NULL;
 	c->frame_size = 1024;
 	number_of_audio_samples = 1024;
 
-	ost->frame = alloc_audio_frame(c->sample_fmt, c->channel_layout, c->sample_rate, nb_samples);
+	ost->frame = alloc_audio_frame(c->sample_fmt, mux_codec_channel_count(c), c->sample_rate, nb_samples);
 	if(used_channels == 1)
 	{
-		ost->tmp_frame = alloc_audio_frame(AV_SAMPLE_FMT_S16, AV_CH_LAYOUT_MONO, c->sample_rate, nb_samples);
+		ost->tmp_frame = alloc_audio_frame(AV_SAMPLE_FMT_S16, 1, c->sample_rate, nb_samples);
 	}
 	else
 	{
-		ost->tmp_frame = alloc_audio_frame(AV_SAMPLE_FMT_S16, AV_CH_LAYOUT_STEREO, c->sample_rate, nb_samples);
+		ost->tmp_frame = alloc_audio_frame(AV_SAMPLE_FMT_S16, 2, c->sample_rate, nb_samples);
 	}
 	// copy the stream parameters to the muxer
 	ret = avcodec_parameters_from_context(ost->st->codecpar, c);
@@ -672,10 +666,9 @@ AVDictionary *opt = NULL;
 		return(-300);
 	}
 	// set options
-	av_opt_set_int	   (ost->swr_ctx, "in_channel_count",   c->channels,	   0);
+	mux_swr_set_channels(ost->swr_ctx, c);
 	av_opt_set_int	   (ost->swr_ctx, "in_sample_rate",	 c->sample_rate,	0);
 	av_opt_set_sample_fmt(ost->swr_ctx, "in_sample_fmt",	  AV_SAMPLE_FMT_S16, 0);
-	av_opt_set_int	   (ost->swr_ctx, "out_channel_count",  c->channels,	   0);
 	av_opt_set_int	   (ost->swr_ctx, "out_sample_rate",	c->sample_rate,	0);
 	av_opt_set_sample_fmt(ost->swr_ctx, "out_sample_fmt",	 c->sample_fmt,	 0);
 

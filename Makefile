@@ -7,8 +7,8 @@ CEF_PATH=/home/laser/Downloads/OffScreenCEF/thirdparty/cef_binary
 
 MARCH=-m64
 
-DBUG=-O3 $(MARCH) -D_FILE_OFFSET_BITS=64
-# DBUG=-ggdb $(MARCH) -D_FILE_OFFSET_BITS=64 -DDEBUG=1
+# DBUG=-O3 $(MARCH) -D_FILE_OFFSET_BITS=64
+DBUG=-ggdb $(MARCH) -D_FILE_OFFSET_BITS=64 -DDEBUG=1
 
 EXAMPLES = dvptz intro
 
@@ -19,7 +19,7 @@ MCC=clang
 
 INCS = folder.h argv_split.h dr_mp3.h embed_app.h html_window.h muxer.h PulseAudio.h dvptz.h dr_flac.h dr_wav.h image_memory.h osg.h render_html.h vlc_window.h video_player.h common.h
 
-CFLAGS = $(DBUG) -fno-diagnostics-color -Wno-deprecated-declarations -Wno-unused-result -Wno-write-strings -c -DFLTK_HAVE_CAIRO -D_GNU_SOURCE -D_REENTRANT -DFLTK_1_1 -I. -I/usr/include/python3.10 -I/usr/local/include/opencv4 -I/usr/local/include -I/usr/X11R6/include -I/usr/include/cairo -I/usr/local/include/ndi -I/usr/local/include/lunasvg -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/harfbuzz -I/usr/include/pango-1.0
+CFLAGS = $(DBUG) -fno-diagnostics-color -Wno-c++17-extensions -Wno-deprecated-declarations -Wno-unused-result -Wno-write-strings -c -DFLTK_HAVE_CAIRO -D_GNU_SOURCE -D_REENTRANT -DFLTK_1_1 -I. -I/usr/include/python3.10 -I/usr/local/include/opencv4 -I/usr/local/include -I/usr/X11R6/include -I/usr/include/cairo -I/usr/local/include/ndi -I/usr/local/include/lunasvg -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/harfbuzz -I/usr/include/pango-1.0 -I/usr/local/include/numpy
 
 LD = $(MCC)
 LDFLAGS = $(DBUG) -L/usr/local/lib -L/usr/lib -L/usr/X11R6/lib
@@ -28,7 +28,7 @@ AR = lib
 
 CVLIBS = -lrt -ljpeg -lm -lxml2 -lfontconfig -lexpat -lfreetype -lpng -lz
 
-STDDYN = -lopencv_imgproc -lopencv_videoio -lopencv_core -lopencv_imgcodecs -lopencv_highgui -lopencv_dnn -lopencv_objdetect -lavformat -lavcodec -lavutil -lswresample -lswscale -lavfilter -lpulse -lpulse-simple -lvlc -lpython3.10 -lcurl -luuid -lblend2d -lcairo -lfltk -lfltk_images -llunasvg -lplutovg -lrt -ljpeg -lXcursor -lX11 -lxcb -lXdmcp -lXau -lXext -lXtst -lm -lXft -lXrender -lXfixes -lXinerama -lXrender -lXcomposite -lxml2 -lfontconfig -lexpat -lfreetype -lfftw3 -lz -llzma -lvisca_ip -lbz2 -lircclient -lcjson -lmagic -lFLAC -lpangocairo-1.0 -lgobject-2.0 -lpango-1.0 -lasound -lstdc++
+STDDYN = -lopencv_imgproc -lopencv_videoio -lopencv_core -lopencv_imgcodecs -lopencv_highgui -lopencv_dnn -lopencv_objdetect -lavformat -lavcodec -lavutil -lswresample -lswscale -lavfilter -lpulse -lpulse-simple -lvlc -lpython3.10 -lcurl -luuid -lblend2d -lcairo -lfltk -lfltk_images -llunasvg -lplutovg -lrt -ljpeg -lXcursor -lX11 -lxcb -lXdmcp -lXau -lXext -lXtst -lm -lXft -lXrender -lXfixes -lXinerama -lXrender -lXcomposite -lxml2 -lfontconfig -lexpat -lfreetype -lfftw3 -lz -llzma -lvisca_ip -lbz2 -lircclient -lcjson -lmagic -lFLAC -lpangocairo-1.0 -lgobject-2.0 -lpango-1.0 -lasound -ludev -lstdc++
 
 all: $(EXAMPLES)
 

@@ -1,4 +1,4 @@
-#define	DVPTZ_VERSION_NUMBER		"0.1.002"
+#define	DVPTZ_VERSION_NUMBER		"0.1.003"
 #define	CURRENT_YEAR				2026
 
 class	GenericPopupMenu : public Fl_Window

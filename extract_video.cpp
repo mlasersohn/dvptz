@@ -88,13 +88,6 @@ int				frameFinished;
 int				numBytes;
 uint8_t			*buffer = NULL;
 
-int cow1 = 0;
-int cow2 = 0;
-int cow3 = 0;
-int cow4 = 0;
-int cow5 = 0;
-int cow6 = 0;
-
 	int rr = 0;
 	AVDictionary *optionsDict = NULL;
 	struct SwsContext *sws_ctx = NULL;
@@ -169,18 +162,15 @@ int cow6 = 0;
 									long int timecode = 0;
 									while(av_read_frame(pFormatCtx, &packet) >= 0)
 									{
-cow1++;
 										// Is this a packet from the video stream?
 										if(packet.stream_index == videoStream)
 										{
-cow2++;
 											// Decode video frame
 											avcodec_decode_video2(pCodecCtx, pFrame, &frameFinished, &packet);
 									
 											// Did we get a video frame?
 											if(frameFinished)
 											{
-cow3++;
 												// Convert the image from its native format to RGB
 												sws_scale(sws_ctx, 
 													(uint8_t const * const *)pFrame->data,
@@ -208,18 +198,15 @@ cow3++;
 								long int timecode = 0;
 								while(av_read_frame(pFormatCtx, &packet) >= 0)
 								{
-cow4++;
 									// Is this a packet from the video stream?
 									if(packet.stream_index == videoStream)
 									{
-cow5++;
 										// Decode video frame
 										avcodec_decode_video2(pCodecCtx, pFrame, &frameFinished, &packet);
 									
 										// Did we get a video frame?
 										if(frameFinished)
 										{
-cow6++;
 											// Convert the image from its native format to RGB
 											sws_scale(sws_ctx, 
 												(uint8_t const * const *)pFrame->data,

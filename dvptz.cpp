@@ -10,6 +10,9 @@
 #include	<dlfcn.h>
 #include	<dirent.h>
 #include	<libgen.h>
+#include	<libudev.h>
+#include	<linux/usbdevice_fs.h>
+#include	<semaphore.h>
 #include	<magic.h>
 
 #include <iostream>
@@ -291,6 +294,7 @@ void				*hNDILib;
 #define VU_METER_H		(180 * 0.5)
 
 Fl_Window		*global_log_window = NULL;
+MyWin			*global_my_window = NULL;
 
 char	*legal_url[] = {
 	"alert://",
@@ -493,6 +497,80 @@ struct	NamedKeys named_key[] = {
 
 
 // SECTION *********************************** UTILITY FUNCTIONS *******************************************
+
+int	 usb_device_udev_path(const char *dev_path, char *result, int sz_limit) 
+{
+	struct udev *udev = udev_new();
+	struct stat st;
+	
+	strcpy(result, "");
+	if(!udev || stat(dev_path, &st) < 0) return -1;
+
+	// Find the device object by its major/minor device numbers (works for video or tty)
+	char type = S_ISCHR(st.st_mode) ? 'c' : 'b';
+	struct udev_device *dev = udev_device_new_from_devnum(udev, type, st.st_rdev);
+	if(!dev) { udev_unref(udev); return -1; }
+
+	// Use udev to climb up straight to the parent USB device container
+	struct udev_device *usb_dev = udev_device_get_parent_with_subsystem_devtype(dev, "usb", "usb_device");
+	if (!usb_dev) { udev_device_unref(dev); udev_unref(udev); return -1; }
+
+	// Grab the strings directly managed by the kernel
+	const char *busnum = udev_device_get_sysattr_value(usb_dev, "busnum");
+	const char *devnum = udev_device_get_sysattr_value(usb_dev, "devnum");
+
+	char usb_path[64];
+	snprintf(usb_path, sizeof(usb_path), "/dev/bus/usb/%03d/%03d", atoi(busnum), atoi(devnum));
+
+	// Cleanup udev memory and fire the reset ioctl
+	udev_device_unref(dev);
+	udev_unref(udev);
+
+	strncpy(result, usb_path, sz_limit);
+	return(0);
+}
+
+int get_camera_clean_name(const char *dev_path, char *dest, size_t dest_len)
+{
+	int result = -1;
+	struct udev *udev = NULL;
+	struct udev_device *dev = NULL;
+	struct udev_device *usb_dev = NULL;
+	struct stat st;
+	char type = 'c';
+	const char *product_attr = NULL;
+
+	udev = udev_new();
+	if(udev != NULL)
+	{
+		if(stat(dev_path, &st) == 0)
+		{
+			if(!S_ISCHR(st.st_mode))
+			{
+				type = 'b';
+			}
+			dev = udev_device_new_from_devnum(udev, type, st.st_rdev);
+			if(dev != NULL)
+			{
+				/* Climb to the root USB device layer */
+				usb_dev = udev_device_get_parent_with_subsystem_devtype(dev, "usb", "usb_device");
+				if(usb_dev != NULL)
+				{
+					/* Read the original 'product' attribute from the hardware descriptor */
+					product_attr = udev_device_get_sysattr_value(usb_dev, "product");
+					if(product_attr != NULL)
+					{
+						snprintf(dest, dest_len, "%s", product_attr);
+						result = 0;
+					}
+				}
+				udev_device_unref(dev);
+			}
+		}
+		udev_unref(udev);
+	}
+	return result;
+}
 
 namespace 
 {
@@ -6900,13 +6978,14 @@ void	ResizeFrame::draw()
 		fl_color(BLACK);
 		fl_font(FL_HELVETICA, 8);
 		fl_draw(mode_str, use->x() + 25, use->y() + 12, 90, 14, FL_ALIGN_CENTER);
-		fl_color(color());
 		if(operation == FRAME_OPERATION_DELETE)
 		{
+			fl_color(RED);
 			fl_rect(use->x() + 10, use->y() + 13, 10, 10);
 			fl_font(FL_HELVETICA, 6);
 			fl_draw("X", use->x() + 11, use->y() + 14, 10, 10, FL_ALIGN_CENTER);
 		}
+		fl_color(color());
 	}
 	if(use != NULL)
 	{
@@ -7021,13 +7100,13 @@ int		ResizeFrame::handle(int event)
 	{
 		if(Fl::event_button() == FL_LEFT_MOUSE)
 		{
-			int xx = Fl::event_x();
-			int yy = Fl::event_y();
-			if((xx > x() + 10) && (yy > y() + 13)
-			&& (xx < x() + 20) && (yy < y() + 23)
-			&& (operation == FRAME_OPERATION_DELETE))
+			if(use != NULL)
 			{
-				if(use != NULL)
+				int xx = Fl::event_x();
+				int yy = Fl::event_y();
+				if((xx >= use->x() + 10) && (yy >= use->y() + 13)
+				&& (xx <= use->x() + 20) && (yy <= use->y() + 23)
+				&& (operation == FRAME_OPERATION_DELETE))
 				{
 					if(object_type == FRAME_OBJECT_TYPE_IMAGE_WINDOW)
 					{
@@ -7041,113 +7120,114 @@ int		ResizeFrame::handle(int event)
 						use = NULL;
 						Camera *cam = my_window->DisplayedCamera();
 						my_window->immediate_drawing_window->ClearSelectedWidget();
+						my_window->use_mousewheel = 1;
 						cam->RemoveImmediate(im);
 						Fl::delete_widget(im);
 					}
 					hide();
 					flag = 1;
 				}
-			}
-			else if((xx > x() + 25) && (yy > y() + 12)
-			&& (xx < x() + 115) && (yy < y() + 26))
-			{
-				if(Fl::event_state(FL_BUTTON1) == FL_BUTTON1)
+				else if((xx > use->x() + 25) && (yy > use->y() + 12)
+				&& (xx < use->x() + 115) && (yy < use->y() + 26))
 				{
-					operation++;
-					if(operation > FRAME_OPERATION_DELETE)
+					if(Fl::event_state(FL_BUTTON1) == FL_BUTTON1)
 					{
-						operation = FRAME_OPERATION_PROPORTIONAL_RESIZE;
+						operation++;
+						if(operation > FRAME_OPERATION_DELETE)
+						{
+							operation = FRAME_OPERATION_PROPORTIONAL_RESIZE;
+						}
+						flag = 1;
+						ignore_release = 1;
 					}
-					flag = 1;
-					ignore_release = 1;
 				}
-			}
-			else if(((xx > x()) && (xx < x() + 20))
-			&& ((yy > y()) && (yy < y() + 20)))
-			{
-				if(operation != FRAME_OPERATION_DELETE)
+				else if(((xx > x()) && (xx < x() + 20))
+				&& ((yy > y()) && (yy < y() + 20)))
 				{
-					mode = DRAG_MODE_LEFT_TOP;
-					drag_start_x = xx;
-					drag_start_y = yy;
-					flag = 1;
+					if(operation != FRAME_OPERATION_DELETE)
+					{
+						mode = DRAG_MODE_LEFT_TOP;
+						drag_start_x = xx;
+						drag_start_y = yy;
+						flag = 1;
+					}
 				}
-			}
-			else if(((xx > x()) && (xx < x() + 20))
-			&& ((yy < y() + h()) && (yy > y() + h() - 20)))
-			{
-				if(operation != FRAME_OPERATION_DELETE)
+				else if(((xx > x()) && (xx < x() + 20))
+				&& ((yy < y() + h()) && (yy > y() + h() - 20)))
 				{
-					mode = DRAG_MODE_LEFT_BOTTOM;
-					drag_start_x = xx;
-					drag_start_y = yy;
-					flag = 1;
+					if(operation != FRAME_OPERATION_DELETE)
+					{
+						mode = DRAG_MODE_LEFT_BOTTOM;
+						drag_start_x = xx;
+						drag_start_y = yy;
+						flag = 1;
+					}
 				}
-			}
-			else if(((xx < x() + w()) && (xx > x() + w() - 20))
-			&& ((yy < y() + h()) && (yy > y() + h() - 20)))
-			{
-				if(operation != FRAME_OPERATION_DELETE)
+				else if(((xx < x() + w()) && (xx > x() + w() - 20))
+				&& ((yy < y() + h()) && (yy > y() + h() - 20)))
 				{
-					mode = DRAG_MODE_RIGHT_BOTTOM;
-					drag_start_x = xx;
-					drag_start_y = yy;
-					flag = 1;
+					if(operation != FRAME_OPERATION_DELETE)
+					{
+						mode = DRAG_MODE_RIGHT_BOTTOM;
+						drag_start_x = xx;
+						drag_start_y = yy;
+						flag = 1;
+					}
 				}
-			}
-			else if(((xx < x() + w()) && (xx > x() + w() - 20))
-			&& ((yy > y()) && (yy < y() + 20)))
-			{
-				if(operation != FRAME_OPERATION_DELETE)
+				else if(((xx < x() + w()) && (xx > x() + w() - 20))
+				&& ((yy > y()) && (yy < y() + 20)))
 				{
-					mode = DRAG_MODE_RIGHT_TOP;
-					drag_start_x = xx;
-					drag_start_y = yy;
-					flag = 1;
+					if(operation != FRAME_OPERATION_DELETE)
+					{
+						mode = DRAG_MODE_RIGHT_TOP;
+						drag_start_x = xx;
+						drag_start_y = yy;
+						flag = 1;
+					}
 				}
-			}
-			else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
-			&& ((yy > y()) && (yy < y() + 16)))
-			{
-				if(operation != FRAME_OPERATION_DELETE)
+				else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
+				&& ((yy > y()) && (yy < y() + 16)))
 				{
-					mode = DRAG_MODE_TOP;
-					drag_start_x = xx;
-					drag_start_y = yy;
-					flag = 1;
+					if(operation != FRAME_OPERATION_DELETE)
+					{
+						mode = DRAG_MODE_TOP;
+						drag_start_x = xx;
+						drag_start_y = yy;
+						flag = 1;
+					}
 				}
-			}
-			else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
-			&& ((yy > y() + h() - 16) && (yy < y() + h())))
-			{
-				if(operation != FRAME_OPERATION_DELETE)
+				else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
+				&& ((yy > y() + h() - 16) && (yy < y() + h())))
 				{
-					mode = DRAG_MODE_BOTTOM;
-					drag_start_x = xx;
-					drag_start_y = yy;
-					flag = 1;
+					if(operation != FRAME_OPERATION_DELETE)
+					{
+						mode = DRAG_MODE_BOTTOM;
+						drag_start_x = xx;
+						drag_start_y = yy;
+						flag = 1;
+					}
 				}
-			}
-			else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
-			&& ((xx > x()) && (xx < x() + 16)))
-			{
-				if(operation != FRAME_OPERATION_DELETE)
+				else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
+				&& ((xx > x()) && (xx < x() + 16)))
 				{
-					mode = DRAG_MODE_LEFT;
-					drag_start_x = xx;
-					drag_start_y = yy;
-					flag = 1;
+					if(operation != FRAME_OPERATION_DELETE)
+					{
+						mode = DRAG_MODE_LEFT;
+						drag_start_x = xx;
+						drag_start_y = yy;
+						flag = 1;
+					}
 				}
-			}
-			else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
-			&& ((xx > x() + w() - 16) && (xx < x() + w())))
-			{
-				if(operation != FRAME_OPERATION_DELETE)
+				else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
+				&& ((xx > x() + w() - 16) && (xx < x() + w())))
 				{
-					mode = DRAG_MODE_RIGHT;
-					drag_start_x = xx;
-					drag_start_y = yy;
-					flag = 1;
+					if(operation != FRAME_OPERATION_DELETE)
+					{
+						mode = DRAG_MODE_RIGHT;
+						drag_start_x = xx;
+						drag_start_y = yy;
+						flag = 1;
+					}
 				}
 			}
 		}
@@ -14773,6 +14853,11 @@ int		loop;
 	hot_ready = 0;
 	hot_delay = 10000;
 
+	stop_detecting_objects = 0;
+	detecting_objects = 0;
+	object_triggered = 0;
+	capture_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+
 	my_window = in_win;
 	type = CAMERA_TYPE_CAMERA;
 	id = in_id;
@@ -14812,6 +14897,8 @@ int		loop;
 	height = 0;
 	orig_width = 0;
 	orig_height = 0;
+	starting_width = 0;
+	starting_height = 0;
 	last_grab_time = 0;
 	grab_interval = 0;
 	last_capture_time = 0;
@@ -15046,6 +15133,12 @@ int		loop;
 	single_frame_fd = -1;
 	chroma_color = CHROMA_ON_GREEN;
 
+	recog_min_x = 10000000;
+	recog_min_y = 10000000;
+	recog_max_x = -10000000;
+	recog_max_y = -10000000;
+	recog_retain_cnt = 0;
+
 	python_filter_function = NULL;
 	python_filter_code = strdup("#This is an example that draws a rectangle on the incoming frame\n#Note: the defined function must be named \"python_filter\" and must accept the cv::Mat as an argument.\n\n#\nimport cv2\nimport numpy as np\n\ndef python_filter(img=None):\n\tif img is not None:\n\t\tcv2.rectangle(img, (20, 30), (100, 80), (20, 50, 80), -1)\n");
 
@@ -15114,6 +15207,7 @@ int		loop;
 		detected_object[loop].idx = -1;
 		detected_object[loop].confidence = 0.0;
 	}
+	following_object = 0;
 	for(loop = 0;loop < 1024;loop++)
 	{
 		object_index[loop] = 0;
@@ -15162,8 +15256,8 @@ int		loop;
 	if(live_camera == 1)
 	{
 		SetSystemAlias();
-		int starting_width = requested_w;
-		int starting_height = requested_h;
+		starting_width = requested_w;
+		starting_height = requested_h;
 		if(my_window->fast_start == 0)
 		{
 			starting_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
@@ -17385,6 +17479,7 @@ int	loop;
 		slideshow_list[loop] = NULL;
 		object_index[loop] = 0;
 	}
+	following_object = 0;
 	for(loop = 0;loop < 128;loop++)
 	{
 		strcpy(text_list[loop], "");
@@ -17472,6 +17567,8 @@ int	loop;
 	id = 0;
 	orig_width = 0;
 	orig_height = 0;
+	starting_width = 0;
+	starting_height = 0;
 	capture_effects = 0;
 	grab_window_id = 0;
 	once = 0;
@@ -17843,6 +17940,8 @@ int	inner;
 	fprintf(fp, "\t\"height\": %d,\n", height);
 	fprintf(fp, "\t\"orig width\": %d,\n", orig_width);
 	fprintf(fp, "\t\"orig height\": %d,\n", orig_height);
+	fprintf(fp, "\t\"starting width\": %d,\n", starting_width);
+	fprintf(fp, "\t\"starting height\": %d,\n", starting_height);
 	fprintf(fp, "\t\"capture effects\": %d,\n", capture_effects);
 	fprintf(fp, "\t\"font name\": \"%s\",\n", font_name);
 	fprintf(fp, "\t\"capture scaling\": %f,\n", capture_scaling);
@@ -18387,6 +18486,8 @@ NDIlib_metadata_frame_t	metadata_frame;
 				
 				ndi_width = video_frame.xres;
 				ndi_height = video_frame.yres;
+				starting_width = ndi_width;
+				starting_height = ndi_height;
 				ndi_frame_rate = (double)video_frame.frame_rate_N / (double)video_frame.frame_rate_D;
 				ndi_stride = video_frame.line_stride_in_bytes;
 
@@ -18698,7 +18799,11 @@ void	Camera::SetSystemAlias()
 char	card[4096];
 
 	strcpy(card, "");
-	get_v4l_card_name(path, card);
+	int nn = get_camera_clean_name(path, card, 4096);
+	if(nn == -1)
+	{
+		get_v4l_card_name(path, card);
+	}
 	if(strlen(alias) < 1)
 	{
 		strcpy(alias, (char *)card);
@@ -19474,7 +19579,14 @@ void	Camera::TestObjectDetection()
 	int tcy = -1;
 	int second_cx = -1;
 	int second_cy = -1;
-	int rr = DetectObjects(&tcx, &tcy, &second_cx, &second_cy);
+	if(my_window->tiled_detection == 1)
+	{
+		int rr = DetectObjectsTiled(&tcx, &tcy, &second_cx, &second_cy);
+	}
+	else
+	{
+		int rr = DetectObjects(&tcx, &tcy, &second_cx, &second_cy);
+	}
 }
 
 char	*line_of(char *in, int line_no)
@@ -20194,6 +20306,7 @@ int				inner;
 					}
 					if(!temp_mat.empty())
 					{
+						pthread_mutex_lock(&capture_mutex);
 						mat = temp_mat;
 						reserve_mat = temp_mat.clone();
 						int ch = temp_mat.channels();
@@ -20216,6 +20329,7 @@ int				inner;
 						{
 							fprintf(stderr, "Error: Unusable color depth: %d\n", ch);
 						}
+						pthread_mutex_unlock(&capture_mutex);
 					}
 					else
 					{
@@ -21179,6 +21293,10 @@ int				inner;
 					ColorIt();
 					MiscCopyCommands();
 					DrawShapes();
+					if(zoom_box_display == 1)
+					{
+						ZoomBoxDisplay();
+					}
 					if(python_filter_function != NULL)
 					{
 						python_run_frame_filter(python_filter_function, mat);
@@ -21784,6 +21902,45 @@ int	Camera::PostProcessRecognition(Mat &frame, Mat &output, int *out_x, int *out
 	return(found);
 }
 
+void logPerfProfile(cv::dnn::Net& net, double fps) 
+{
+	std::vector<double> layersTimes;
+	double totalTicks = net.getPerfProfile(layersTimes);
+	double freq = cv::getTickFrequency() / 1000.0;   // ticks -> ms
+	double totalMs = totalTicks / freq;
+
+	// Only print in detail when things are slow, to avoid spamming the log
+	if(fps < 40.0) 
+	{
+		std::cout << " | fps=" << fps
+				  << " | total inference=" << totalMs << " ms\n";
+
+		// Get per-layer names so the numbers are readable
+		std::vector<cv::String> layerNames = net.getLayerNames();
+
+		// Find and print the top 5 most expensive layers this frame
+		std::vector<std::pair<double, int>> ranked; // (ms, layer index)
+		for (size_t i = 0; i < layersTimes.size(); i++) 
+		{
+			double ms = layersTimes[i] / freq;
+			if (ms > 0.0) ranked.push_back({ms, (int)i});
+		}
+		std::sort(ranked.rbegin(), ranked.rend()); // descending by time
+
+		int shown = 0;
+		for (auto& [ms, idx] : ranked) 
+		{
+			if (shown++ >= 5) break;
+			// layersTimes is indexed by internal layer id, not 1:1 with getLayerNames()
+			// getLayerId/getLayer gives the actual layer object if you need its type
+			cv::Ptr<cv::dnn::Layer> layer = net.getLayer(idx);
+			std::cout << "	" << std::setw(24) << layer->name
+					  << " (" << layer->type << "): "
+					  << ms << " ms\n";
+		}
+	}
+}
+
 int	Camera::DetectObjects(int *out_x, int *out_y, int *second_x, int *second_y)
 {
 Mat	blob;
@@ -21809,6 +21966,167 @@ Mat	blob;
 	}
 	return(found);
 }
+
+// **************************************** START TILED DETECT OBJECTS ******************************************
+
+std::vector<TileRect> Camera::MakeTiles(int frameW, int frameH, int tileSize, float overlapFrac)
+{
+	std::vector<TileRect> tiles;
+	int stride = (int)(tileSize * (1.0f - overlapFrac));
+	if (stride < 1) stride = 1;
+
+	for (int y = 0; y < frameH; y += stride)
+	{
+		int ty = y;
+		if (ty + tileSize > frameH) ty = frameH - tileSize;
+		if (ty < 0) ty = 0;
+
+		for (int x = 0; x < frameW; x += stride)
+		{
+			int tx = x;
+			if (tx + tileSize > frameW) tx = frameW - tileSize;
+			if (tx < 0) tx = 0;
+
+			tiles.push_back({tx, ty, tileSize, tileSize});
+
+			if (tx + tileSize >= frameW) break; // hit right edge, don't loop past it
+		}
+		if (ty + tileSize >= frameH) break; // hit bottom edge
+	}
+	return tiles;
+}
+
+inline void FindMaxClassScore(const float *scores, int num_classes, float &maxScore, int &maxIdx)
+{
+	maxScore = scores[0];
+	maxIdx = 0;
+	for(int c = 1; c < num_classes; ++c)
+	{
+		if(scores[c] > maxScore)
+		{
+			maxScore = scores[c];
+			maxIdx = c;
+		}
+	}
+}
+
+void Camera::DecodeTileDetections(Mat &output, int tileOffsetX, int tileOffsetY,
+								   std::vector<int> &classIds, std::vector<float> &confidences,
+								   std::vector<cv::Rect> &boxes)
+{
+	int num_classes = my_window->recognize_class_cnt;
+	int num_anchors = output.size[2];
+	int sizes[] = { 4 + num_classes, num_anchors };
+	cv::Mat rawData(2, sizes, CV_32F, output.ptr<float>());
+	cv::Mat transposedData = rawData.t();
+
+	for(int i = 0; i < transposedData.rows; ++i)
+	{
+		float *data = transposedData.ptr<float>(i);
+
+		float maxClassScore;
+		int maxClassIdx;
+		FindMaxClassScore(data + 4, num_classes, maxClassScore, maxClassIdx);
+
+		if(maxClassScore > recognition_threshold)
+		{
+			float cx = data[0];
+			float cy = data[1];
+			float w  = data[2];
+			float h  = data[3];
+			int left = static_cast<int>(cx - 0.5 * w) + tileOffsetX;
+			int top  = static_cast<int>(cy - 0.5 * h) + tileOffsetY;
+			int width  = static_cast<int>(w);
+			int height = static_cast<int>(h);
+
+			classIds.push_back(maxClassIdx);
+			confidences.push_back(maxClassScore);
+			boxes.push_back(cv::Rect(left, top, width, height));
+		}
+	}
+}
+
+int Camera::FinalizeDetections(std::vector<int> &classIds, std::vector<float> &confidences,
+								std::vector<cv::Rect> &boxes, int *out_x, int *out_y,
+								int *second_x, int *second_y)
+{
+	int found = -1;
+	float nmsThreshold = 0.50f;
+	std::vector<int> indices;
+	cv::dnn::NMSBoxes(boxes, confidences, recognition_threshold, nmsThreshold, indices);
+
+	detected_object_cnt = 0;
+	int max_x = -1000000, max_y = -1000000, min_x = 1000000, min_y = 1000000;
+
+	for(size_t i = 0; i < indices.size(); ++i)
+	{
+		int idx = indices[i];
+		Rect box = boxes[idx];
+		if(object_index[classIds[idx]] == 1)
+		{
+			if(detected_object_cnt < 10)
+			{
+				found = classIds[idx];
+				if(box.x < min_x) min_x = box.x;
+				if(box.y < min_y) min_y = box.y;
+				if((box.x + box.width) > max_x) max_x = box.x + box.width;
+				if((box.y + box.height) > max_y) max_y = box.y + box.height;
+				detected_object[detected_object_cnt].x = box.x;
+				detected_object[detected_object_cnt].y = box.y;
+				detected_object[detected_object_cnt].w = box.width;
+				detected_object[detected_object_cnt].h = box.height;
+				detected_object[detected_object_cnt].idx = classIds[idx];
+				detected_object[detected_object_cnt].confidence = confidences[idx];
+				detected_object_cnt++;
+			}
+		}
+	}
+
+	if((max_x > 0) && (max_y > 0) && (min_x < 10000) && (min_y < 10000))
+	{
+		*out_x = min_x;
+		*out_y = min_y;
+		*second_x = max_x;
+		*second_y = max_y;
+	}
+	return(found);
+}
+
+int Camera::DetectObjectsTiled(int *out_x, int *out_y, int *second_x, int *second_y)
+{
+	int found = -1;
+	if(my_window->use_dnn_cuda == 1)
+	{
+		if(!my_window->net.empty())
+		{
+			Mat use = mat.clone();
+			cvtColor(use, use, COLOR_RGBA2BGR);
+
+			std::vector<TileRect> tiles = MakeTiles(use.cols, use.rows, 640, 0.10f);
+			std::vector<int> allClassIds;
+			std::vector<float> allConfidences;
+			std::vector<cv::Rect> allBoxes;
+
+			for(auto &t : tiles)
+			{
+				Mat tileImg = use(cv::Rect(t.x, t.y, t.w, t.h));
+				Mat blob = blobFromImage(tileImg, 1 / 255.0, cv::Size(640, 640), Scalar(0, 0, 0), true, false);
+				my_window->net.setInput(blob);
+				Mat outs;
+				my_window->net.forward(outs);
+				DecodeTileDetections(outs, t.x, t.y, allClassIds, allConfidences, allBoxes);
+			}
+			found = FinalizeDetections(allClassIds, allConfidences, allBoxes, out_x, out_y, second_x, second_y);
+		}
+	}
+	else
+	{
+		my_window->SetErrorMessage("Error: CUDA library (libcudnn_ops_infer.so) not found\n");
+	}
+	return(found);
+}
+
+// ***************************************** END TILED DETECT OBJECTS *******************************************
 
 int	Camera::SetBackendFlag(char *cp)
 {
@@ -24137,10 +24455,6 @@ void	Camera::VideoEffects()
 		{
 			flip(mat, mat, -1);
 		}
-		if(zoom_box_display == 1)
-		{
-			ZoomBoxDisplay();
-		}
 		if(zoom > 1.0)
 		{
 			Mat dst;
@@ -24950,9 +25264,22 @@ void	Camera::GrabThisWindow()
 void	Camera::PaintRecognizedObjects(int test_run)
 {
 int	loop;
+static time_t whatever = 0;
 
 	if(((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT) || (test_run == 1))
 	{
+		if(recog_retain_cnt > 30)
+		{
+			recog_min_x = 10000000;
+			recog_min_y = 10000000;
+			recog_max_x = -10000000;
+			recog_max_y = -10000000;
+			recog_retain_cnt = 0;
+			whatever = precise_time();
+		}
+		recog_retain_cnt++;
+
+		int allow_follow = 0;
 		fl_color(YELLOW);
 		for(loop = 0;loop < detected_object_cnt;loop++)
 		{
@@ -24977,7 +25304,7 @@ int	loop;
 				int nn = detected_object[loop].idx;
 				char *label = my_window->recognize_class_name[nn];
 				char buf[256];
-				sprintf(buf, "%s (%f)", label, detected_object[loop].confidence);
+				sprintf(buf, "%s (%1.2f)", label, detected_object[loop].confidence);
 				if(this == my_window->DisplayedCamera())
 				{
 					if(my_window->visible_debug == 0)
@@ -24989,6 +25316,49 @@ int	loop;
 				{
 					rectangle(mat, Point(xx, yy), Point(xx + ww, yy + hh), Scalar(255, 255, 255), 1);
 					putText(mat, buf, cv::Point(xx, yy - 4), cv::FONT_HERSHEY_DUPLEX, 0.5, CV_RGB(255, 255, 255), 1, cv::LINE_AA);
+				}
+				if(adj_xx < recog_min_x)
+				{
+					recog_min_x = adj_xx;
+				}
+				if(adj_yy < recog_min_y)
+				{
+					recog_min_y = adj_yy;
+				}
+				if((adj_xx + adj_ww) > recog_max_x)
+				{
+					recog_max_x = adj_xx + adj_ww;
+				}
+				if((adj_yy + adj_hh) > recog_max_y)
+				{
+					recog_max_y = adj_yy + adj_hh;
+				}
+				allow_follow = 1;
+			}
+		}
+		if(following_object == 1)
+		{
+			if(allow_follow == 1)
+			{
+				int mww = (recog_max_x - recog_min_x);
+				int mhh = (recog_max_y - recog_min_y);
+				int fx = recog_min_x + (mww / 2);
+				int fy = recog_min_y + (mhh / 2);
+				int dx = abs(fx - (display_width / 2));
+				int dy = abs(fy - (display_height / 2));
+				double dist = sqrt((dx * dx) + (dy * dy));
+				if(dist > (display_width / 8))
+				{
+					int instance = -1;
+					if(my_window->ptz_window[ptz_lock_interface] != NULL)
+					{
+						instance = my_window->ptz_window[ptz_lock_interface]->ptz_interface_index;
+					}
+					if(instance != -1)
+					{
+						PTZ_Window *ptz_win = my_window->ptz_window[ptz_lock_interface];
+						ptz_win->CenterCameraOnPixel(fx, fy, ptz_win->ptz_zoom_reading);
+					}
 				}
 			}
 		}
@@ -25155,6 +25525,65 @@ int	Camera::Test4Motion()
 	return(rr);
 }
 
+int		check_object_trigger_thread(Camera *cam)
+{
+	cam->detecting_objects = 1;
+	while(cam->stop_detecting_objects != 1)
+	{
+		int result = pthread_mutex_trylock(&cam->capture_mutex);
+		if(result == 0)
+		{
+			cam->object_triggered = cam->ObjectTrigger();
+			pthread_mutex_unlock(&cam->capture_mutex);
+		}
+		usleep(10000);
+	}
+	cam->detecting_objects = 0;
+	cam->stop_detecting_objects = 0;
+	return(0);
+}
+
+int		Camera::CheckObjectTrigger()
+{
+	int rr = 0;
+	if(my_window->threading_object_recognition == 1)
+	{
+		if(detecting_objects == 0)
+		{
+			StartDetectingObjects();
+		}
+		rr = object_triggered;
+	}
+	else
+	{
+		rr = ObjectTrigger();
+	}
+	return(rr);
+}
+
+void	Camera::StopDetectingObjects()
+{
+	stop_detecting_objects = 1;
+	int attempts = 0;
+	while((detecting_objects == 1) && (attempts < 1000))
+	{
+		usleep(1000);
+		attempts++;
+	}
+}
+
+int		Camera::IsDetectingObjects()
+{
+	return(detecting_objects);
+}
+
+void	Camera::StartDetectingObjects()
+{
+	std::thread thread;
+	thread = std::thread(check_object_trigger_thread, this);
+	thread.detach();
+}
+
 int	Camera::ObjectTrigger()
 {
 int		loop;
@@ -25166,7 +25595,15 @@ int		loop;
 		int tcy = -1;
 		int second_cx = -1;
 		int second_cy = -1;
-		int rr = DetectObjects(&tcx, &tcy, &second_cx, &second_cy);
+		int rr = 0;
+		if(my_window->tiled_detection == 1)
+		{
+			rr = DetectObjectsTiled(&tcx, &tcy, &second_cx, &second_cy);
+		}
+		else
+		{
+			rr = DetectObjects(&tcx, &tcy, &second_cx, &second_cy);
+		}
 		if(rr > -1)
 		{
 			triggered = 1;
@@ -25174,7 +25611,7 @@ int		loop;
 			detect_time = time(0);
 		}
 	}
-	if((record == 1) && (triggered == 0))
+	if((triggers_requested == 1) && (triggered == 0))
 	{
 		time_t current_time = time(0);
 		int diff_time = (int)(current_time - detect_time);
@@ -25231,7 +25668,7 @@ int	Camera::Triggers()
 											if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 											{
 												triggered = 0;
-												triggered = ObjectTrigger();
+												triggered = CheckObjectTrigger();
 											}
 										}
 									}
@@ -25240,7 +25677,7 @@ int	Camera::Triggers()
 										if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 										{
 											triggered = 0;
-											triggered = ObjectTrigger();
+											triggered = CheckObjectTrigger();
 										}
 									}
 								}
@@ -25256,7 +25693,7 @@ int	Camera::Triggers()
 										if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 										{
 											triggered = 0;
-											triggered = ObjectTrigger();
+											triggered = CheckObjectTrigger();
 										}
 									}
 								}
@@ -25265,7 +25702,7 @@ int	Camera::Triggers()
 									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 									{
 										triggered = 0;
-										triggered = ObjectTrigger();
+										triggered = CheckObjectTrigger();
 									}
 								}
 							}
@@ -25287,7 +25724,7 @@ int	Camera::Triggers()
 										if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 										{
 											triggered = 0;
-											triggered = ObjectTrigger();
+											triggered = CheckObjectTrigger();
 										}
 									}
 								}
@@ -25296,7 +25733,7 @@ int	Camera::Triggers()
 									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 									{
 										triggered = 0;
-										triggered = ObjectTrigger();
+										triggered = CheckObjectTrigger();
 									}
 								}
 							}
@@ -25311,7 +25748,7 @@ int	Camera::Triggers()
 									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 									{
 										triggered = 0;
-										triggered = ObjectTrigger();
+										triggered = CheckObjectTrigger();
 									}
 								}
 							}
@@ -25320,7 +25757,7 @@ int	Camera::Triggers()
 								if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 								{
 									triggered = 0;
-									triggered = ObjectTrigger();
+									triggered = CheckObjectTrigger();
 								}
 							}
 						}
@@ -25350,7 +25787,7 @@ int	Camera::Triggers()
 										triggered = 0;
 										if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 										{
-											triggered = ObjectTrigger();
+											triggered = CheckObjectTrigger();
 										}
 									}
 								}
@@ -25359,7 +25796,7 @@ int	Camera::Triggers()
 									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 									{
 										triggered = 0;
-										triggered = ObjectTrigger();
+										triggered = CheckObjectTrigger();
 									}
 								}
 							}
@@ -25375,7 +25812,7 @@ int	Camera::Triggers()
 									triggered = 0;
 									if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 									{
-										triggered = ObjectTrigger();
+										triggered = CheckObjectTrigger();
 									}
 								}
 							}
@@ -25384,7 +25821,7 @@ int	Camera::Triggers()
 								if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 								{
 									triggered = 0;
-									triggered = ObjectTrigger();
+									triggered = CheckObjectTrigger();
 								}
 							}
 						}
@@ -25408,7 +25845,7 @@ int	Camera::Triggers()
 								if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 								{
 									triggered = 0;
-									triggered = ObjectTrigger();
+									triggered = CheckObjectTrigger();
 								}
 							}
 						}
@@ -25425,12 +25862,19 @@ int	Camera::Triggers()
 							if((record_trigger & ON_DETECT_OBJECT) == ON_DETECT_OBJECT)
 							{
 								triggered = 0;
-								triggered = ObjectTrigger();
+								triggered = CheckObjectTrigger();
 							}
 						}
 					}
 				}
 			}
+		}
+	}
+	else
+	{
+		if(detecting_objects == 1)
+		{
+			StopDetectingObjects();
 		}
 	}
 	return(triggered);
@@ -27853,117 +28297,6 @@ Mat gray, smallImg;
 					cv::Point(cvRound((r.x + r.width-1)*scale), 
 					cvRound((r.y + r.height-1)*scale)), color, 3, 8, 0);
 	}
-}
-
-// SECTION *********************************** ALIAS WINDOW  *******************************************
-
-void	alias_cb(Fl_Widget *w, void *v)
-{
-int	loop;
-
-	AliasWindow *aw = (AliasWindow *)v;
-	MyWin *my_win = aw->my_window;
-	Camera *cam = my_win->DisplayedCamera();
-	if(cam != NULL)
-	{
-		char *str = (char *)aw->alias->value();
-		if(str != NULL)
-		{
-			strcpy(cam->alias, str);
-		}
-		for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
-		{
-			if(my_win->ptz_window[loop] != NULL)
-			{
-				if(my_win->ptz_window[loop]->bound_camera == cam)
-				{
-					my_win->ptz_window[loop]->ptz_bound_name_box->value(cam->alias);
-				}
-			}
-		}
-	}
-	aw->hide();
-	my_win->showing_alias_window = 0;
-}
-
-AliasWindow::AliasWindow(MyWin *in_win) : Dialog(in_win, 260, 300, 490, 70, "Aliases")
-{
-	my_window = in_win;
-	last_x = 0;
-	last_y = 0;
-	resize(x(), y(), w(), h());
-
-	int yp = 30;
-	alias = new Fl_Input(60, yp, 404, 20, "Alias:");
-	alias->color(BLACK);
-	alias->textcolor(WHITE);
-	alias->textsize(11);
-	alias->cursor_color(WHITE);
-	alias->labelcolor(YELLOW);
-	alias->labelsize(11);
-	alias->box(FL_FRAME_BOX);
-	alias->align(FL_ALIGN_LEFT);
-	alias->when(FL_WHEN_ENTER_KEY);
-	alias->copy_tooltip("Set the alias for the displayed camera.");
-	alias->callback(alias_cb, this);
-	yp += 28;
-
-	MyButton *accept = new MyButton(my_window, (w() * 0.33) - 40, yp, 80, 20, "Accept");
-	accept->box(FL_FLAT_BOX);
-	accept->labelcolor(YELLOW);
-	accept->labelsize(11);
-	accept->color(BLACK);
-	accept->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
-	accept->copy_tooltip("Accept the alias specified above.");
-	accept->callback(alias_cb, this);
-	accept->show();
-
-	MyButton *cancel = new MyButton(my_window, (w() * 0.66) - 40, yp, 80, 20, "Cancel");
-	cancel->box(FL_FLAT_BOX);
-	cancel->labelcolor(YELLOW);
-	cancel->labelsize(11);
-	cancel->color(BLACK);
-	cancel->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
-	cancel->copy_tooltip("Close the dialog without accepting the edited alias.");
-	cancel->callback(hide_window_cb, this);
-	cancel->show();
-
-	end();
-	hide();
-}
-
-AliasWindow::~AliasWindow()
-{
-}
-
-int	AliasWindow::handle(int event)
-{
-	int flag = 0;
-	if(event == FL_KEYBOARD)
-	{
-		int key = Fl::event_key();
-		if(key == FL_Escape)
-		{
-			hide();
-			my_window->showing_alias_window = 0;
-			flag = 1;
-		}
-	}
-	if(flag == 0)
-	{
-		flag = Dialog::handle(event);
-	}
-	return(flag);
-}
-
-void	AliasWindow::show()
-{
-	Camera *cam = my_window->DisplayedCamera();
-	if(cam != NULL)
-	{
-		alias->value(cam->alias);
-	}
-	Fl_Window::show();
 }
 
 // SECTION *********************************** DYNAMIC STRING WINDOW  *******************************************
@@ -33128,6 +33461,7 @@ int	inner;
 		}
 		win->UpdatePresets();
 		win->UpdatePTZButtons();
+		my_win->PTZ_DoCommand(win->instance, 0);
 	}
 	else
 	{
@@ -33861,6 +34195,10 @@ void	ptz_follow_cb(Fl_Widget *w, void *v)
 	MyLightButton *b = (MyLightButton *)w;
 	int val = b->value();
 	win->follow = val;
+	if(win->bound_camera != NULL)
+	{
+		win->bound_camera->following_object = val;
+	}
 	if(val == 1)
 	{
 		win->my_window->ptz_follow_home_pan = win->ptz_pan_reading / 16;
@@ -33911,9 +34249,9 @@ void	ptz_set_speed_cb(Fl_Widget *w, void *v)
 			if(win->accelerate == 0)
 			{
 				win->ptz_pan_speed = (int)((double)local_cam->param_pan_max_speed * val);
-				win->ptz_tilt_speed = (int)((double)local_cam->param_tilt_max_speed * val);
+				win->ptz_tilt_speed = (int)((double)local_cam->param_tilt_max_speed * (val * 0.8));
 				win->ptz_target_pan_speed = (int)((double)local_cam->param_pan_max_speed * val);
-				win->ptz_target_tilt_speed = (int)((double)local_cam->param_tilt_max_speed * val);
+				win->ptz_target_tilt_speed = (int)((double)local_cam->param_tilt_max_speed * (val * 0.8));
 			}
 			else
 			{
@@ -34077,9 +34415,10 @@ char buf[8192];
 	pinned = 0;
 	ptz_speed_slider_value = 0.25;
 	ptz_current_camera_idx = 0;
-	ptz_pan_speed = 24.0 * 0.25;
-	ptz_tilt_speed = 20.0 * 0.25;
-	ptz_target_pan_speed = 24.0 * 0.25;
+
+	ptz_pan_speed = 20.0 * 0.25;
+	ptz_tilt_speed = 18.0 * 0.25;
+	ptz_target_pan_speed = 20.0 * 0.25;
 	ptz_target_tilt_speed = 20.0 * 0.25;
 
 	max_optical_zoom = 0x0;
@@ -34097,6 +34436,8 @@ char buf[8192];
 	ptz_zoom_speed = 20;
 	ptz_zoomer_speed = 0;
 	ptz_adjust_speed_for_zoom = 0;
+	ptz_zoom_reading = -1;
+
 	support_absolute_zoom = 1;
 	for(loop = 0;loop < NUMBER_OF_CAMERAS;loop++)
 	{
@@ -34452,14 +34793,11 @@ void	PTZ_Window::CenterCameraOnPixel(int click_x, int click_y, uint16_t visca_zo
 	{
 		int dx = visca_delta_x;
 		int dy = visca_delta_y;
-
 		// Initialize working speeds with your global target preset values
 		uint8_t scaled_pan_speed = ptz_pan_speed;
 		uint8_t scaled_tilt_speed = ptz_tilt_speed;
-
 		uint32_t abs_dx = abs(dx);
 		uint32_t abs_dy = abs(dy);
-
 		if((abs_dx) > 0 && (abs_dy > 0))
 		{
 			if((abs_dx) >= (abs_dy))
@@ -34469,8 +34807,11 @@ void	PTZ_Window::CenterCameraOnPixel(int click_x, int click_y, uint16_t visca_zo
 				scaled_tilt_speed = (uint8_t)lroundf((float)ptz_pan_speed * ratio);
 				
 				// Keep scaled speed within hardware bounds (VISCA minimum speed is 1)
-				if (scaled_tilt_speed < 1) scaled_tilt_speed = 1;
-				if (scaled_tilt_speed > ptz_tilt_speed) scaled_tilt_speed = ptz_tilt_speed;
+				if(scaled_tilt_speed < 1) 
+				{
+					scaled_tilt_speed = 1;
+				}
+				if(scaled_tilt_speed > ptz_tilt_speed) scaled_tilt_speed = ptz_tilt_speed;
 			}
 			else
 			{
@@ -34479,8 +34820,11 @@ void	PTZ_Window::CenterCameraOnPixel(int click_x, int click_y, uint16_t visca_zo
 				scaled_pan_speed = (uint8_t)lroundf((float)ptz_tilt_speed * ratio);
 				
 				// Keep scaled speed within hardware bounds
-				if (scaled_pan_speed < 1) scaled_pan_speed = 1;
-				if (scaled_pan_speed > ptz_pan_speed) scaled_pan_speed = ptz_pan_speed;
+				if(scaled_pan_speed < 1) 
+				{
+					scaled_pan_speed = 1;
+				}
+				if(scaled_pan_speed > ptz_pan_speed) scaled_pan_speed = ptz_pan_speed;
 			}
 		}
 		my_window->ViscaCommand(instance, PTZ_RELATIVE_POSITION, 4, scaled_pan_speed, scaled_tilt_speed, dx, dy);
@@ -34606,10 +34950,10 @@ void	PTZ_Window::LoadZoomParamsFromJSON(cJSON *json)
 	success = json_parse_double(json, "ptz tilt steps per degree", tilt_steps_per_degree);
 	cJSON *ptz_zoom_node_item = NULL;
 	cJSON *ptz_zoom_node_items = json_parse_array(json, "ptz zoom node");
+	int idx = 0;
 	if(ptz_zoom_node_items != NULL)
 	{
 		int cnt = 0;
-		int idx = 0;
 		cJSON_ArrayForEach(ptz_zoom_node_item, ptz_zoom_node_items)
 		{
 			if((cnt % 2) == 0)
@@ -35570,6 +35914,8 @@ int	loop;
 
 int	OpenInterface(VISCAInterface_t *iface, char *path, int *interface_type)
 {
+VISCAInterface_t	control_interface;
+
 	int err = -1;
 	int is_network = 0;
 	if(strncmp(path, "tcp://", strlen("tcp://")) == 0)
@@ -37888,8 +38234,11 @@ CommandKeySettingsWindow::CommandKeySettingsWindow(MyWin *in_win, int ww, int hh
 	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_VOLUME_DOWN]);
 	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "VOLUME DOWN", str); cnt++; y_pos += 18;
 
-	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_CYCLE_CROSSHAIR]);
-	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "CYCLE CROSSHAIR", str); cnt++; y_pos += 18;
+	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_CYCLE_UP_CROSSHAIR]);
+	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "CYCLE UP CROSSHAIR", str); cnt++; y_pos += 18;
+
+	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_CYCLE_DOWN_CROSSHAIR]);
+	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "CYCLE DOWN CROSSHAIR", str); cnt++; y_pos += 18;
 
 	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_CYCLE_DOWN_THUMBGROUP]);
 	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "CYCLE DOWN THUMBGROUP", str); cnt++; y_pos += 18;
@@ -40235,29 +40584,45 @@ void	resize_capture_button_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	quit_cb(Fl_Widget *w, void *v)
+void	exit_warning_cb(void *v)
 {
 	MyWin *win = (MyWin *)v;
+	win->exit_warning = 0;
+}
 
-	win->actively_exiting = 1;
-	win->redraw();
-	Fl::check();
+void	quit_cb(Fl_Widget *w, void *v)
+{
+void	exit_timer_cb(void *v);
 
-	win->Done();
-	if(win->review != NULL)
+	MyWin *win = (MyWin *)v;
+	if((w == NULL) || (win->recording == 0) || (win->exit_warning > 0))
 	{
-		win->review->hide();
+		time_t now = time(0);
+		win->actively_exiting = 1;
+		win->redraw();
+		Fl::check();
+
+		win->Done();
+		if(win->review != NULL)
+		{
+			win->review->hide();
+		}
+		if(win->immediate_drawing_window != NULL)
+		{
+			win->immediate_drawing_window->hide();
+		}
+		if(win->anim_timeline != NULL)
+		{
+			win->anim_timeline->hide();
+		}
+		win->hide();
 	}
-	if(win->immediate_drawing_window != NULL)
+	else
 	{
-		win->immediate_drawing_window->hide();
+		win->SetErrorMessage("Warning: Exiting while recording.\nInvoke exit again within 10 seconds\nto exit immediately.");
+		win->exit_warning = 1;
+		Fl::add_timeout(10.0, exit_warning_cb, win);
 	}
-	if(win->anim_timeline != NULL)
-	{
-		win->anim_timeline->hide();
-	}
-	win->hide();
-	delete win;
 }
 
 void	open_standalone(Camera *now_cam, double scale)
@@ -40391,23 +40756,6 @@ void	reset_camera_button_cb(Fl_Widget *w, void *v)
 	if(cam != NULL)
 	{
 		win->ResetCamera(cam);
-	}
-}
-
-void	alias_button_cb(Fl_Widget *w, void *v)
-{
-	MyWin *win = (MyWin *)v;
-	if(!win->alias_window->visible())
-	{
-		win->showing_alias_window = 1;
-		win->alias_window->take_focus();
-		win->alias_window->set_non_modal();
-		win->alias_window->show();
-	}
-	else
-	{
-		win->showing_alias_window = 0;
-		win->alias_window->hide();
 	}
 }
 
@@ -41494,6 +41842,8 @@ MyWin::MyWin(
 	, int use_borderless
 	, double use_cycle_cameras
 	, int use_fast_start
+	, int use_threaded_object_recognition
+	, int use_tiled_object_recognition
 	, char *lbl)
 	: Fl_Double_Window(in_w, in_h, lbl)
 {
@@ -41502,6 +41852,7 @@ int	inner;
 int	outer;
 char	update_buf[256];
 
+	global_my_window = this;
 	fast_start = use_fast_start;
 	InitializeVariables();
 
@@ -41553,6 +41904,8 @@ char	update_buf[256];
 	displayed_source = 0;
 	alt_displayed_source = -1;
 	split = in_split;
+	threading_object_recognition = use_threaded_object_recognition;
+	tiled_detection = use_tiled_object_recognition;
 	for(loop = 0;loop < 1024;loop++)
 	{
 		source[loop] = NULL;
@@ -41747,7 +42100,6 @@ char	update_buf[256];
 	python_button_window = NULL;
 	immediate_drawing_window = NULL;
 	new_source_window = NULL;
-	alias_window = NULL;
 	dynamic_string_window = NULL;
 	trigger_window = NULL;
 	status_window = NULL;
@@ -42012,7 +42364,6 @@ char	update_buf[256];
 	save_offset_y = 0;
 	dragging = 0;
 	motion_debug = 0;
-	showing_alias_window = 0;
 	redraw_cnt = 0;
 	encoding_frame_cnt = 0;
 	transition_cnt = 0.0;
@@ -42066,7 +42417,7 @@ char	update_buf[256];
 	old_ptz_zoom = 1;
 	start_ptz_drag_x = 0;
 	start_ptz_drag_y = 0;
-	ptz_middle_mouse = 0;
+	ptz_middle_mouse = PTZ_MIDDLE_MOUSE_ZOOMING;
 	ptz_dragged = 0;
 	use_pan_speed = 0;
 	use_tilt_speed = 0;
@@ -42415,12 +42766,6 @@ int	loop;
 		filter_built_in_window->hide();
 		Fl::delete_widget(filter_built_in_window);
 		filter_built_in_window = NULL;
-	}
-	if(alias_window != NULL)
-	{
-		alias_window->hide();
-		Fl::delete_widget(alias_window);
-		alias_window = NULL;
 	}
 	if(dynamic_string_window != NULL)
 	{
@@ -42925,7 +43270,7 @@ char	buf[32768];
 	out_function(buf);
 	sprintf(buf, "Original Path:\t%s\n", original_path);
 	out_function(buf);
-	sprintf(buf, "Requested\tX: %d Y: %d W: %d H: %d\n", requested_x, requested_y, requested_w, requested_h);
+	sprintf(buf, "Requested:\tX: %d Y: %d W: %d H: %d\n", requested_x, requested_y, requested_w, requested_h);
 	out_function(buf);
 	sprintf(buf, "Font:\t%s\n", font_name);
 	out_function(buf);
@@ -42933,11 +43278,11 @@ char	buf[32768];
 	out_function(buf);
 	sprintf(buf, "Zoom:\t%f\n", zoom);
 	out_function(buf);
-	sprintf(buf, "Width:\t%d Height: %d\n", width, height);
+	sprintf(buf, "Resolution:\tWidth: %d Height: %d\n", width, height);
 	out_function(buf);
-	sprintf(buf, "Display Width:\t%d Height: %d\n", (int)display_width, (int)display_height);
+	sprintf(buf, "Display Resolution:\tWidth: %d Height: %d\n", (int)display_width, (int)display_height);
 	out_function(buf);
-	sprintf(buf, "Original Width:\t%d Height: %d\n", orig_width, orig_height);
+	sprintf(buf, "Original Resolution:\tWidth: %d Height: %d\n", starting_width, starting_height);
 	out_function(buf);
 	sprintf(buf, "Capture Scaling:\t%f\n", capture_scaling);
 	out_function(buf);
@@ -43342,7 +43687,6 @@ int	outer, inner;
 	edit_source_button = NULL;
 	edit_output_button = NULL;
 	select_output_button = NULL;
-	alias_button = NULL;
 	reset_camera_button = NULL;
 	flip_horizontal_button = NULL;
 	flip_vertical_button = NULL;
@@ -43408,7 +43752,6 @@ int	outer, inner;
 	trigger_window = NULL;
 	status_window = NULL;
 	new_source_window = NULL;
-	alias_window = NULL;
 	dynamic_string_window = NULL;
 	fltk_plugin_window = NULL;
 	command_key_settings = NULL;
@@ -43426,6 +43769,8 @@ int	outer, inner;
 	dragging_guideline = NULL;
 	hide_guidelines = 0;
 	sweeping_guidelines = 1;
+	exit_warning = 0;
+	threading_object_recognition = 0;
 	for(loop = 0;loop < 100000;loop++)
 	{
 		key[loop] = 0;
@@ -43599,6 +43944,7 @@ int	outer, inner;
 	image_sy = 0;
 	recording = 0;
 	init_detect = 0;
+	tiled_detection = 0;
 	use_mousewheel = 0;
 	mouse_moving = 0;
 	resize_capture = 0;
@@ -43646,8 +43992,8 @@ int	outer, inner;
 	recognize_class_cnt = 0;
 	tag_recognized = 0;
 	forced_fps = 0;
-	forced_interval = 0.0;
-	restore_forced_interval = 0.0;
+	forced_interval = 0.01;
+	restore_forced_interval = 0.01;
 	record_all_start = 0.0;
 	record_all_cnt = 0;
 	speed_factor = 0.0;
@@ -43779,7 +44125,6 @@ int	outer, inner;
 	dragging = 0;
 	motion_debug = 0;
 	split = 0;
-	showing_alias_window = 0;
 	encoding_frame_cnt = 0;
 	redraw_cnt = 0;
 	transition_cnt = 0.0;
@@ -43806,7 +44151,7 @@ int	outer, inner;
 	ptz_focusing = 0;
 	start_ptz_drag_x = 0;
 	start_ptz_drag_y = 0;
-	ptz_middle_mouse = 0;
+	ptz_middle_mouse = PTZ_MIDDLE_MOUSE_ZOOMING;
 	ptz_dragging = 0;
 	ptz_dragged = 0;
 	use_pan_speed = 0;
@@ -45669,6 +46014,8 @@ int		loop;
 			success = json_parse_double(name, "zoom", cam->zoom);
 			success = json_parse_int(name, "orig width", cam->orig_width);
 			success = json_parse_int(name, "orig height", cam->orig_height);
+			success = json_parse_int(name, "starting width", cam->starting_width);
+			success = json_parse_int(name, "starting height", cam->starting_height);
 			success = json_parse_int(name, "capture effects", cam->capture_effects);
 			char *font_name = json_parse_string(name, "font name");
 			if(font_name != NULL)
@@ -46538,6 +46885,14 @@ int	aa, ab, ac;
 void	my_window_cb(void *v);
 void	sliding_element_close_cb(void *v);
 
+	for(loop = 0;loop < source_cnt;loop++)
+	{
+		Camera *cam = camera[loop];
+		if(cam != NULL)
+		{
+			cam->StopDetectingObjects();
+		}
+	}
 	Fl::remove_timeout(sliding_element_close_cb);
 	Fl::remove_timeout(my_window_cb);
 	if(video_window != NULL)
@@ -46580,7 +46935,7 @@ void	sliding_element_close_cb(void *v);
 	if(audio_library_window != NULL)
 	{
 		audio_library_window->hide();
-		delete audio_library_window;
+		Fl::delete_widget(audio_library_window);
 		audio_library_window = NULL;
 	}
 	if(audio_library_list != NULL)
@@ -46592,19 +46947,19 @@ void	sliding_element_close_cb(void *v);
 	if(monitor_window != NULL)
 	{
 		monitor_window->hide();
-		delete monitor_window;
+		Fl::delete_widget(monitor_window);
 		monitor_window = NULL;
 	}
 	if(select_output_window != NULL)
 	{
 		select_output_window->hide();
-		delete select_output_window;
+		Fl::delete_widget(select_output_window);
 		select_output_window = NULL;
 	}
 	if(edit_output_window != NULL)
 	{
 		edit_output_window->hide();
-		delete edit_output_window;
+		Fl::delete_widget(edit_output_window);
 		edit_output_window = NULL;
 	}
 	for(loop = 0;loop < immediate_cnt;loop++)
@@ -46663,7 +47018,7 @@ void	sliding_element_close_cb(void *v);
 	if(codec_selection_window != NULL)
 	{
 		codec_selection_window->hide();
-		delete codec_selection_window;
+		Fl::delete_widget(codec_selection_window);
 		codec_selection_window = NULL;
 	}
 	if(ptz_mode == 1)
@@ -48257,6 +48612,114 @@ void	ndi_focus_near_cb(void *v)
 	Fl::repeat_timeout(win->ndi_focus_accel, ndi_focus_near_cb, win);
 }
 
+static uint32_t ProportionalSpeed(int error, uint32_t speed_floor, uint32_t speed_max)
+{
+	uint32_t magnitude = (uint32_t)abs(error);
+	uint32_t scaled = (magnitude * speed_max) / PROPORTIONAL_SPAN;
+	if(scaled > speed_max)
+	{
+		scaled = speed_max;
+	}
+	if(scaled < speed_floor)
+	{
+		scaled = speed_floor;
+	}
+	return scaled;
+}
+
+int DriveToRelativeTarget(VISCAInterface_t *iface, VISCACamera_t *camera, RelativeTargetRequest_t *request, volatile int *stop_requested)
+{
+	uint32_t err;
+	uint32_t last_consumed_sequence = request->sequence - 1; /* force first-pass anchor */
+	int absolute_target_pan = 0;
+	int absolute_target_tilt = 0;
+
+	while(1)
+	{
+		if(stop_requested != NULL && *stop_requested)
+		{
+			break;
+		}
+		int16_t current_pan;
+		int16_t current_tilt;
+		err = VISCA_get_pantilt_position(iface, camera, &current_pan, &current_tilt);
+		if(err != VISCA_SUCCESS)
+		{
+			return (int)err;
+		}
+		uint32_t seen_sequence = request->sequence;
+		if(seen_sequence != last_consumed_sequence)
+		{
+			/* A new relative request has arrived (or this is the first
+			   iteration). Re-anchor to an absolute target using the
+			   camera's position right now. */
+			absolute_target_pan = (int)current_pan + request->pan_delta;
+			absolute_target_tilt = (int)current_tilt + request->tilt_delta;
+			last_consumed_sequence = seen_sequence;
+		}
+		int pan_error = absolute_target_pan - (int)current_pan;
+		int tilt_error = absolute_target_tilt - (int)current_tilt;
+		if(abs(pan_error) <= PAN_TILT_TOLERANCE && abs(tilt_error) <= PAN_TILT_TOLERANCE)
+		{
+			break;
+		}
+		uint32_t pan_speed = ProportionalSpeed(pan_error, PAN_SPEED_FLOOR, PAN_SPEED_MAX);
+		uint32_t tilt_speed = ProportionalSpeed(tilt_error, TILT_SPEED_FLOOR, TILT_SPEED_MAX);
+
+		bool pan_needed = abs(pan_error) > PAN_TILT_TOLERANCE;
+		bool tilt_needed = abs(tilt_error) > PAN_TILT_TOLERANCE;
+		bool pan_positive = pan_error > 0;
+		bool tilt_positive = tilt_error > 0;
+
+		if(pan_needed && tilt_needed)
+		{
+			if(pan_positive && tilt_positive)
+			{
+				err = VISCA_set_pantilt_upright(iface, camera, pan_speed, tilt_speed);
+			}
+			else if(pan_positive && !tilt_positive)
+			{
+				err = VISCA_set_pantilt_downright(iface, camera, pan_speed, tilt_speed);
+			}
+			else if(!pan_positive && tilt_positive)
+			{
+				err = VISCA_set_pantilt_upleft(iface, camera, pan_speed, tilt_speed);
+			}
+			else
+			{
+				err = VISCA_set_pantilt_downleft(iface, camera, pan_speed, tilt_speed);
+			}
+		}
+		else if(pan_needed)
+		{
+			err = pan_positive
+				? VISCA_set_pantilt_right(iface, camera, pan_speed, tilt_speed)
+				: VISCA_set_pantilt_left(iface, camera, pan_speed, tilt_speed);
+		}
+		else if(tilt_needed)
+		{
+			err = tilt_positive
+				? VISCA_set_pantilt_up(iface, camera, pan_speed, tilt_speed)
+				: VISCA_set_pantilt_down(iface, camera, pan_speed, tilt_speed);
+		}
+		else
+		{
+			break;
+		}
+		if(err != VISCA_SUCCESS)
+		{
+			return (int)err;
+		}
+		VISCA_usleep(POSITION_POLL_USLEEP);
+	}
+	err = VISCA_set_pantilt_stop(iface, camera, PAN_SPEED_FLOOR, TILT_SPEED_FLOOR);
+	if(err != VISCA_SUCCESS)
+	{
+		return (int)err;
+	}
+	return 0;
+}
+
 void	MyWin::PTZ_DoCommand(int index, int button, int arg_cnt, int arg0, int arg1, int arg2, int arg3, int arg4)
 {
 static char	buf1[256];
@@ -48341,7 +48804,11 @@ static char	buf2[256];
 			button = PTZ_PAN_STOP;
 		}
 	}
-	if(button == PTZ_UP_LEFT)
+	if(button == PTZ_CLEAR)
+	{
+		int err = VISCA_clear(win->ptz_current_interface, win->ptz_current_camera);
+	}
+	else if(button == PTZ_UP_LEFT)
 	{
 		if((bound_cam->ndi_ptz == 1) && (win->prefer_ndi == 1))
 		{
@@ -49838,7 +50305,7 @@ void	exit_timer_cb(void *v)
 void	MyWin::InitiateExit()
 {
 	exit_timer = time(0) + 10;
-	Fl::add_timeout(1.0, exit_timer_cb, this);
+	Fl::add_timeout(0.0, exit_timer_cb, this);
 }
 
 void	MyWin::NoteKey(int key_num, int state)
@@ -49946,9 +50413,14 @@ int		loop;
 			DecreaseVolume();
 			flag = 1;
 		}
-		else if((key == command_key[MY_KEY_CYCLE_CROSSHAIR]) && (!ctrl) && (!alt) && (!shift))
+		else if((key == command_key[MY_KEY_CYCLE_UP_CROSSHAIR]) && (!ctrl) && (!alt) && (!shift))
 		{
-			CycleCrosshair();
+			CycleUpCrosshair();
+			flag = 1;
+		}
+		else if((key == command_key[MY_KEY_CYCLE_DOWN_CROSSHAIR]) && (!ctrl) && (!alt) && (!shift))
+		{
+			CycleDownCrosshair();
 			flag = 1;
 		}
 		else if((key == command_key[MY_KEY_CYCLE_DOWN_THUMBGROUP]) && (!ctrl) && (!alt) && (!shift))
@@ -51036,17 +51508,17 @@ int	loop;
 							}
 							if(no_go == 0)
 							{
-								if((Fl::event_inside(this))
-								&& (xx > cam->image_sx) && (xx < (cam->image_sx + cam->mat.cols))
-								&& (yy > cam->image_sy) && (yy < (cam->image_sy + cam->mat.rows)))
+								if((xx > cam->image_sx) && (xx < (cam->image_sx + cam->display_width))
+								&& (yy > cam->image_sy) && (yy < (cam->image_sy + cam->display_height)))
 								{
 									if(my_ptz_index > -1)
 									{
-										if(ptz_window[my_ptz_index]->center_on_coord == 1)
+										PTZ_Window *ptz_win = ptz_window[my_ptz_index];
+										if(ptz_win->center_on_coord == 1)
 										{
 											int click_x = xx - cam->image_sx;
 											int click_y = yy - cam->image_sy;
-											ptz_window[my_ptz_index]->CenterCameraOnPixel(click_x, click_y, ptz_window[my_ptz_index]->ptz_zoom_reading);
+											ptz_win->CenterCameraOnPixel(click_x, click_y, ptz_win->ptz_zoom_reading);
 										}
 										else
 										{
@@ -51087,11 +51559,11 @@ int	loop;
 				else if(Fl::event_button() == FL_MIDDLE_MOUSE)
 				{
 					ptz_middle_mouse++;
-					if(ptz_middle_mouse > 4)
+					if(ptz_middle_mouse > PTZ_MIDDLE_MOUSE_TRANSPARENCY)
 					{
-						ptz_middle_mouse = 0;
+						ptz_middle_mouse = PTZ_MIDDLE_MOUSE_DIGITAL_SCALING;
 					}
-					if(ptz_middle_mouse == 1)
+					if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOMING)
 					{
 						CenterMessage("Zoom", 100);
 						ptz_window[instance]->zoom_label->labelcolor(CYAN);
@@ -51100,7 +51572,7 @@ int	loop;
 						ptz_window[instance]->ptz_zoomer_speed = 0;
 						ViscaCommand(instance, PTZ_ZOOM_STOP);
 					}
-					else if(ptz_middle_mouse == 2)
+					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_FOCUS)
 					{
 						CenterMessage("Focus", 100);
 						ptz_window[instance]->zoom_label->labelcolor(YELLOW);
@@ -51109,17 +51581,17 @@ int	loop;
 						ptz_window[instance]->ptz_zoomer_speed = 0;
 						ViscaCommand(instance, PTZ_ZOOM_STOP);
 					}
-					else if(ptz_middle_mouse == 3)
+					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOM_WITH_SPEED_CONTROL)
 					{
 						CenterMessage("Zoom with speed control", 100);
 						ptz_window[instance]->zoom_label->labelcolor(CYAN);
 						ptz_window[instance]->focus_label->labelcolor(YELLOW);
 					}
-					else if(ptz_middle_mouse == 4)
+					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_TRANSPARENCY)
 					{
 						CenterMessage("Interface Transparency", 100);
 					}
-					else
+					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_DIGITAL_SCALING)
 					{
 						CenterMessage("Digital Scaling", 100);
 					}
@@ -51301,7 +51773,6 @@ int	MyWin::HandleRelease(Camera *cam)
 	&& (resize_corner == 0)
 	&& (restore_corner == 0))
 	{
-		reset_button_cb(NULL, this);
 		int drag_stop_x = Fl::event_x();
 		int drag_stop_y = Fl::event_y();
 		if(drag_stop_x < drag_start_x)
@@ -52544,7 +53015,7 @@ int	MyWin::HandleMousewheelPTZ(Camera *cam)
 		}
 		if(instance != -1)
 		{
-			if(ptz_middle_mouse == 1)
+			if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOMING)
 			{
 				int direction = Fl::event_dy();
 				if(direction > 0)
@@ -52566,7 +53037,7 @@ int	MyWin::HandleMousewheelPTZ(Camera *cam)
 					}
 				}
 			}
-			else if(ptz_middle_mouse == 2)
+			else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_FOCUS)
 			{
 				int direction = Fl::event_dy();
 				if(direction > 0)
@@ -52582,7 +53053,7 @@ int	MyWin::HandleMousewheelPTZ(Camera *cam)
 					flag = 1;
 				}
 			}
-			else if(ptz_middle_mouse == 3)
+			else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOM_WITH_SPEED_CONTROL)
 			{
 				ptz_zoomer += Fl::event_dy();
 				if(ptz_zoomer > 0)
@@ -52610,7 +53081,7 @@ int	MyWin::HandleMousewheelPTZ(Camera *cam)
 				}
 				flag = 1;
 			}
-			else if(ptz_middle_mouse == 4)
+			else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_TRANSPARENCY)
 			{
 				unsigned char black_red = 0;
 				unsigned char black_green = 0;
@@ -52883,6 +53354,13 @@ void	MyWin::RubberbandMode(int in_mode)
 	im_drawing_mode = 0;
 	immediate_drawing_window->mode = DRAWING_MODE_NONE;
 	immediate_drawing_window->quick_mode = 0;
+	if(rubberband_mode != IM_DRAWING_MODE)
+	{
+		if(immediate_drawing_window->visible())
+		{
+			immediate_drawing_window->hide();
+		}
+	}
 }
 
 void	rubberband_popup_cb(Fl_Widget *w, void *v)
@@ -53534,11 +54012,14 @@ int	loop;
 								popup->browser->add("Blank");
 							}
 							popup->browser->add("@C3Scroll Mode");
-							popup->browser->add("@C3Drawing Mode");
-							popup->browser->add("@C3Layout Mode");
-							popup->browser->add("@C3Set Interest Mode");
-							popup->browser->add("@C3Dynamic Coloring");
-							popup->browser->add("@C3Reposition Mode");
+							if(cam->zoom_box_display == 0)
+							{
+								popup->browser->add("@C3Drawing Mode");
+								popup->browser->add("@C3Layout Mode");
+								popup->browser->add("@C3Set Interest Mode");
+								popup->browser->add("@C3Dynamic Coloring");
+								popup->browser->add("@C3Reposition Mode");
+							}
 							popup->set_non_modal();
 							popup->Fit();
 							popup->show();
@@ -53604,11 +54085,14 @@ int	loop;
 								popup->browser->add("Blank");
 							}
 							popup->browser->add("@C3Scroll Mode");
-							popup->browser->add("@C3Drawing Mode");
-							popup->browser->add("@C3Layout Mode");
-							popup->browser->add("@C3Set Interest Mode");
-							popup->browser->add("@C3Dynamic Coloring");
-							popup->browser->add("@C3Reposition Mode");
+							if(cam->zoom_box_display == 0)
+							{
+								popup->browser->add("@C3Drawing Mode");
+								popup->browser->add("@C3Layout Mode");
+								popup->browser->add("@C3Set Interest Mode");
+								popup->browser->add("@C3Dynamic Coloring");
+								popup->browser->add("@C3Reposition Mode");
+							}
 							popup->set_non_modal();
 							popup->Fit();
 							popup->show();
@@ -53638,11 +54122,14 @@ int	loop;
 							popup->browser->add("Blank");
 						}
 						popup->browser->add("@C3Scroll Mode");
-						popup->browser->add("@C3Drawing Mode");
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Layout Mode");
-						popup->browser->add("@C3Set Interest Mode");
-						popup->browser->add("@C3Dynamic Coloring");
+						if(cam->zoom_box_display == 0)
+						{
+							popup->browser->add("@C3Drawing Mode");
+							popup->browser->add("@C3Rubberband Mode");
+							popup->browser->add("@C3Layout Mode");
+							popup->browser->add("@C3Set Interest Mode");
+							popup->browser->add("@C3Dynamic Coloring");
+						}
 						popup->set_non_modal();
 						popup->Fit();
 						popup->show();
@@ -53718,11 +54205,14 @@ int	loop;
 							popup->browser->add("Blank");
 						}
 						popup->browser->add("@C3Scroll Mode");
-						popup->browser->add("@C3Drawing Mode");
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Layout Mode");
-						popup->browser->add("@C3Set Interest Mode");
-						popup->browser->add("@C3Reposition Mode");
+						if(cam->zoom_box_display == 0)
+						{
+							popup->browser->add("@C3Drawing Mode");
+							popup->browser->add("@C3Rubberband Mode");
+							popup->browser->add("@C3Layout Mode");
+							popup->browser->add("@C3Set Interest Mode");
+							popup->browser->add("@C3Reposition Mode");
+						}
 						popup->set_non_modal();
 						popup->Fit();
 						popup->show();
@@ -53795,11 +54285,14 @@ int	loop;
 							popup->browser->add("Blank");
 						}
 						popup->browser->add("@C3Scroll Mode");
-						popup->browser->add("@C3Drawing Mode");
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Set Interest Mode");
-						popup->browser->add("@C3Dynamic Coloring");
-						popup->browser->add("@C3Reposition Mode");
+						if(cam->zoom_box_display == 0)
+						{
+							popup->browser->add("@C3Drawing Mode");
+							popup->browser->add("@C3Rubberband Mode");
+							popup->browser->add("@C3Set Interest Mode");
+							popup->browser->add("@C3Dynamic Coloring");
+							popup->browser->add("@C3Reposition Mode");
+						}
 						popup->set_non_modal();
 						popup->Fit();
 						popup->show();
@@ -53834,11 +54327,14 @@ int	loop;
 						}
 						popup->browser->add("Load Interest");
 						popup->browser->add("@C3Scroll Mode");
-						popup->browser->add("@C3Drawing Mode");
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Layout Mode");
-						popup->browser->add("@C3Dynamic Coloring");
-						popup->browser->add("@C3Reposition Mode");
+						if(cam->zoom_box_display == 0)
+						{
+							popup->browser->add("@C3Drawing Mode");
+							popup->browser->add("@C3Rubberband Mode");
+							popup->browser->add("@C3Layout Mode");
+							popup->browser->add("@C3Dynamic Coloring");
+							popup->browser->add("@C3Reposition Mode");
+						}
 						popup->set_non_modal();
 						popup->Fit();
 						popup->show();
@@ -53899,12 +54395,15 @@ int	loop;
 						{
 							popup->browser->add("Blank");
 						}
-						popup->browser->add("@C3Drawing Mode");
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Layout Mode");
-						popup->browser->add("@C3Set Interest Mode");
-						popup->browser->add("@C3Dynamic Coloring");
-						popup->browser->add("@C3Reposition Mode");
+						if(cam->zoom_box_display == 0)
+						{
+							popup->browser->add("@C3Drawing Mode");
+							popup->browser->add("@C3Rubberband Mode");
+							popup->browser->add("@C3Layout Mode");
+							popup->browser->add("@C3Set Interest Mode");
+							popup->browser->add("@C3Dynamic Coloring");
+							popup->browser->add("@C3Reposition Mode");
+						}
 						popup->set_non_modal();
 						popup->Fit();
 						popup->show();
@@ -54292,7 +54791,7 @@ int		loop;
 	if(flag == 0)
 	{
 		NoteKey(key, 1);
-		HandleKeyboard(event, cam);
+		flag = HandleKeyboard(event, cam);
 		int state = Fl::event_state();
 		if((state & FL_CTRL) == FL_CTRL)
 		{
@@ -54510,7 +55009,10 @@ int	MyWin::OnPush(int event, Camera *cam)
 					{
 						if(cam->match_template == 0)
 						{
-							flag = HandleMenuPopup(last_push_x, last_push_y);
+							if(crosshair_mode != MEASURE_CROSSHAIR_MODE) 
+							{
+								flag = HandleMenuPopup(last_push_x, last_push_y);
+							}
 						}
 						if(rubberband_mode == INTEREST_MODE)
 						{
@@ -54559,7 +55061,9 @@ int	MyWin::OnPush(int event, Camera *cam)
 						&& (move_corner == 0) 
 						&& (resize_corner == 0) 
 						&& (restore_corner == 0)
-						&& (lock_ptz_mouse_move == 0))
+						&& (lock_ptz_mouse_move == 0)
+						&& (cam->clockwise_rotation == 0)
+						&& (crosshair_mode != MEASURE_CROSSHAIR_MODE))
 						{
 							if((cam->zoom <= 1.0) || (Fl::event_button() == FL_MIDDLE_MOUSE))
 							{
@@ -54573,6 +55077,19 @@ int	MyWin::OnPush(int event, Camera *cam)
 									MoveSelectImmediate(cam, last_push_x, last_push_y);
 								}
 							}
+						}
+						else if(crosshair_mode == MEASURE_CROSSHAIR_MODE) 
+						{
+							if(Fl::event_button() == FL_RIGHT_MOUSE)
+							{
+								last_push_x = -1;
+								last_push_y = -1;
+								flag = 1;
+							}
+						}
+						if((ptz_middle_mouse > PTZ_MIDDLE_MOUSE_DIGITAL_SCALING) && (ptz_mode == 0))
+						{
+							ptz_middle_mouse = PTZ_MIDDLE_MOUSE_DIGITAL_SCALING;
 						}
 					}
 				}
@@ -55034,7 +55551,7 @@ int	MyWin::OnMousewheel(int event, Camera *cam)
 				}
 				else if(use_mousewheel == 1)
 				{
-					if((ptz_middle_mouse > 0) && (ptz_mode == 1))
+					if((ptz_middle_mouse > PTZ_MIDDLE_MOUSE_DIGITAL_SCALING) && (ptz_mode == 1))
 					{
 						if(cam->zoom <= 1.0)
 						{
@@ -55116,7 +55633,10 @@ int		loop;
 					break;
 					case(FL_HIDE):
 					{
-						flag = OnHide();
+						if(actively_exiting == 0)
+						{
+							flag = OnHide();
+						}
 					}
 					break;
 					case(FL_PASTE):
@@ -57123,7 +57643,14 @@ void	MyWin::ErrorMessage()
 		ey += 4;
 		int xx = (Fl::w() / 2) - (ex / 2);
 		int yy = (Fl::h() / 2) - (ey / 2);
-		fl_color(RED);
+		if(strncmp(error_message, "Warning:", strlen("Warning:")) != 0)
+		{
+			fl_color(RED);
+		}
+		else
+		{
+			fl_color(BLACK);
+		}
 		fl_rectf(xx, yy, ex, ey);
 		fl_color(WHITE);
 		fl_rect(xx, yy, ex, ey);
@@ -57183,6 +57710,7 @@ char		buf[256];
 int			inner;
 int			outer;
 
+double top = since();
 	fl_color(BLACK);
 	fl_rectf(0, 0, w(), h());
 	fl_color(YELLOW);
@@ -57412,37 +57940,34 @@ int			outer;
 						}
 						else if(cam->fps > 0.0)
 						{
-							if(zoom_boxing == 0)
+							if(audio_thumbnail_cnt > 0)
 							{
-								if(audio_thumbnail_cnt > 0)
-								{
-									if(pulse_mixer != NULL)
-									{
-										if(split == 0)
-										{
-											int no_go = 0;
-											if(anim_timeline != NULL)
-											{
-												if(anim_timeline->visible())
-												{
-													no_go = 1;
-												}
-											}
-											if(no_go == 0)
-											{
-												DrawAudioGraph(cam);
-											}
-										}
-									}
-								}
-								if(cam == DisplayedCamera())
+								if(pulse_mixer != NULL)
 								{
 									if(split == 0)
 									{
-										current_fps_window->showing = 1;
-										current_fps_window->draw();
-										current_fps_window->showing = 0;
+										int no_go = 0;
+										if(anim_timeline != NULL)
+										{
+											if(anim_timeline->visible())
+											{
+												no_go = 1;
+											}
+										}
+										if(no_go == 0)
+										{
+											DrawAudioGraph(cam);
+										}
 									}
+								}
+							}
+							if(cam == DisplayedCamera())
+							{
+								if(split == 0)
+								{
+									current_fps_window->showing = 1;
+									current_fps_window->draw();
+									current_fps_window->showing = 0;
 								}
 							}
 						}
@@ -57838,6 +58363,43 @@ void	MyWin::DrawCrosshairs(Camera *cam)
 	else if(crosshair_mode == RULER_CROSSHAIR_MODE)
 	{
 		crosshair_ruler(sx, sy, iw, ih);
+	}
+	else if(crosshair_mode == MEASURE_CROSSHAIR_MODE)
+	{
+		int mx = Fl::event_x();
+		int my = Fl::event_y();
+		if((mx > sx) && (my > sy)
+		&& (mx < (sx + display_width))
+		&& (my < (sy + display_height)))
+		{
+			int x1 = last_push_x;
+			int y1 = last_push_y;
+			if((x1 >= sx) && (y1 >= sy))
+			{
+				crosshair_cross(sx, sy, x1 - sx, y1 - sy);
+				fl_color(BLACK);
+				fl_line_style(FL_SOLID, 3);
+				fl_line(x1, y1, mx, my);
+				fl_color(WHITE);
+				fl_line_style(FL_SOLID, 1);
+				fl_line(x1, y1, mx, my);
+				int dx = abs(mx - x1);
+				int dy = abs(my - y1);
+				double dist = sqrt((dx * dx) + (dy * dy));
+				fl_font(FL_HELVETICA, 9);
+				char buf[256];
+				sprintf(buf, "%.2f", dist);
+				fl_color(BLACK);
+				fl_rectf(mx - 30, my - 23, 60, 20);
+				fl_color(WHITE);
+				fl_draw(buf, mx - 30, my - 23, 60, 20, FL_ALIGN_CENTER);
+				crosshair_cross(sx, sy, mx - sx, my - sy);
+			}
+			else
+			{
+				crosshair_cross(sx, sy, mx - sx, my - sy);
+			}
+		}
 	}
 }
 
@@ -59278,7 +59840,32 @@ void	MyWin::SetupObjectDetection()
 		if(!net.empty()) 
 		{
 			net.setPreferableBackend(DNN_BACKEND_CUDA);
-			net.setPreferableTarget(DNN_TARGET_CUDA);
+
+			cv::Mat dummyInput(640, 640, CV_8UC3, cv::Scalar(128, 128, 128)); 
+			cv::Mat blob = cv::dnn::blobFromImage(dummyInput, 1.0 / 255.0, cv::Size(640, 640), cv::Scalar(), true, false);
+			net.setInput(blob);
+
+			try
+			{
+				net.setPreferableTarget(DNN_TARGET_CUDA_FP16);
+				std::vector<cv::Mat> outputs;
+				net.forward(outputs);
+			}
+			catch(const cv::Exception& e)
+			{
+				try
+				{
+					fprintf(stderr, "Attempting to initialize object recognition with standard 32 bit FP CUDA.\n");
+					net.setPreferableTarget(DNN_TARGET_CUDA);
+					std::vector<cv::Mat> outputs;
+					net.forward(outputs);
+				}
+				catch(const cv::Exception& criticalErr) 
+				{
+					fprintf(stderr, "Failed to initialize object recognition with CUDA.\n");
+					fprintf(stderr, "[%s]\n", criticalErr.what());
+				}
+			}
 		}
 		else
 		{
@@ -59666,12 +60253,6 @@ void	MyWin::MakeNewSourceWindow()
 	new_source_window = nsw;
 }
 
-void	MyWin::MakeAliasWindow()
-{
-	AliasWindow *aw = new AliasWindow(this);
-	alias_window = aw;
-}
-
 void	MyWin::MakeDynamicStringWindow()
 {
 	DynamicStringWindow *aw = new DynamicStringWindow(this);
@@ -59700,7 +60281,6 @@ void	MyWin::HideButtons()
 		edit_source_button->hide();
 		edit_output_button->hide();
 		select_output_button->hide();
-		alias_button->hide();
 		video_settings_button->hide();
 		ptz_lock_window_button->hide();
 		new_ptz_window_button->hide();
@@ -59940,7 +60520,14 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 			{
 				zoom_box_button->copy_label("Box Zoom");
 			}
-			zoom_box_button->show();
+			if(rubberband_mode == SCROLL_MODE)
+			{
+				zoom_box_button->show();
+			}
+			else
+			{
+				zoom_box_button->hide();
+			}
 			if(source_cnt > 1)
 			{
 				split_button->show();
@@ -59964,10 +60551,6 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 			{
 				edit_output_button->hide();
 				select_output_button->hide();
-			}
-			if(showing_alias_window == 0)
-			{
-				alias_button->show();
 			}
 			if((power_all == 1) && (cam->power == 1))
 			{
@@ -60031,7 +60614,10 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 			}
 			if(fltk_plugin_button != NULL)
 			{
-				fltk_plugin_button->show();
+				if(global_potential_fltk_cnt > 0)
+				{
+					fltk_plugin_button->show();
+				}
 			}
 			if(ptz_mode == 1)
 			{
@@ -60084,7 +60670,14 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 			{
 				cycle_cameras_button->copy_label("Cycle Cameras");
 			}
-			cycle_cameras_button->show();
+			if(source_cnt > 1)
+			{
+				cycle_cameras_button->show();
+			}
+			else
+			{
+				cycle_cameras_button->hide();
+			}
 			if((power_all == 1) && (cam->power == 1))
 			{
 				if(cam->mute_video == 1)
@@ -60209,8 +60802,6 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 				edit_output_button->hide();
 			if(select_output_button != NULL)
 				select_output_button->hide();
-			if(alias_button != NULL)
-				alias_button->hide();
 			if(reset_camera_button != NULL)
 				reset_camera_button->hide();
 			if(flip_horizontal_button != NULL)
@@ -60857,7 +61448,7 @@ void	MyWin::ViscaCommand(int index, int command, int arg_cnt, int arg0, int arg1
 			visca_arg[3] = arg3;
 			visca_arg[4] = arg4;
 			pthread_mutex_unlock(&visca_mutex);
-			pthread_cond_signal(&visca_cond);
+			sem_post(&semaphore);
 		}
 	}
 	else
@@ -60872,7 +61463,7 @@ void	MyWin::ViscaCommand(int index, int command, int arg_cnt, int arg0, int arg1
 		visca_arg[3] = arg3;
 		visca_arg[4] = arg4;
 		pthread_mutex_unlock(&visca_mutex);
-		pthread_cond_signal(&visca_cond);
+		sem_post(&semaphore);
 	}
 }
 
@@ -60886,11 +61477,11 @@ int	visca(int *flag)
 			win->ptz_mode = 1;
 			win->visca_command = 0;
 			win->visca_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
-			win->visca_cond = PTHREAD_COND_INITIALIZER;
+			sem_init(&win->semaphore, 0, 0);
 			int done = 0;
 			while(done == 0)
 			{
-				pthread_cond_wait(&win->visca_cond, &win->visca_mutex);
+				sem_wait(&win->semaphore);
 				pthread_mutex_lock(&win->visca_mutex);
 				int index = win->ptz_window_index;
 				int vc = win->visca_command;
@@ -61011,12 +61602,28 @@ int	aa, ab, ac;
 	}
 }
 
-void	MyWin::CycleCrosshair()
+void	MyWin::CycleUpCrosshair()
 {
 	crosshair_mode++;
-	if(crosshair_mode > RULER_CROSSHAIR_MODE)
+	fl_cursor(FL_CURSOR_DEFAULT);
+	if(crosshair_mode > MEASURE_CROSSHAIR_MODE)
 	{
 		crosshair_mode = 0;
+	}
+	if(crosshair_mode == MEASURE_CROSSHAIR_MODE)
+	{
+		fl_cursor(FL_CURSOR_NONE);
+	}
+}
+
+void	MyWin::CycleDownCrosshair()
+{
+	crosshair_mode--;
+	fl_cursor(FL_CURSOR_DEFAULT);
+	if(crosshair_mode < 0)
+	{
+		crosshair_mode = MEASURE_CROSSHAIR_MODE;
+		fl_cursor(FL_CURSOR_NONE);
 	}
 }
 
@@ -61084,7 +61691,8 @@ void	MyWin::ResetCommandKeys()
 	command_key[MY_KEY_OPEN_PTZ] = FL_F + 4;
 	command_key[MY_KEY_VOLUME_UP] = FL_Right;
 	command_key[MY_KEY_VOLUME_DOWN] = FL_Left;
-	command_key[MY_KEY_CYCLE_CROSSHAIR] = 'm';
+	command_key[MY_KEY_CYCLE_UP_CROSSHAIR] = 'm';
+	command_key[MY_KEY_CYCLE_DOWN_CROSSHAIR] = 'n';
 }
 
 int	MyWin::CheckCommandTitle(char *name)
@@ -61149,7 +61757,8 @@ int	MyWin::CheckCommandTitle(char *name)
 	if(strcasecmp("OPEN CAMERAS", name) == 0) nn = MY_KEY_OPEN_CAMERAS;
 	if(strcasecmp("OPEN AUDIO", name) == 0) nn = MY_KEY_OPEN_AUDIO;
 	if(strcasecmp("OPEN PTZ", name) == 0) nn = MY_KEY_OPEN_PTZ;
-	if(strcasecmp("CYCLE CROSSHAIR", name) == 0) nn = MY_KEY_CYCLE_CROSSHAIR;
+	if(strcasecmp("CYCLE UP CROSSHAIR", name) == 0) nn = MY_KEY_CYCLE_UP_CROSSHAIR;
+	if(strcasecmp("CYCLE DOWN CROSSHAIR", name) == 0) nn = MY_KEY_CYCLE_DOWN_CROSSHAIR;
 	return(nn);
 }
 
@@ -61198,7 +61807,8 @@ void	MyWin::SaveCommandKeyDefinitions(char *filename)
 		fprintf(fp, "PTZ HOME\t%s\n", CommandKeyName(command_key[MY_KEY_PTZ_HOME]));
 		fprintf(fp, "VOLUME UP\t%s\n", CommandKeyName(command_key[MY_KEY_VOLUME_UP]));
 		fprintf(fp, "VOLUME DOWN\t%s\n", CommandKeyName(command_key[MY_KEY_VOLUME_DOWN]));
-		fprintf(fp, "CYCLE CROSSHAIR\t%s\n", CommandKeyName(command_key[MY_KEY_CYCLE_CROSSHAIR]));
+		fprintf(fp, "CYCLE UP CROSSHAIR\t%s\n", CommandKeyName(command_key[MY_KEY_CYCLE_UP_CROSSHAIR]));
+		fprintf(fp, "CYCLE DOWN CROSSHAIR\t%s\n", CommandKeyName(command_key[MY_KEY_CYCLE_DOWN_CROSSHAIR]));
 		fprintf(fp, "CYCLE DOWN THUMBGROUP\t%s\n", CommandKeyName(command_key[MY_KEY_CYCLE_DOWN_THUMBGROUP]));
 		fprintf(fp, "CYCLE UP THUMBGROUP\t%s\n", CommandKeyName(command_key[MY_KEY_CYCLE_UP_THUMBGROUP]));
 		fprintf(fp, "DISPLAY THUMBGROUP 0\t%s\n", CommandKeyName(command_key[MY_KEY_DISPLAY_THUMBGROUP_0]));
@@ -61807,12 +62417,6 @@ int	loop;
 	zoom_box_button->priority = 2;
 	zoom_box_button->copy_tooltip("Zoom in using a draggable selection area.");
 	zoom_box_button->callback(zoom_box_button_cb, this);
-	y_pos += y_inc;
-
-	alias_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Set Camera Alias");
-	alias_button->priority = 2;
-	alias_button->copy_tooltip("Set the alias for the currently displayed camera.");
-	alias_button->callback(alias_button_cb, this);
 	y_pos += y_inc;
 
 	reset_camera_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Reset Camera");
@@ -79600,6 +80204,7 @@ PythonButtonWindow::PythonButtonWindow(MyWin *in_win) : Dialog(in_win, 220, 400,
 	pack->color(WHITE);
 	pack->end();
 	scroll->end();
+	end();
 }
 
 PythonButtonWindow::~PythonButtonWindow()
@@ -79786,6 +80391,7 @@ CreatePythonButtonWindow::CreatePythonButtonWindow(MyWin *in_win) : Dialog(in_wi
 	cancel->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	cancel->copy_tooltip("Close the dialog.");
 	cancel->callback(hide_window_cb, this);
+	end();
 }
 
 CreatePythonButtonWindow::~CreatePythonButtonWindow()
@@ -81925,6 +82531,9 @@ int		loop;
 char	buf[32768];
 double	calc_fps = 0.0;
 static long int last_time_here = 0;
+static double high_fps = 0.0;
+static double low_fps = 100.0;
+static int static_cnt = 0;
 
 	if((my_window->split == 0) && (showing == 1))
 	{
@@ -82032,7 +82641,29 @@ static long int last_time_here = 0;
 					fl_color(RED);
 					fl_rectf(xx + 3, yy + 3, 18, 18);
 				}
-				sprintf(buf, "%06d %03d:%02d [%06.02f : %06.02f] %6.2f %03d (%d x %d) [%03ld]", my_window->recorded_frames, minutes, seconds, cam->current_fps, calc_fps, cam->fps, cam->hot_fps, cam->width, cam->height, use_here);
+				sprintf(buf, "%06d %03d:%02d [%03.0f : %03.0f] %3.0f %03d (%d x %d) [%03ld] low: %03.0f high: %03.0f", my_window->recorded_frames, minutes, seconds, cam->current_fps, calc_fps, cam->fps, cam->hot_fps, cam->width, cam->height, use_here, low_fps, high_fps);
+				if(static_cnt > 360)
+				{
+					if((static_cnt % 10000) == 0)
+					{
+						high_fps = 0.0;
+						low_fps = 100.0;
+					}
+					if(calc_fps > high_fps)
+					{
+						high_fps = calc_fps;
+					}
+					if(calc_fps < low_fps)
+					{
+						low_fps = calc_fps;
+					}
+					if(static_cnt > 1000000)
+					{
+						static_cnt = 361;
+					}
+				}
+				static_cnt++;
+
 				if(cam->hot_fps < my_window->minimum_fps)
 				{
 					fl_color(fl_lighter(RED));
@@ -83148,6 +83779,10 @@ void	show_help()
 	printf("# Test the codecs found at current settings to determing if they are usable,\n");
 	printf("# eliminating those that are not from the offered options.\n");
 	printf("dvptz --test_codecs\n\n");
+	printf("# Use a separate thread for object detection than from the main event loop.\n");
+	printf("dvptz --threaded_object_detection\n\n");
+	printf("# During object detection, evaluate the frame using overlapping tiles to see smaller details.\n");
+	printf("dvptz --tiled_object_detection\n\n");
 	printf("# Timestamp video images.\n");
 	printf("dvptz --timestamp\n\n");
 	printf("# Disregard settings when starting, using defaults and command line arguments instead.\n");
@@ -83534,6 +84169,8 @@ char		local_buf[32768];
 	int use_fullscreen = 0;
 	int use_fast_start = 0;
 	int use_fast_start_record = 0;
+	int use_threaded_object_recognition = 0;
+	int use_tiled_object_recognition = 0;
 	strcpy(use_encode_summary_file, "");
 	start_win->Update("Parsing Command Line Arguments...");
 	if(argc > 1)
@@ -83975,6 +84612,14 @@ char		local_buf[32768];
 				{
 					test_codecs = 1;
 				}
+				else if(strncmp(argv[loop], "--threaded_object_detection", strlen("--threaded_object_detection")) == 0)
+				{
+					use_threaded_object_recognition = 1;
+				}
+				else if(strncmp(argv[loop], "--tiled_object_detection", strlen("--tiled_object_detection")) == 0)
+				{
+					use_tiled_object_recognition = 1;
+				}
 				else if(strncmp(argv[loop], "--no_query_codecs", strlen("--no_query_codecs")) == 0)
 				{
 					query_codecs = 0;
@@ -84407,6 +85052,8 @@ char		local_buf[32768];
 		, use_borderless
 		, use_cycle_cameras
 		, use_fast_start
+		, use_threaded_object_recognition
+		, use_tiled_object_recognition
 		, "DVPTZ");
 	win->color(WHITE);
 	win->end();
@@ -84542,7 +85189,6 @@ char		local_buf[32768];
 
 	start_win->Update("Opening New Source Window");
 	win->MakeNewSourceWindow();
-	win->MakeAliasWindow();
 	win->MakeDynamicStringWindow();
 
 	start_win->Update("Opening URL Window");
@@ -85108,23 +85754,39 @@ struct tm	*tm;
 					start_win->intro_pipe_fp = NULL;
 					my_window->show();
 					Fl::run();
+					delete my_window;
 				}
 				else
 				{
 					Fl::add_timeout(0.0, start_cb, start_win);
 					Fl::run();
+					if(global_my_window != NULL)
+					{
+						delete global_my_window;
+						global_my_window = NULL;
+					}
 				}
 			}
 			else
 			{
 				Fl::add_timeout(0.0, start_cb, start_win);
 				Fl::run();
+				if(global_my_window != NULL)
+				{
+					delete global_my_window;
+					global_my_window = NULL;
+				}
 			}
 		}
 		else if(placard == 2)
 		{
 			Fl::add_timeout(0.0, start_cb, start_win);
 			Fl::run();
+			if(global_my_window != NULL)
+			{
+				delete global_my_window;
+				global_my_window = NULL;
+			}
 		}
 		else
 		{
@@ -85132,6 +85794,11 @@ struct tm	*tm;
 			MyWin *my_window = StartMain(0, fast_start);
 			my_window->show();
 			Fl::run();
+			if(global_my_window != NULL)
+			{
+				delete global_my_window;
+				global_my_window = NULL;
+			}
 		}
 		if(void_capture_finish_capture != NULL)
 		{
@@ -85161,6 +85828,7 @@ struct tm	*tm;
 	if(hNDILib != NULL)
 	{
 		dlclose(hNDILib);
+		hNDILib = NULL;
 	}
 	if(global_html == 1)
 	{
@@ -85178,4 +85846,5 @@ struct tm	*tm;
 			free(global_argv[loop]);
 		}
 	}
+	return(0);
 }
