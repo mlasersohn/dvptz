@@ -124,11 +124,10 @@ using namespace std;
 
 #include	<cjson/cJSON.h>
 
-#include "../MiscSource/image_memory.h"
+#include "../Build/image_memory.h"
 #include "../Build/irc.h"
 #include "../Build/PulseAudio.h"
 #include "../Build/vlc_window.h"
-#include "../Build/render_html.h"
 #include "../Build/html_window.h"
 #include "../Build/embed_app.h"
 #include "../Build/common.h"
