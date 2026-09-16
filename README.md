@@ -424,7 +424,7 @@ and some of it is ill-advised, borrow and run this code at your own risk. I will
 do not expect timely answers to questions, nor will I defend myself or this program from criticism of any sort. I'd rather have fun.
 
 # LICENSE
-This source code is copyrighted by Mark Lasersohn (c) 2025. You are licensed to use any portion of it for any non-nefarious
+This source code is copyrighted by Mark Lasersohn (c) 2026. You are licensed to use any portion of it for any non-nefarious
 purpose. I am not responsible in any way for anything that happens to you or anyone else if you do. I make no claim that this
 program or any of the code you might lift from it does much of anything you might want. It might, but then I am not entirely
 sure you and I agree on terminology.
