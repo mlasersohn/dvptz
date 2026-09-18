@@ -71,8 +71,8 @@
 #define	V4L_FOCUS_NEAR	128
 #define	V4L_AUTOFOCUS	256
 
-#define	YOLO_ONNX_FILENAME		"/home/laser/SSD/OpenCV/Models/yolov8m-oiv7.onnx"
-#define	YOLO_NAMES_FILENAME	"/home/laser/SSD/OpenCV/open_images.txt"
+#define	YOLO_ONNX_FILENAME		"Models/yolov8m-oiv7.onnx"
+#define	YOLO_NAMES_FILENAME		"open_images.txt"
 
 #define	MULTIPIP_SIDE_RIGHT	1
 #define	MULTIPIP_SIDE_LEFT	2
@@ -220,6 +220,7 @@
 #define	MY_KEY_VOLUME_DOWN						61
 #define	MY_KEY_CYCLE_UP_CROSSHAIR				62
 #define	MY_KEY_CYCLE_DOWN_CROSSHAIR				63
+#define	MY_KEY_REPEAT_LAST_BUTTON				64
 
 #define	FILTER_TYPE_VIDEO			0
 #define	FILTER_TYPE_AUDIO			1
@@ -289,6 +290,11 @@
 #define	MISC_COPY_SATURATE				14
 #define	MISC_COPY_DESATURATE			15
 #define	MISC_COPY_VIDEO_SETTINGS		16
+#define	MISC_COPY_BLUR					17
+#define	MISC_COPY_HOLE					18
+#define	MISC_COPY_SHARPEN				19
+#define	MISC_COPY_PIXELATE				20
+#define	MISC_COPY_BLEND					21
 
 #define	EDITING_MISC_MOVE				0
 #define	EDITING_MISC_RESIZE				1
@@ -397,8 +403,9 @@
 #define	VISCA_INTERFACE_TYPE_UDP	2
 #define	VISCA_INTERFACE_TYPE_NDI	3
 
-#define	PAN_TILT_STYLE_BUTTONS		0
-#define	PAN_TILT_STYLE_JOYSTICK		1
+#define	PAN_TILT_STYLE_BUTTONS			0
+#define	PAN_TILT_STYLE_JOYSTICK			1
+#define	PAN_TILT_STYLE_BIG_JOYSTICK		2
 
 #define	ALERT_DISPLAY_MODE_ALL			0
 #define	ALERT_DISPLAY_MODE_FIRST_LINE	1
@@ -500,13 +507,39 @@
 #define TILT_SPEED_FLOOR			1
 #define PROPORTIONAL_SPAN			200		// error magnitude at which we hit max speed
 
+#define	PTZ_PRESET_GROUP_MODE_BUTTONS	0
+#define	PTZ_PRESET_GROUP_MODE_NAMES		1
+#define	PTZ_PRESET_GROUP_MODE_EDIT		2
+
+#define	OBJECTS_PER_PAGE				102
+#define	MAXIMUM_OBJECTS					1024
+
+#define	TRANSPARENT_PANELS				1
+#define	TRANSPARENT_DIALOGS				2
+
+#define	VIDEO_EFFECTS					1
+#define	PAINT_RECOGNIZED_OBJECTS		2
+#define	SHOW_IMMEDIATE_LIST				3
+#define	COLOR_IT						4
+#define	MISC_COPY_COMMANDS				5
+#define	DRAW_SHAPES						6
+#define	ZOOM_BOX_DISPLAY				7
+#define	PYTHON_RUN_FRAME_FILTER			8
+#define	PYTHON_RUN_LOOP					9
+
+#define	CAMERA_NOTE_PLACEMENT_TOP_LEFT			1
+#define	CAMERA_NOTE_PLACEMENT_TOP_CENTER		2
+#define	CAMERA_NOTE_PLACEMENT_TOP_RIGHT			3
+#define	CAMERA_NOTE_PLACEMENT_BOTTOM_RIGHT		4
+#define	CAMERA_NOTE_PLACEMENT_BOTTOM_CENTER		5
+#define	CAMERA_NOTE_PLACEMENT_BOTTOM_LEFT		6
+
 typedef struct
 {
-    volatile int      pan_delta;
-    volatile int      tilt_delta;
-    volatile uint32_t sequence;
+	volatile int	  pan_delta;
+	volatile int	  tilt_delta;
+	volatile uint32_t sequence;
 } RelativeTargetRequest_t;
-// COW COW
 
 typedef struct 
 {
@@ -556,8 +589,86 @@ class	HoverMenu;
 class	NewPTZWindow;
 class	SampleBox;
 class	VideoWindow;
+class	EffectOrderWindow;
 
 struct TileRect { int x, y, w, h; };
+
+class GlassWindow : public Fl_Window 
+{
+private:
+	float _opacity; // Store alpha value from 0.0 (glass) to 1.0 (opaque)
+	GC win_gc; 
+
+public:
+	GlassWindow(int w, int h, const char *title = 0) : Fl_Window(w, h, title), _opacity(0.0f), win_gc(None) 
+	{
+		border(0); 
+		box(FL_NO_BOX); 
+	}
+	~GlassWindow() 
+	{
+		if(win_gc != None) XFreeGC(fl_display, win_gc);
+	}
+
+	// Set the window background opacity over time (0.0f to 1.0f)
+	void opacity(float alpha) 
+	{
+		// Clamp value between 0.0 and 1.0
+		if(alpha < 0.0f) alpha = 0.0f;
+		if(alpha > 1.0f) alpha = 1.0f;
+		
+		_opacity = alpha;
+		damage(FL_DAMAGE_ALL); 
+		redraw(); 
+	}
+
+	float opacity() const { return _opacity; }
+
+protected:
+	void draw() override 
+	{
+		if(win_gc == None && fl_xid(this) != 0) 
+		{
+			win_gc = XCreateGC(fl_display, fl_xid(this), 0, nullptr);
+		}
+		// 1. Convert FLTK logical dimensions to hardware pixels for high-DPI scaling
+		float scale = Fl::screen_scale(this->screen_num());
+		int physical_w = (int)(w() * scale);
+		int physical_h = (int)(h() * scale);
+
+		// 2. Convert 0.0-1.0 float to an 8-bit integer transparency mask (0x00 to 0xFF)
+		unsigned char alpha_byte = (unsigned char)(_opacity * 255.0f);
+		
+		// 3. Shift alpha into the highest 8 bits of the 32-bit ARGB profile (0xAA000000)
+		unsigned long alpha_mask = ((unsigned long)alpha_byte) << 24;
+
+		// 4. Combine with the lower 24-bit RGB values from FLTK's current color index
+		unsigned long custom_argb_color = alpha_mask | fl_xpixel(color());
+
+		// 5. Paint the background buffer layer smoothly
+		XSetForeground(fl_display, win_gc, custom_argb_color);
+		XFillRectangle(fl_display, fl_window, win_gc, 0, 0, physical_w, physical_h);
+
+		// 6. Force FLTK to draw child widgets over our custom backdrop layer
+		Fl_Window::draw();
+	}
+};
+
+class NavBrowser : public Fl_Hold_Browser
+{
+public:
+	NavBrowser(int X, int Y, int W, int H, const char *L = 0);
+	int handle(int event) override;
+
+protected:
+	int handle_key(int key);
+	void select_and_reveal(int line, bool from_above);
+	void move_selection(int delta);
+	void page_move(int direction);
+	void go_home(void);
+	void go_end(void);
+	int visible_lines(void) const;
+};
 
 class	SliderShortcutEntry
 {
@@ -680,6 +791,7 @@ public:
 				~MyButton();
 
 	int			handle(int event);
+	void		draw();
 
 	MyWin		*my_window;
 	PopupMenu	*popup;
@@ -712,7 +824,7 @@ public:
 	char		path[256];
 };
 
-class	FontBrowser : public Fl_Hold_Browser
+class	FontBrowser : public NavBrowser
 {
 public:
 	FontBrowser(int xx, int yy, int ww, int hh, char *lbl = NULL);
@@ -783,7 +895,7 @@ public:
 	MyWin	*my_window;
 };
 
-class	DragWindow : public Fl_Double_Window
+class	DragWindow : public ShapedDialog
 {
 public:
 			DragWindow(MyWin *in_win, int ww, int hh);
@@ -862,10 +974,10 @@ public:
 		int			is_dir;
 };
 
-class	SimpleScroll : public Fl_Scroll
+class	SimpleScroll : public ShapeAwareScroll
 {
 public:
-			SimpleScroll(MyWin *in_my_window, int xx, int yy, int ww, int hh, char *lbl = NULL);
+			SimpleScroll(MyWin *in_my_window, ShapedDialog *in_shaped_dialog, int xx, int yy, int ww, int hh, char *lbl = NULL);
 			~SimpleScroll();
 
 	int		handle(int event);
@@ -878,7 +990,7 @@ public:
 class	MyScroll : public SimpleScroll
 {
 public:
-				MyScroll(MyWin *in_my_window, int in_item_width, int in_row_height, int xx, int yy, int ww, int hh);
+				MyScroll(MyWin *in_my_window, ShapedDialog *in_shaped_dialog, int in_item_width, int in_row_height, int xx, int yy, int ww, int hh);
 				~MyScroll();
 
 	int			handle(int event);
@@ -1151,6 +1263,7 @@ public:
 	void		ScrollToDisplayed();
 	void		CameraMoveUp(Camera *cam);
 	void		CameraMoveDown(Camera *cam);
+	void		AdjustHeight(int items);
 
 	MyWin		*my_window;
 	int			hovering;
@@ -1651,7 +1764,7 @@ public:
 
 	MyWin			*my_window;
 	int				object_page;
-	MyButton		*object_name_button[1024];
+	MyButton		*object_name_button[MAXIMUM_OBJECTS];
 	MyButton		*object_clear_button;
 	MyButton		*object_all_button;
 	MyButton		*object_apply_all_button;
@@ -1729,7 +1842,7 @@ public:
 	ColorPanel	*color_panel;
 };
 
-class	ColorPanel : public Fl_Window
+class	ColorPanel : public ShapedDialog
 {
 public:
 					ColorPanel(MyWin *in_win, int *red, int *green, int *blue, int *alpha, int xx, int yy, int ww, int hh);
@@ -2070,8 +2183,9 @@ public:
 class	MyInput : public Fl_Input
 {
 public:
-	MyInput(int xx, int yy, int ww, int hh, char *lbl) : Fl_Input(xx, yy, ww, hh, lbl)
+	MyInput(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : Fl_Input(xx, yy, ww, hh, lbl)
 	{
+		my_window = in_win;
 		labelcolor(FL_YELLOW);
 		textcolor(FL_WHITE);
 		textsize(9);
@@ -2083,6 +2197,7 @@ public:
 	~MyInput()
 	{
 	};
+	MyWin	*my_window;
 };
 
 class	MyFloatInput : public Fl_Float_Input
@@ -2567,7 +2682,7 @@ public:
 	void	resize(int xx, int yy, int ww, int hh);
 	void	UpdateButtons(Camera *cam);
 
-	MyWin		*my_win;
+	MyWin		*my_window;
 	ThumbButton	*thumb_button;
 	MyButton	*alias_button;
 	Fl_Input	*alias_input;
@@ -2766,11 +2881,11 @@ public:
 };
 
 
-class	GUI_SettingsWindow : public Dialog
+class	UI_SettingsWindow : public Dialog
 {
 public:
-			GUI_SettingsWindow(MyWin *);
-			~GUI_SettingsWindow();
+			UI_SettingsWindow(MyWin *);
+			~UI_SettingsWindow();
 
 	MyWin		*my_window;
 	
@@ -2785,7 +2900,8 @@ public:
 	MyLightButton *animate_panels_button;
 	MyLightButton *use_tooltips_button;
 	MyLightButton *reverse_panels_button;
-	MyLightButton *transparent_interface_button;
+	MyLightButton *transparent_panels_button;
+	MyLightButton *transparent_dialogs_button;
 
 	Fl_Box		*status_color_box;
 	MyButton	*status_color_button;
@@ -3133,6 +3249,15 @@ public:
 	MySlider		*capture_interval_slider;
 	MySlider		*retrieve_interval_slider;
 
+	Fl_Multiline_Input			*notes;
+	Fl_Int_Input				*notes_font_size;
+	MyToggleButton				*top_left;
+	MyToggleButton				*top_right;
+	MyToggleButton				*bottom_left;
+	MyToggleButton				*bottom_right;
+	MyToggleButton				*top_center;
+	MyToggleButton				*bottom_center;
+
 	MyToggleButton	*apply_to_all_button;
 	MyButton		*load_from;
 };
@@ -3278,7 +3403,7 @@ public:
 	void					Capture(int test_only = 0);
 	void					VideoEffects();
 	void					ZoomBoxDisplay();
-	VideoCapture		    *CreateCameraCapture(char *source, int num);
+	VideoCapture			*CreateCameraCapture(char *source, int num);
 	void					StartCapture();
 	void					SnapshotFrame();
 	int						DetectObjects(int *, int *, int *, int *);
@@ -3408,6 +3533,11 @@ public:
 	int						CheckObjectTrigger();
 	void					StopDetectingObjects();
 	int						IsDetectingObjects();
+	void					PythonRunLoop();
+	void					VariousEffects();
+	void					DisplayNote();
+	void					SetCairoScale();
+	void					RestoreCairoScale();
 	
 	int					stop_detecting_objects;
 	int					detecting_objects;
@@ -3499,6 +3629,7 @@ public:
 	Mat					literal_mat;
 	Mat					last_mat;
 	Mat					alt_record_mat;
+	Mat					displayed_mat;
 	unsigned long int	grab_window_id;
 	int					fullscreen_instance;
 	int					once;
@@ -3760,6 +3891,13 @@ public:
 	int					recog_max_x;
 	int					recog_max_y;
 	int					recog_retain_cnt;
+
+	int					effect_order[9];
+	int					effect_state[9];
+
+	int					note_placement;
+	int					note_font_size;
+	char				*note;
 };
 
 class	NewPTZWindow : public Dialog
@@ -3798,10 +3936,11 @@ public:
 				V4L_Button(MyWin *, ThumbGroup *, int, int, int, int, char *);
 				~V4L_Button();
 	int			handle(int);
-	ThumbGroup	*my_win;
+
+	MyWin		*my_window;
+	ThumbGroup	*thumb_group;
 	int			zooming;
 	int			focusing;
-	MyWin		*my_window;
 };
 
 class	PTZ_Button : public MyButton
@@ -3811,7 +3950,7 @@ public:
 				~PTZ_Button();
 	int			handle(int);
 
-	PTZ_Window	*my_window;
+	PTZ_Window	*ptz_window;
 };
 
 class	PT_Button : public MyButton
@@ -4234,20 +4373,33 @@ public:
 	PopupMenu	*popup;
 };
 
-class	PanTiltJoystick : public Fl_Box
+class	MyZoomRoller : public Fl_Roller
 {
 public:
-				PanTiltJoystick(MyWin *in_win, PTZ_Window *in_ptz_window, int xx, int yy, int ww, int hh);
-				~PanTiltJoystick();
-	void		draw();
+				MyZoomRoller(MyWin *in_win, PTZ_Window *in_ptz_win, int xx, int yy, int ww, int hh, char *lbl);
+				~MyZoomRoller();
 	int			handle(int event);
-	void		Move();
 
 	MyWin		*my_window;
 	PTZ_Window	*ptz_window;
-	int			pos_x;
-	int			pos_y;
-	int			dragging;
+};
+
+class	PanTiltJoystick : public Fl_Box
+{
+public:
+					PanTiltJoystick(MyWin *in_win, PTZ_Window *in_ptz_window, int xx, int yy, int ww, int hh);
+					~PanTiltJoystick();
+	void			draw();
+	int				handle(int event);
+	void			Move();
+
+	MyWin			*my_window;
+	PTZ_Window		*ptz_window;
+	int				pos_x;
+	int				pos_y;
+	int				dragging;
+	MyZoomRoller	*pt_big_zoom_roller;
+	MyZoomRoller	*pt_big_focus_roller;
 };
 
 class	PTZ_Window : public SlidingElement
@@ -4271,6 +4423,8 @@ public:
 	int		AddWindowControls(int start_x, int start_y);
 	int		AddZoomFocusAperture(int start_x, int start_y);
 	int		AddCameraControlButtons(int start_x, int start_y);
+	void	AddNamedPresets();
+
 
 	void	UpdatePresets();
 	void	UpdatePTZButtons();
@@ -4281,8 +4435,8 @@ public:
 	void	PTZ_RememberPosition(int num);
 	void	PTZ_UnRememberPosition(int num);
 	int		PTZ_RecallPosition(int speed, int num);
-	void    GoToPTZPosition(int speed, int in_pan, int in_tilt, int in_zoom, int in_focus);
-	void    LoadPTZPositions(int fd);
+	void	GoToPTZPosition(int speed, int in_pan, int in_tilt, int in_zoom, int in_focus);
+	void	LoadPTZPositions(int fd);
 	void	ViscaButtonCommands(MyButton *b, int state);
 	int		BacklightStatus();
 	int		DigitalZoomStatus();
@@ -4304,6 +4458,12 @@ public:
 	void	LoadZoomParamsFromJSON(char *filename);
 	void	PTZ_MoveTo(int instance, int spd_x, int spd_y, int xx, int yy);
 
+	void	LoadNamedPresetsAsJSON(char *filename);
+	void	LoadNamedPresetsAsSJON(cJSON *json);
+
+	void	SaveNamedPresetsAsJSON(char *filename);
+	void	SaveNamedPresetsAsJSON(FILE *fp);
+
 	MyWin		*my_window;
 	Camera		*bound_camera;
 	PopupMenu	*popup;
@@ -4312,6 +4472,7 @@ public:
 	int			showing;
 	int			pinned;
 	char		alias[4096];
+	char		bound_camera_alias[4096];
 	int			contracted;
 	int			hovering;
 	int			key_table[4];
@@ -4340,6 +4501,8 @@ public:
 	int			ptz_focus_reading;
 	short int	ptz_pan_reading;
 	short int	ptz_tilt_reading;
+	int			current_preset;
+	int			initial_camera;
 
 	VISCAInterface_t		*ptz_current_interface;
 	int						ptz_interface_index;
@@ -4417,8 +4580,11 @@ public:
 	MyLightButton			*ptz_pin_button;
 	Fl_Output				*ptz_bound_name_box;
 	MyButton				*ptz_alias_button;
+	Fl_Box					*ptz_alias_box;
 	MyInput					*ptz_alias_input;
 	MyButton				*ptz_contract_button;
+	MyButton				*ptz_contract_button2;
+	MyButton				*ptz_dock_button;
 	Fl_Group				*ptz_contract_group;
 
 	int						center_on_coord;
@@ -4430,6 +4596,28 @@ public:
 	double					tilt_steps_per_degree;
 	ZoomNode				zoom_node[128];
 	int						support_absolute_zoom;
+	int						initial_left;
+	int						initial_bottom;
+	time_t					push_time;
+
+	Fl_Group				*ptz_big_joy_group;
+	Fl_Window				*big_joystick_group;
+	PanTiltJoystick			*pt_big_joystick;
+	Fl_Button				*pt_label2;
+
+	Fl_Group				*ptz_named_presets;
+	MyButton				*go_to_preset_name[NUMBER_OF_PRESETS];
+	MyButton				*preset_name[NUMBER_OF_PRESETS];
+	Fl_Input				*ptz_edit_input;
+	char					*ptz_preset_name[NUMBER_OF_PRESETS];
+	MyButton				*currently_editing;
+
+	Fl_Group				*preset_button_group;
+	Fl_Group				*preset_name_group;
+	MyButton				*preset_name_back_button;
+	MyButton				*preset_name_forward_button;
+	MyButton				*preset_name_display;
+	int						preset_group_mode;
 };
 
 class	CameraCaps
@@ -4558,6 +4746,7 @@ public:
 			, int in_ptz_reverse_h[NUMBER_OF_INTERFACES]
 			, int in_ptz_reverse_v[NUMBER_OF_INTERFACES]
 			, int in_ptz_start_position[NUMBER_OF_INTERFACES]
+			, int in_ptz_initial_camera[NUMBER_OF_INTERFACES]
 			, char *in_ptz_alias[NUMBER_OF_INTERFACES]
 			, int in_ptz_home_on_launch
 			, char *in_yolo_onnx
@@ -4599,13 +4788,14 @@ public:
 			, int use_fast
 			, int use_threaded_object_recognition
 			, int use_tiled_object_recognition
+			, int use_hide_menu
 			, char *lbl);
 		~MyWin();
 	void	Shutdown();
 	void	PartialShutdown();
 
-	void    draw();
-	void    Draw();
+	void	draw();
+	void	Draw();
 	int		handle(int);
 	int		OnHide();
 	int		OnPaste(Camera *cam);
@@ -4819,6 +5009,7 @@ public:
 	void			SaveAllPTZPositions();
 	void			LoadAllPTZPositions();
 	void			Transparent(int flag);
+	void			Opaque(int flag);
 	void			ScrollDownThumbGroup();
 	void			ScrollUpThumbGroup();
 	void			SaveCodecs();
@@ -4869,6 +5060,7 @@ public:
 	void				TestMuxPerform(char *container, char *filename, char *ext, int video_id, int audio_id);
 	double				CeaseTestMux();
 	void				RunCodecTest();
+	void				ReallyRunCodecTest();
 	int					IsBadCodecCombo(char *in_ext, int video_id, int audio_id);
 	int					IsCodecAllBad(char *test_ext, int video_id);
 	int					IsTestedCodecCombo(int video_id, int audio_id);
@@ -4913,7 +5105,16 @@ public:
 	void				RegisterSlider(MySlider *slider);
 	void				RemoveSlider(MySlider *slider);
 	int					TrySliderShortcut(int key);
+	int					PassMousewheelToPTZWindow(int event);
+	void				CloseAllWindows();
+	int					FontIndexByName(char *name);
+	void				CloseAllStandalone();
+	void				ShowPTZForNewSource(Camera *cam);
+	void				RestackPTZWindows();
+	int					CheckIfReviewFootage();
 
+	int			hide_menu;
+	int			no_exit;
 	int			fast_start;
 	int			button_priority;
 	int			 command_set;
@@ -5066,7 +5267,7 @@ public:
 	int			fresh_image;
 	int			use_old;
 	int			im_drawing_mode;
-	char		*recognize_class_name[1024];
+	char		*recognize_class_name[MAXIMUM_OBJECTS];
 	int			recognize_class_cnt;
 	int			threading_object_recognition;
 	char		yolo_onnx_filename[4096];
@@ -5119,7 +5320,7 @@ public:
 	int			last_push_x;
 	int			last_push_y;
 	int			button_panel_sz;
-	double		gui_scale_factor;
+	double		ui_scale_factor;
 	double		image_display_scale;
 	CameraCaps	*camera_caps[128];
 	int			camera_caps_cnt;
@@ -5196,6 +5397,8 @@ public:
 	ColorItWindow	*color_it_window;
 	PulseAudioFilterWindow	*pulse_audio_filter_window;
 
+	EffectOrderWindow	*effect_order_window;
+
 	Shape			**shape;
 	int				shape_cnt;
 
@@ -5262,7 +5465,7 @@ public:
 	MenuButton	*snapshot_settings_button;
 	MenuButton	*native_resolution_button;
 	MenuButton	*keyboard_settings_button;
-	MenuButton	*gui_settings_button;
+	MenuButton	*ui_settings_button;
 	MenuButton	*transitions_button;
 	MenuButton	*create_python_button;
 	MenuButton	*python_buttons;
@@ -5274,6 +5477,7 @@ public:
 	MenuButton	*python_output_filter_button;
 	MenuButton	*fltk_plugin_button;
 	MenuButton	*toggle_camera_effects_button;
+	MenuButton	*order_effects_button;
 	MenuButton	*save_camera_button;
 	MenuButton	*load_camera_button;
 	MenuButton	*codecs_button;
@@ -5304,7 +5508,7 @@ public:
 	AudioSettingsWindow			*audio_settings_window;
 	CameraSettingsWindow		*camera_settings_window;
 	SnapshotSettingWindow		*snapshot_settings_window;
-	GUI_SettingsWindow			*gui_settings_window;
+	UI_SettingsWindow			*ui_settings_window;
 	EmbedAppSettings			*embed_app_settings;
 	TransitionWindow			*transitions_window;
 	CreatePythonButtonWindow	*create_python_button_window;
@@ -5422,6 +5626,7 @@ public:
 	int					ptz_reverse_h[NUMBER_OF_INTERFACES];
 	int					ptz_reverse_v[NUMBER_OF_INTERFACES];
 	int					ptz_start_position[NUMBER_OF_INTERFACES];
+	int					ptz_initial_camera[NUMBER_OF_INTERFACES];
 	int					ptz_interface_type[NUMBER_OF_INTERFACES];
 	int					ptz_device_cnt;
 	int					ptz_zoom;
@@ -5501,6 +5706,35 @@ public:
 
 	int				pulse_audio_sinks;
 	int				pulse_audio_sources;
+	
+	MyButton		*last_button;
+};
+
+class	LogWindow : public Fl_Double_Window
+{
+public:
+					LogWindow(MyWin *win, int split, int count);
+	void			draw();
+
+	void			SetColumnWidth(int width);
+	void			SetCount(int in_count);
+	void			SetStartTime();
+
+	MyWin			*my_window;
+	Fl_Browser		*browser;
+	int				col_width[2];
+	int				count;
+	int				progress;
+	time_t			start_time;
+};
+
+class	TestCodecChoice : public Dialog
+{
+public:
+			TestCodecChoice(MyWin *in_win, char *in_question);
+			~TestCodecChoice();
+
+	MyWin	*my_window;
 };
 
 class	TitleBox : public Fl_Window
@@ -5788,4 +6022,38 @@ public:
 
 	MyButton	*accept;
 	MyButton	*cancel;
+};
+
+class	EffectOrderButton : public MyLightButton
+{
+public:
+						EffectOrderButton(MyWin *in_win, EffectOrderWindow *in_eow, int xx, int yy, int ww, int hh, char *lbl);
+	int					handle(int event);
+
+	void				RegisterChange();
+
+	EffectOrderWindow	*effect_order_window;
+	int					old_y;
+	int					dragged;
+};
+
+class	EffectOrderWindow : public Dialog
+{
+public:
+						EffectOrderWindow(MyWin *in_win);
+	void				show();
+	
+	void				Restore();
+	void				SaveToCamera();
+
+	MyWin				*my_window;
+	Fl_Group			*effect_group;
+	EffectOrderButton	*effect[9];
+	MyButton			*accept;
+	MyButton			*restore;
+	MyButton			*cancel;
+
+	char				*last_label[9];
+	int					last_state[9];
+	int					last_saved;
 };

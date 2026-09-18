@@ -93,6 +93,7 @@ extern "C"
 #include	<FL/Fl_Button.H>
 #include	<FL/Fl_Repeat_Button.H>
 #include	<FL/Fl_Slider.H>
+#include	<FL/Fl_Nice_Slider.H>
 #include	<FL/Fl_Hor_Fill_Slider.H>
 #include	<FL/Fl_Hor_Slider.H>
 #include	<FL/Fl_Value_Slider.H>
@@ -177,6 +178,7 @@ using namespace std;
 #include	"image_memory.h"
 #include	"PulseAudio.h"
 #include	"vlc_window.h"
+#include	"transparent_window.h"
 #include	"html_window.h"
 #include	"embed_app.h"
 #include	"common.h"
@@ -293,7 +295,7 @@ void				*hNDILib;
 #define	VU_METER_W		(320 * 0.5)
 #define VU_METER_H		(180 * 0.5)
 
-Fl_Window		*global_log_window = NULL;
+LogWindow		*global_log_window = NULL;
 MyWin			*global_my_window = NULL;
 
 char	*legal_url[] = {
@@ -498,6 +500,56 @@ struct	NamedKeys named_key[] = {
 
 // SECTION *********************************** UTILITY FUNCTIONS *******************************************
 
+int	closest_divisible_by_16(int n)
+{
+    // Add 8 to round to the nearest multiple, then clear the lower 4 bits
+    return((n + 8) & ~15);
+}
+
+bool	enable_x11_alpha()
+{
+	XVisualInfo vinfo_template;
+	int num_visuals;
+	vinfo_template.screen = DefaultScreen(fl_display);
+	vinfo_template.depth = 32;
+	vinfo_template.c_class = TrueColor;
+
+	XVisualInfo *vinfo_list = XGetVisualInfo( fl_display, VisualScreenMask | VisualDepthMask | VisualClassMask, &vinfo_template, &num_visuals);
+
+	bool rr = false;
+	if((vinfo_list == nullptr) || (num_visuals < 1))
+	{
+		if(vinfo_list) XFree(vinfo_list);
+		rr = false;
+	}
+	else
+	{
+		fl_visual = vinfo_list;
+		fl_colormap = XCreateColormap(fl_display, RootWindow(fl_display, fl_visual->screen), fl_visual->visual, AllocNone);
+		rr = true;
+	}
+	return(rr);
+}
+
+void	where_am_i(char *returned_path)
+{
+char path[PATH_MAX];
+char path_copy[PATH_MAX];
+	
+	strcpy(returned_path, "");
+	ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+	if(len != -1) 
+	{
+		path[len] = '\0'; 
+		strncpy(path_copy, path, sizeof(path_copy));
+		char *dir = dirname(path_copy);
+		if(dir != NULL)
+		{
+			strcpy(returned_path, dir);
+		}
+	}
+}
+
 int	 usb_device_udev_path(const char *dev_path, char *result, int sz_limit) 
 {
 	struct udev *udev = udev_new();
@@ -574,50 +626,100 @@ int get_camera_clean_name(const char *dev_path, char *dest, size_t dest_len)
 
 namespace 
 {
-	std::vector<uchar> g_pngData;
-	Atom g_atomPng = 0;
+std::vector<uchar> g_pngData;
+Atom g_atomPng = 0;
+bool handlerInstalled = false;
 
-	int png_target_handler(void *ev, void*) 
+// Returns true if this target was successfully served into (requestor, property)
+static bool serve_target(Display *dpy, Window requestor, Atom property, Atom target)
+{
+	Atom targetsAtom  = XInternAtom(dpy, "TARGETS", False);
+	Atom multipleAtom = XInternAtom(dpy, "MULTIPLE", False);
+
+	if(target == g_atomPng && !g_pngData.empty())
 	{
-		XEvent *xevent = static_cast<XEvent*>(ev);
-		if(xevent->type != SelectionRequest) 
-		{
-			return(0);
-		}
-		XSelectionRequestEvent *req = &xevent->xselectionrequest;
-		Atom clipboardAtom = XInternAtom(fl_display, "CLIPBOARD", False);
-		if(req->selection != clipboardAtom || g_pngData.empty())
-		{
-			return(0); // not ours; let FLTK handle it
-		}
-		Atom targetsAtom = XInternAtom(fl_display, "TARGETS", False);
-		Atom bmpAtom = XInternAtom(fl_display, "image/bmp", False);
-
-		if(req->target == g_atomPng) 
-		{
-			XChangeProperty(fl_display, req->requestor, req->property, g_atomPng, 8, PropModeReplace, g_pngData.data(), (int)g_pngData.size());
-		} 
-		else if(req->target == targetsAtom) 
-		{
-			Atom targets[] = { targetsAtom, bmpAtom, g_atomPng };
-			XChangeProperty(fl_display, req->requestor, req->property, XA_ATOM, 32, PropModeReplace, reinterpret_cast<unsigned char*>(targets), 3);
-		} 
-		else 
-		{
-			return(0); // e.g. image/bmp itself — let FLTK answer as usual
-		}
-		XSelectionEvent notify{};
-		notify.type	= SelectionNotify;
-		notify.requestor = req->requestor;
-		notify.selection = req->selection;
-		notify.target = req->target;
-		notify.property = req->property;
-		notify.time	= req->time;
-		XSendEvent(fl_display, req->requestor, False, NoEventMask, (XEvent*)&notify);
-		XFlush(fl_display);
-		return(1);
+		XChangeProperty(dpy, requestor, property, g_atomPng, 8,
+						 PropModeReplace, g_pngData.data(), (int)g_pngData.size());
+		return(true);
 	}
-	bool handlerInstalled = false;
+	else if(target == targetsAtom)
+	{
+		Atom targets[] = { targetsAtom, multipleAtom, g_atomPng };
+		XChangeProperty(dpy, requestor, property, XA_ATOM, 32,
+						 PropModeReplace, reinterpret_cast<unsigned char*>(targets), 3);
+		return(true);
+	}
+	return(false); // unsupported target
+}
+
+int png_target_handler(void *ev, void*)
+{
+	XEvent *xevent = static_cast<XEvent*>(ev);
+	if(xevent->type != SelectionRequest)
+	{
+		return(0);
+	}
+
+	XSelectionRequestEvent *req = &xevent->xselectionrequest;
+	Atom clipboardAtom = XInternAtom(fl_display, "CLIPBOARD", False);
+	if(req->selection != clipboardAtom || g_pngData.empty())
+	{
+		return(0); // not ours; let FLTK handle it
+	}
+
+	Atom multipleAtom = XInternAtom(fl_display, "MULTIPLE", False);
+	Atom atomAtom	  = XInternAtom(fl_display, "ATOM", False);
+	bool handled = false;
+
+	if(req->target == multipleAtom)
+	{
+		// property holds a list of (target, property) atom pairs
+		Atom actualType;
+		int actualFormat;
+		unsigned long count, bytesLeft;
+		unsigned char *data = nullptr;
+
+		if(XGetWindowProperty(fl_display, req->requestor, req->property,
+							   0, 1024, False, atomAtom,
+							   &actualType, &actualFormat, &count, &bytesLeft,
+							   &data) == Success && data)
+		{
+			Atom *pairs = reinterpret_cast<Atom*>(data);
+			for(unsigned long i = 0; i + 1 < count; i += 2)
+			{
+				Atom pairTarget   = pairs[i];
+				Atom pairProperty = pairs[i + 1];
+				if(!serve_target(fl_display, req->requestor, pairProperty, pairTarget))
+				{
+					pairs[i + 1] = None; // ICCCM: mark unfulfilled pairs as None
+				}
+			}
+			// write back the (possibly modified) pair list to the same property
+			XChangeProperty(fl_display, req->requestor, req->property, atomAtom, 32,
+							 PropModeReplace, data, (int)count);
+			XFree(data);
+			handled = true;
+		}
+	}
+	else
+	{
+		handled = serve_target(fl_display, req->requestor, req->property, req->target);
+	}
+	if(!handled)
+	{
+		return(0); // let FLTK send the ICCCM refusal (property = None)
+	}
+	XSelectionEvent notify{};
+	notify.type	  = SelectionNotify;
+	notify.requestor = req->requestor;
+	notify.selection = req->selection;
+	notify.target	= req->target;
+	notify.property  = req->property;
+	notify.time	  = req->time;
+	XSendEvent(fl_display, req->requestor, False, NoEventMask, (XEvent*)&notify);
+	XFlush(fl_display);
+	return(1);
+}
 }
 
 bool CopyMatToClipboard(const cv::Mat &mat) 
@@ -1422,6 +1524,37 @@ int	match_tokens(char *str, char token, char **match)
 	return(cnt);
 }
 
+static char	*DQ(char *ptr)
+{
+static char buffer[262144];
+
+	char *out = NULL;
+	if(ptr != NULL)
+	{
+		out = buffer;
+		if(strlen(ptr) < 262144)
+		{
+			char *cpo = out;
+			char *cp = ptr;
+			while(*cp != '\0')
+			{
+				if(*cp == '\\')
+				{
+					*cpo++ = '\\';
+				}
+				else if(*cp == 34)
+				{
+					*cpo++ = '\\';
+				}
+				*cpo++ = *cp;
+				cp++;
+			}
+			*cpo = '\0';
+		}
+	}
+	return(out);
+}
+
 char	*escape_double_quotes(char *ptr)
 {
 	char *out = (char *)malloc(strlen(ptr) * 2);
@@ -1429,7 +1562,11 @@ char	*escape_double_quotes(char *ptr)
 	char *cp = ptr;
 	while(*cp != '\0')
 	{
-		if(*cp == 34)
+		if(*cp == '\\')
+		{
+			*cpo++ = '\\';
+		}
+		else if(*cp == 34)
 		{
 			*cpo++ = '\\';
 		}
@@ -1604,18 +1741,15 @@ void	copy_to_clipboard(Camera *cam, int xx, int yy, int ww, int hh)
 		float old_scale = Fl::screen_scale(0);
 		Fl::screen_scale(0, 1.0);
 		win->CropFrame(cam->mat, &local, use_x, use_y, ww, hh);
-		Fl_Copy_Surface *copy_surf = new Fl_Copy_Surface(ww, hh);
-		Fl_Surface_Device::push_current(copy_surf);
-		fl_color(WHITE);
-		fl_rectf(0, 0, ww, hh);
 
 		Mat local_mat;
 		cvtColor(local, local_mat, COLOR_RGBA2RGB);
 		cv::resize(local_mat, local_mat, cv::Size(ww, hh));
-		fl_draw_image(local_mat.ptr(), 0, 0, ww, hh, 3);
-		Fl_Surface_Device::pop_current();
-		delete copy_surf;
+
 		Fl::screen_scale(0, old_scale);
+
+		cvtColor(local_mat, local_mat, COLOR_BGR2RGB);
+		CopyMatToClipboard(local_mat);
 	}
 }
 
@@ -2690,6 +2824,68 @@ void	blur_it(Camera *cam, int factor, int xx, int yy, int ww, int hh)
 	}
 }
 
+void	pixelate_it(Camera *cam, int factor, int xx, int yy, int ww, int hh)
+{
+void	pixelate(Mat& use, cairo_t *cr, int xx, int yy, int ww, int hh, int sz);
+
+	pixelate(cam->mat, cam->cairo_context, xx, yy, ww, hh, 20);
+}
+
+void	hole(Camera *cam, int factor, int xx, int yy, int ww, int hh)
+{
+	Mat use;
+	crop_section(cam->reserve_mat, use, xx, yy, ww, hh);
+	cairo_surface_t *surface = cairo_image_surface_create_for_data(use.ptr(), CAIRO_FORMAT_ARGB32, use.cols, use.rows, use.step);
+	if(surface != NULL)
+	{
+		cairo_set_source_surface(cam->cairo_context, surface, xx, yy);
+		cairo_paint(cam->cairo_context);
+		cairo_surface_destroy(surface);
+	}
+}
+
+void	blend_it(Camera *cam, int xx, int yy, int ww, int hh)
+{
+	Mat use1;
+	Mat use2;
+	crop_section(cam->mat, use1, xx, yy, ww, hh);
+	crop_section(cam->reserve_mat, use2, xx, yy, ww, hh);
+	Mat dst;
+	addWeighted(use1, 0.5, use2, 0.5, 0.0, dst);
+	cairo_surface_t *surface = cairo_image_surface_create_for_data(dst.ptr(), CAIRO_FORMAT_ARGB32, dst.cols, dst.rows, dst.step);
+	if(surface != NULL)
+	{
+		cairo_set_source_surface(cam->cairo_context, surface, xx, yy);
+		cairo_paint(cam->cairo_context);
+		cairo_surface_destroy(surface);
+	}
+}
+
+void	sharpen(Camera *cam, int factor, int xx, int yy, int ww, int hh)
+{
+	Mat use;
+	crop_section(cam->mat, use, xx, yy, ww, hh);
+	cv::Mat blurred, sharpened;
+
+	double sigma = 1.2;   // blur radius; larger affects broader detail
+	double amount = 0.7;  // sharpening strength
+
+	cv::GaussianBlur(use, blurred, cv::Size(0, 0), sigma);
+	cv::addWeighted(
+		use,	  1.0 + amount,
+		blurred, -amount,
+		0.0,
+		sharpened
+	);
+	cairo_surface_t *surface = cairo_image_surface_create_for_data(sharpened.ptr(), CAIRO_FORMAT_ARGB32, use.cols, use.rows, use.step);
+	if(surface != NULL)
+	{
+		cairo_set_source_surface(cam->cairo_context, surface, xx, yy);
+		cairo_paint(cam->cairo_context);
+		cairo_surface_destroy(surface);
+	}
+}
+
 void	mask_polygon(Mat mat, Mat &out, int point_cnt, int xx[1024], int yy[1024])
 {
 int	loop;
@@ -3147,6 +3343,26 @@ void	my_cairo_set_source_rgba(cairo_t *context, unsigned long int val)
 	int aa = val & 0xff;
 
 	my_cairo_set_source_rgba(context, rr, gg, bb, aa);
+}
+
+void	pixelate(Mat& use, cairo_t *cr, int xx, int yy, int ww, int hh, int sz)
+{
+	for(int y = 0;(y + (sz / 2)) < hh;y += sz)
+	{
+		for(int x = 0;(x + (sz / 2)) < ww;x += sz)
+		{
+			int nx = xx + (x + (sz / 2));
+			int ny = yy + (y + (sz / 2));
+			Vec4b colour = use.at<Vec4b>(Point(nx, ny));
+			int r = colour[0];
+			int g = colour[1];
+			int b = colour[2];
+			int a = colour[3];
+			my_cairo_set_source_rgba(cr, r, g, b, a);
+			cairo_rectangle(cr, xx + x, yy + y, sz, sz);
+			cairo_fill(cr);
+		}
+	}
 }
 
 int		parse_newlines(char *in, char **out)
@@ -6504,6 +6720,220 @@ void	chromakey(Mat& src, Mat& result, int use_color, double a1, double a2)
 	result = res.clone();
 }
 
+// SECTION *********************************** NAV BROWSER *******************************************
+
+NavBrowser::NavBrowser(int X, int Y, int W, int H, const char *L) : Fl_Hold_Browser(X, Y, W, H, L)
+{
+	this->scrollbar.visible_focus(0);
+	this->hscrollbar.visible_focus(0);
+	this->visible_focus(1);
+}
+
+int NavBrowser::handle(int event)
+{
+	int result;
+	if(event == FL_KEYBOARD)
+	{
+		result = this->handle_key(Fl::event_key());
+		if(!result)
+		{
+			result = Fl_Hold_Browser::handle(event);
+		}
+	}
+	else if(event == FL_SHORTCUT)
+	{
+		result = this->handle_key(Fl::event_key());
+		if(!result)
+		{
+			result = Fl_Hold_Browser::handle(event);
+		}
+	}
+	else if(event == FL_MOUSEWHEEL)
+	{
+		int amount;
+		amount = Fl::event_dy();
+		if(amount != 0)
+		{
+			this->move_selection(amount);
+			result = 1;
+		}
+		else
+		{
+			result = Fl_Hold_Browser::handle(event);
+		}
+	}
+	else if(event == FL_FOCUS)
+	{
+		result = 1;
+	}
+	else
+	{
+		result = Fl_Hold_Browser::handle(event);
+	}
+	return(result);
+}
+
+int NavBrowser::handle_key(int key)
+{
+	int result;
+	if(key == FL_Up)
+	{
+		this->move_selection(-1);
+		result = 1;
+	}
+	else if(key == FL_Down)
+	{
+		this->move_selection(1);
+		result = 1;
+	}
+	else if(key == FL_Page_Up)
+	{
+		this->page_move(-1);
+		result = 1;
+	}
+	else if(key == FL_Page_Down)
+	{
+		this->page_move(1);
+		result = 1;
+	}
+	else if(key == FL_Home)
+	{
+		this->go_home();
+		result = 1;
+	}
+	else if(key == FL_End)
+	{
+		this->go_end();
+		result = 1;
+	}
+	else
+	{
+		result = 0;
+	}
+	return(result);
+}
+
+void NavBrowser::select_and_reveal(int line, bool from_above)
+{
+	int total;
+	total = this->size();
+	if(total > 0)
+	{
+		int old_value;
+		if(line < 1)
+		{
+			line = 1;
+		}
+		else if(line > total)
+		{
+			line = total;
+		}
+		old_value = this->value();
+		this->value(line);
+		if(!this->displayed(line))
+		{
+			if(from_above)
+			{
+				this->topline(line);
+			}
+			else
+			{
+				this->bottomline(line);
+			}
+		}
+		if(old_value != line)
+		{
+			if(this->when() & (FL_WHEN_CHANGED | FL_WHEN_RELEASE))
+			{
+				this->set_changed();
+				this->do_callback();
+			}
+		}
+		this->redraw();
+	}
+}
+
+void NavBrowser::move_selection(int delta)
+{
+int current;
+int target;
+
+	current = this->value();
+	if(current < 1)
+	{
+		if(delta > 0)
+		{
+			target = 1;
+		}
+		else
+		{
+			target = this->size();
+		}
+	}
+	else
+	{
+		target = current + delta;
+	}
+	this->select_and_reveal(target, (delta < 0));
+}
+
+void NavBrowser::page_move(int direction)
+{
+	int current;
+	int step;
+	int target;
+
+	current = this->value();
+	if(current < 1)
+	{
+		current = 1;
+	}
+	step = this->visible_lines();
+	target = current + (direction * step);
+	this->select_and_reveal(target, (direction < 0));
+}
+
+void NavBrowser::go_home(void)
+{
+	if(this->size() > 0)
+	{
+		this->value(1);
+		this->topline(1);
+		this->redraw();
+	}
+}
+
+void NavBrowser::go_end(void)
+{
+int total;
+
+	total = this->size();
+	if(total > 0)
+	{
+		this->value(total);
+		this->bottomline(total);
+		this->redraw();
+	}
+}
+
+int NavBrowser::visible_lines(void) const
+{
+int row_height;
+int count;
+
+	row_height = this->textsize() + 4;
+	if(row_height < 1)
+	{
+		row_height = 1;
+	}
+	count = this->h() / row_height;
+	if(count < 1)
+	{
+		count = 1;
+	}
+	return(count);
+}
+
 // SECTION *********************************** VU METER *******************************************
 
 CowMeter::CowMeter(int xx, int yy, int ww, int hh, char *lbl) : Fl_Box(xx, yy, ww, hh, lbl)
@@ -6790,7 +7220,7 @@ int	loop;
 
 // SECTION *********************************** SIMPLE SCROLL *******************************************
 
-SimpleScroll::SimpleScroll(MyWin *in_my_window, int xx, int yy, int ww, int hh, char *lbl) : Fl_Scroll(xx, yy, ww, hh, lbl)
+SimpleScroll::SimpleScroll(MyWin *in_my_window, ShapedDialog *in_shaped_dialog, int xx, int yy, int ww, int hh, char *lbl) : ShapeAwareScroll(xx, yy, ww, hh, in_shaped_dialog, lbl)
 {
 	my_window = in_my_window;
 	type(VERTICAL);
@@ -6807,7 +7237,7 @@ SimpleScroll::~SimpleScroll()
 
 void	SimpleScroll::end()
 {
-	Fl_Scroll::end();
+	ShapeAwareScroll::end();
 	type(VERTICAL);
 }
 
@@ -6815,18 +7245,18 @@ void	SimpleScroll::draw()
 {
 	if(my_window != NULL)
 	{
-		if(my_window->transparent_interface == 1)
+		if((my_window->transparent_interface & TRANSPARENT_PANELS) == TRANSPARENT_PANELS)
 		{
 			Fl_Group::draw();
 		}
 		else
 		{
-			Fl_Scroll::draw();
+			ShapeAwareScroll::draw();
 		}
 	}
 	else
 	{
-		Fl_Scroll::draw();
+		ShapeAwareScroll::draw();
 	}
 	if(0)
 	{
@@ -6887,14 +7317,14 @@ int	SimpleScroll::handle(int event)
 	}
 	if(flag == 0)
 	{
-		int flag = Fl_Scroll::handle(event);
+		int flag = ShapeAwareScroll::handle(event);
 	}
 	return(flag);
 }
 
 // SECTION *********************************** FONT BROWSER *******************************************
 
-FontBrowser::FontBrowser(int xx, int yy, int ww, int hh, char *lbl) : Fl_Hold_Browser(xx, yy, ww, hh, lbl)
+FontBrowser::FontBrowser(int xx, int yy, int ww, int hh, char *lbl) : NavBrowser(xx, yy, ww, hh, lbl)
 {
 }
 
@@ -7905,7 +8335,7 @@ void	ResizeFrame::Use(int in_type, MyGroup *in_use)
 
 // SECTION *********************************** MY SCROLL *******************************************
 
-MyScroll::MyScroll(MyWin *in_my_window, int in_item_width, int in_row_height, int xx, int yy, int ww, int hh) : SimpleScroll(in_my_window, xx, yy, ww, hh)
+MyScroll::MyScroll(MyWin *in_my_window, ShapedDialog *in_shaped_dialog, int in_item_width, int in_row_height, int xx, int yy, int ww, int hh) : SimpleScroll(in_my_window, in_shaped_dialog, xx, yy, ww, hh)
 {
 int	loop;
 
@@ -8627,7 +9057,7 @@ char	cwd[4096];
 	{
 		file_list[loop] = NULL;
 	}
-	path = new MyInput(195, 28, w() - 200, 20, "Path");
+	path = new MyInput(my_window, 195, 28, w() - 200, 20, "Path");
 	path->box(FL_FLAT_BOX);
 	path->color(DARK_GRAY);
 	path->cursor_color(WHITE);
@@ -8689,7 +9119,7 @@ char	cwd[4096];
 	sort_timestamp->copy_tooltip("Sort by file size");
 	sort_timestamp->callback(file_selector_sort_cb, this);
 
-	scroll = new MyScroll(my_window, 84, 20, 195, 58, w() - 200, h() - 112);
+	scroll = new MyScroll(my_window, this, 84, 20, 195, 58, w() - 200, h() - 112);
 	scroll->color(DARK_GRAY);
 	scroll->end();
 
@@ -10098,12 +10528,40 @@ int	MyButton::handle(int event)
 			popup->show();
 			flag = 1;
 		}
+		else
+		{
+			my_window->last_button = this;
+		}
 	}
 	if(flag == 0)
 	{
 		flag = Fl_Button::handle(event);
 	}
 	return(flag);
+}
+
+void	MyButton::draw()
+{
+	if(value())
+	{
+		Fl_Image *img = image();
+		if(img) 	
+		{
+			Fl_Button::draw();
+		}
+		else
+		{
+			fl_color(YELLOW);
+			fl_rectf(x(), y(), w(), h());
+			fl_color(BLUE);
+			fl_font(labelfont(), labelsize());
+			fl_draw(label(), x(), y(), w(), h(), align());
+		}
+	}
+	else
+	{
+		Fl_Button::draw();
+	}
 }
 
 MyToggleButton::MyToggleButton(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : Fl_Toggle_Button(xx, yy, ww, hh, lbl)
@@ -10412,7 +10870,7 @@ void	SelectButton::Prev()
 
 // SECTION *********************************** DRAG WINDOW *******************************************
 
-DragWindow::DragWindow(MyWin *in_win, int ww, int hh) : Fl_Double_Window(ww, hh)
+DragWindow::DragWindow(MyWin *in_win, int ww, int hh) : ShapedDialog(ww, hh)
 {
 	my_window = in_win;
 	last_x = 0;
@@ -10423,7 +10881,7 @@ DragWindow::DragWindow(MyWin *in_win, int ww, int hh) : Fl_Double_Window(ww, hh)
 	color(BLACK);
 }
 
-DragWindow::DragWindow(MyWin *in_win, int ww, int hh, char *lbl) : Fl_Double_Window(ww, hh, lbl)
+DragWindow::DragWindow(MyWin *in_win, int ww, int hh, char *lbl) : ShapedDialog(ww, hh, lbl)
 {
 	my_window = in_win;
 	last_x = 0;
@@ -10434,7 +10892,7 @@ DragWindow::DragWindow(MyWin *in_win, int ww, int hh, char *lbl) : Fl_Double_Win
 	color(BLACK);
 }
 
-DragWindow::DragWindow(MyWin *in_win, int xx, int yy, int ww, int hh) : Fl_Double_Window(xx, yy, ww, hh)
+DragWindow::DragWindow(MyWin *in_win, int xx, int yy, int ww, int hh) : ShapedDialog(xx, yy, ww, hh)
 {
 	my_window = in_win;
 	last_x = 0;
@@ -10445,7 +10903,7 @@ DragWindow::DragWindow(MyWin *in_win, int xx, int yy, int ww, int hh) : Fl_Doubl
 	color(BLACK);
 }
 
-DragWindow::DragWindow(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : Fl_Double_Window(xx, yy, ww, hh, lbl)
+DragWindow::DragWindow(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : ShapedDialog(xx, yy, ww, hh, lbl)
 {
 	my_window = in_win;
 	last_x = 0;
@@ -10502,7 +10960,7 @@ char	wid_path[4096];
 	}
 	if(flag == 0)
 	{
-		flag = Fl_Window::handle(event);
+		flag = ShapedDialog::handle(event);
 		if(flag == 0)
 		{
 			if(event == FL_PUSH)
@@ -10541,13 +10999,13 @@ void	dialog_common(MyWin *in_win, Dialog *dialog, char *lbl)
 	dialog->old_h = dialog->h();
 }
 
-Dialog::Dialog(MyWin *in_win, int ww, int hh, char *lbl) : DragWindow(in_win, ww, hh + 20)
+Dialog::Dialog(MyWin *in_win, int ww, int hh, char *lbl) : DragWindow(in_win, ww, hh + 20, lbl)
 {
 	MyWin *my_window = in_win;
 	dialog_common(my_window, this, lbl);
 }
 
-Dialog::Dialog(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : DragWindow(in_win, xx, yy, ww, hh + 20)
+Dialog::Dialog(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : DragWindow(in_win, xx, yy, ww, hh + 20, lbl)
 {
 	MyWin *my_window = in_win;
 	dialog_common(my_window, this, lbl);
@@ -14517,7 +14975,7 @@ int	loop;
 	}
 }
 
-ColorPanel::ColorPanel(MyWin *in_win, int *in_red, int *in_green, int *in_blue, int *in_alpha, int xx, int yy, int ww, int hh) : Fl_Window(xx, yy, ww, hh)
+ColorPanel::ColorPanel(MyWin *in_win, int *in_red, int *in_green, int *in_blue, int *in_alpha, int xx, int yy, int ww, int hh) : ShapedDialog(xx, yy, ww, hh)
 {
 int	inner, outer;
 
@@ -16592,6 +17050,97 @@ int	loop;
 		free(blend_alias_two);
 		blend_alias_two = NULL;
 	}
+	if(note != NULL)
+	{
+		free(note);
+		note = NULL;
+	}
+}
+
+void	Camera::DisplayNote()
+{
+	if(note != NULL)
+	{
+		if(strlen(note) > 0)
+		{
+			if(note_placement != 0)
+			{
+				int note_w = (display_width / 5);
+				int note_h = 0;
+				fl_font(FL_HELVETICA, note_font_size);
+				fl_measure(note, note_w, note_h);
+
+				int np_x = 5;
+				int np_y = 5;
+				int align_setting = FL_ALIGN_LEFT | FL_ALIGN_TOP | FL_ALIGN_WRAP;
+				if(note_placement == CAMERA_NOTE_PLACEMENT_TOP_LEFT)
+				{
+					np_x = 5;
+					np_y = 5;
+				}
+				else if(note_placement == CAMERA_NOTE_PLACEMENT_TOP_RIGHT)
+				{
+					np_x = display_width - (note_w + 15);
+					np_y = 5;
+				}
+				else if(note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_LEFT)
+				{
+					np_x = 5;
+					np_y = display_height - (note_h + 15);
+				}
+				else if(note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_RIGHT)
+				{
+					np_x = display_width - (note_w + 15);
+					np_y = display_height - (note_h + 15);
+				}
+				else if(note_placement == CAMERA_NOTE_PLACEMENT_TOP_CENTER)
+				{
+					np_x = (display_width / 2) - (note_w / 2);
+					np_y = 5;
+					align_setting = FL_ALIGN_CENTER | FL_ALIGN_TOP | FL_ALIGN_WRAP;
+				}
+				else if(note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_CENTER)
+				{
+					np_x = (display_width / 2) - (note_w / 2);
+					np_y = display_height - (note_h + 15);
+					align_setting = FL_ALIGN_CENTER | FL_ALIGN_TOP | FL_ALIGN_WRAP;
+				}
+				if(do_not_display == 0)
+				{
+					unsigned char text_color_r, text_color_g, text_color_b, text_color_a;
+					Fl::get_color(WHITE, text_color_r, text_color_g, text_color_b, text_color_a);
+					int avg = (text_color_r + text_color_g + text_color_b) / 3;
+					int darken = 0;
+					if(avg > 128) darken = 1;
+					Mat use;
+					if(!displayed_mat.empty())
+					{
+						crop_section(displayed_mat, use, np_x, np_y, note_w + 10, note_h + 10);
+						if(!use.empty())
+						{
+							if(darken == 1)
+							{
+								brightness_mat(use, 0.4);
+							}
+							else
+							{
+								brightness_mat(use, 0.6);
+							}
+							fl_draw_image(use.ptr(), image_sx + np_x, image_sy + np_y, use.cols, use.rows, use.channels());
+						}
+					}
+				}
+				else
+				{
+					fl_color(BLACK);
+					fl_rectf(image_sx + np_x, image_sy + np_y, note_w + 10, note_h + 10);
+				}
+				fl_color(WHITE);
+				fl_font(FL_HELVETICA, note_font_size);
+				fl_draw(note, image_sx + np_x + 5, image_sy + np_y + 5, note_w, display_height, align_setting, NULL, 0, 0);
+			}
+		}
+	}
 }
 
 void	Camera::PTZ_CancelMovement()
@@ -17521,7 +18070,6 @@ int	loop;
 	display_width = 0.0;
 	display_height = 0.0;
 	snapshot_scale = 0.0;
-
 	hot = 0;
 	hot_ready = 0;
 	hot_delay = 0;
@@ -17676,7 +18224,7 @@ int	loop;
 	snapshot_trigger_condition = 0;
 	snapshot = 0;
 	ptz_lock_interface = 0;
-	ptz_lock_camera = 0;
+	ptz_lock_camera = -1;
 	v4l_pending_command = 0;
 	bound_mic_cnt = 0;
 	alert_trigger_mode = 0;
@@ -17690,6 +18238,23 @@ int	loop;
 	anim_preview = 0;
 	last_retrieve = 0;
 	blend_amount = 0.0;
+	note_placement = CAMERA_NOTE_PLACEMENT_TOP_LEFT;
+	note_font_size = 11;
+	note = NULL;
+
+	effect_order[0] = VIDEO_EFFECTS;
+	effect_order[1] = PAINT_RECOGNIZED_OBJECTS;
+	effect_order[2] = SHOW_IMMEDIATE_LIST;
+	effect_order[3] = COLOR_IT;
+	effect_order[4] = MISC_COPY_COMMANDS;
+	effect_order[5] = DRAW_SHAPES;
+	effect_order[6] = ZOOM_BOX_DISPLAY;
+	effect_order[7] = PYTHON_RUN_FRAME_FILTER;
+	effect_order[8] = PYTHON_RUN_LOOP;
+	for(loop = 0;loop < 9;loop++)
+	{
+		effect_state[loop] = 1;
+	}
 }
 
 void	Camera::AddStandaloneDisplay(StandaloneDisplay *sd)
@@ -17915,9 +18480,9 @@ int	loop;
 int	inner;
 
 	fprintf(fp, "{\n");
-	fprintf(fp, "\t\"path\": \"%s\",\n", path);
-	fprintf(fp, "\t\"original path\": \"%s\",\n", original_path);
-	fprintf(fp, "\t\"alias\": \"%s\",\n", alias);
+	fprintf(fp, "\t\"path\": \"%s\",\n", DQ(path));
+	fprintf(fp, "\t\"original path\": \"%s\",\n", DQ(original_path));
+	fprintf(fp, "\t\"alias\": \"%s\",\n", DQ(alias));
 	fprintf(fp, "\t\"triggers requested\": %d,\n", triggers_requested);
 	fprintf(fp, "\t\"requested x\": %d,\n", requested_x);
 	fprintf(fp, "\t\"requested y\": %d,\n", requested_y);
@@ -17943,27 +18508,25 @@ int	inner;
 	fprintf(fp, "\t\"starting width\": %d,\n", starting_width);
 	fprintf(fp, "\t\"starting height\": %d,\n", starting_height);
 	fprintf(fp, "\t\"capture effects\": %d,\n", capture_effects);
-	fprintf(fp, "\t\"font name\": \"%s\",\n", font_name);
+	fprintf(fp, "\t\"font name\": \"%s\",\n", DQ(font_name));
 	fprintf(fp, "\t\"capture scaling\": %f,\n", capture_scaling);
 	fprintf(fp, "\t\"fps\": %f,\n", fps);
 	fprintf(fp, "\t\"timer format\": %d,\n", timer_format);
 	fprintf(fp, "\t\"military clock\": %d,\n", military_clock);
-	fprintf(fp, "\t\"format code\": \"%s\",\n", format_code);
+	fprintf(fp, "\t\"format code\": \"%s\",\n", DQ(format_code));
+	fprintf(fp, "\t\"note\": \"%s\",\n", DQ(note));
+	fprintf(fp, "\t\"note placement\": %d,\n", note_placement);
+	fprintf(fp, "\t\"note font size\": %d,\n", note_font_size);
 	if(python_filter_function != NULL)
 	{
 		if(python_filter_code != NULL)
 		{
-			char *out = escape_double_quotes(python_filter_code);
-			if(out != NULL)
-			{
-				fprintf(fp, "\t\"python filter code\": \"%s\",\n", out);
-				free(out);
-			}
+			fprintf(fp, "\t\"python filter code\": \"%s\",\n", DQ(python_filter_code));
 		}
 	}
 	if(extra_url != NULL)
 	{
-		fprintf(fp, "\t\"extra url\": \"%s\",\n", extra_url);
+		fprintf(fp, "\t\"extra url\": \"%s\",\n", DQ(extra_url));
 	}
 	else
 	{
@@ -17971,7 +18534,7 @@ int	inner;
 	}
 	if(extra_css != NULL)
 	{
-		fprintf(fp, "\t\"extra css\": \"%s\",\n", extra_css);
+		fprintf(fp, "\t\"extra css\": \"%s\",\n", DQ(extra_css));
 	}
 	else
 	{
@@ -17979,7 +18542,7 @@ int	inner;
 	}
 	if(extra_js_once != NULL)
 	{
-		fprintf(fp, "\t\"extra js once\": \"%s\",\n", extra_js_once);
+		fprintf(fp, "\t\"extra js once\": \"%s\",\n", DQ(extra_js_once));
 	}
 	else
 	{
@@ -17987,7 +18550,7 @@ int	inner;
 	}
 	if(extra_js_always != NULL)
 	{
-		fprintf(fp, "\t\"extra js always\": \"%s\",\n", extra_js_always);
+		fprintf(fp, "\t\"extra js always\": \"%s\",\n", DQ(extra_js_always));
 	}
 	else
 	{
@@ -18023,7 +18586,7 @@ int	inner;
 		fprintf(fp, "\t\"trigger mic list\": [");
 		for(loop = 0;loop < trigger_mic_list_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", trigger_mic_list[loop]);
+			fprintf(fp, "\"%s\"", DQ(trigger_mic_list[loop]));
 			if(loop < trigger_mic_list_cnt - 1)
 			{
 				fprintf(fp, ",");
@@ -18034,7 +18597,7 @@ int	inner;
 			}
 		}
 	}
-	fprintf(fp, "\t\"pseudo camera name\": \"%s\",\n", pseudo_camera_name);
+	fprintf(fp, "\t\"pseudo camera name\": \"%s\",\n", DQ(pseudo_camera_name));
 	fprintf(fp, "\t\"color it cnt\": %d,\n", color_it_cnt);
 	if(color_it_cnt > 0)
 	{
@@ -18180,7 +18743,7 @@ int	inner;
 			if(matrix_state[loop] != NULL)
 			{
 				fprintf(fp, "\t\t{\n");
-				fprintf(fp, "\t\t\t\"name\": \"%s\",\n", matrix_state[loop]->name);
+				fprintf(fp, "\t\t\t\"name\": \"%s\",\n", DQ(matrix_state[loop]->name));
 				fprintf(fp, "\t\t\t\"type\": %d,\n", matrix_state[loop]->type);
 				fprintf(fp, "\t\t\t\"command\": %d,\n", matrix_state[loop]->command);
 				fprintf(fp, "\t\t\t\"frames\": %d,\n", matrix_state[loop]->frames);
@@ -18261,8 +18824,8 @@ int	inner;
 				char source_orig_path[4096];
 				strcpy(source_path, image_window[loop]->camera->path);
 				strcpy(source_orig_path, image_window[loop]->camera->original_path);
-				fprintf(fp, "\t\t\t\"source path\": \"%s\",\n", source_path);
-				fprintf(fp, "\t\t\t\"source orig path\": \"%s\",\n", source_orig_path);
+				fprintf(fp, "\t\t\t\"source path\": \"%s\",\n", DQ(source_path));
+				fprintf(fp, "\t\t\t\"source orig path\": \"%s\",\n", DQ(source_orig_path));
 				fprintf(fp, "\t\t\t\"index\": %d,\n", image_window[loop]->index);
 				fprintf(fp, "\t\t\t\"layer\": %d,\n", image_window[loop]->layer);
 				fprintf(fp, "\t\t\t\"transform\": %d,\n", image_window[loop]->transform);
@@ -18318,7 +18881,7 @@ int	inner;
 		fprintf(fp, "\t\"filter name\": [");
 		for(loop = 0;loop < filter_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", filter_name[loop]);
+			fprintf(fp, "\"%s\"", DQ(filter_name[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -18336,7 +18899,7 @@ int	inner;
 		fprintf(fp, "\t\"filter plugin name\": [");
 		for(loop = 0;loop < filter_plugin_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", filter_plugin_name[loop]);
+			fprintf(fp, "\"%s\"", DQ(filter_plugin_name[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -18354,7 +18917,7 @@ int	inner;
 		fprintf(fp, "\t\"bound mic\": [");
 		for(loop = 0;loop < bound_mic_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", bound_mic[loop]);
+			fprintf(fp, "\"%s\"", DQ(bound_mic[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -18371,7 +18934,7 @@ int	inner;
 		fprintf(fp, "\t\"split source\": [");
 		for(loop = 0;loop < split_source_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", split_source[loop]);
+			fprintf(fp, "\"%s\"", DQ(split_source[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -18400,7 +18963,7 @@ int	inner;
 		{
 			if(object_index[loop] == 1)
 			{
-				fprintf(fp, "\"%s\"", my_window->recognize_class_name[loop]);
+				fprintf(fp, "\"%s\"", DQ(my_window->recognize_class_name[loop]));
 				if(cnt != nn)
 				{
 					fprintf(fp, ",");
@@ -18413,7 +18976,21 @@ int	inner;
 			}
 		}
 	}
-	fprintf(fp, "\t\"snapshot filename format\": \"%s\",\n", snapshot_filename_format);
+	fprintf(fp, "\t\"effect order\": [");
+	for(loop = 0;loop < 9;loop++)
+	{
+		fprintf(fp, "%d,", effect_order[loop]);
+		fprintf(fp, "%d", effect_state[loop]);
+		if(loop < 8)
+		{
+			fprintf(fp, ",");
+		}
+		else
+		{
+			fprintf(fp, "],\n");
+		}
+	}
+	fprintf(fp, "\t\"snapshot filename format\": \"%s\",\n", DQ(snapshot_filename_format));
 	fprintf(fp, "\t\"snapshot initial delay\": %d,\n", snapshot_initial_delay);
 	fprintf(fp, "\t\"snapshot repeat delay\": %d,\n", snapshot_repeat_delay);
 	fprintf(fp, "\t\"snapshot trigger condition\": %d,\n", snapshot_trigger_condition);
@@ -18421,8 +18998,8 @@ int	inner;
 	fprintf(fp, "\t\"snapshot\": %d,\n", snapshot);
 	fprintf(fp, "\t\"ptz lock interface\": %d,\n", ptz_lock_interface);
 	fprintf(fp, "\t\"ptz lock camera\": %d,\n", ptz_lock_camera);
-	fprintf(fp, "\t\"blend alias one\": \"%s\",\n", blend_alias_one);
-	fprintf(fp, "\t\"blend alias two\": \"%s\",\n", blend_alias_two);
+	fprintf(fp, "\t\"blend alias one\": \"%s\",\n", DQ(blend_alias_one));
+	fprintf(fp, "\t\"blend alias two\": \"%s\",\n", DQ(blend_alias_two));
 	fprintf(fp, "\t\"blend amount\": %f\n", blend_amount);
 	fprintf(fp, "}");
 }
@@ -20204,12 +20781,130 @@ void	Camera::RenderScrollingText(char *cp, int local_mode, int local_speed, int 
 	}
 }
 
+void	Camera::PythonRunLoop()
+{
+void	python_xderefrence(void *ptr);
+void	python_run_frame_filter(void *in_function, cv::Mat mat);
+int		loop;
+int		inner;
+
+	for(loop = 0;loop < my_window->python_runner_cnt;loop++)
+	{
+		if(my_window->python_runner[loop] != NULL)
+		{
+			if(my_window->python_runner[loop]->function != NULL)
+			{
+				if(my_window->python_runner[loop]->frame_cnt > 0)
+				{
+					python_run_frame_filter(my_window->python_runner[loop]->function, mat);
+					my_window->python_runner[loop]->frame_cnt--;
+					if(my_window->python_runner[loop]->frame_cnt == 0)
+					{
+						python_xderefrence(my_window->python_runner[loop]->function);
+						my_window->python_runner[loop]->function = NULL;
+						delete my_window->python_runner[loop];
+						my_window->python_runner[loop] = NULL;
+						PythonRunner *tmp[128];
+						int cnt = 0;
+						for(inner = 0;inner < my_window->python_runner_cnt;inner++)
+						{
+							if(my_window->python_runner[inner] != NULL)
+							{
+								tmp[cnt] = my_window->python_runner[inner];
+								cnt++;
+							}
+						}
+						for(inner = 0;inner < cnt;inner++)
+						{
+							my_window->python_runner[inner] = tmp[inner];
+						}
+						my_window->python_runner_cnt = cnt;
+					}
+				}
+			}
+		}
+	}
+}
+
+void	Camera::SetCairoScale()
+{
+	cairo_t *cr = cairo_context;
+	cairo_save(cr);
+	if(display_width < 1) display_width = width;
+	if(display_height < 1) display_height = height;
+	cairo_scale(cr, width / display_width, height / display_height);
+}
+
+void	Camera::RestoreCairoScale()
+{
+	cairo_t *cr = cairo_context;
+	cairo_restore(cr);
+}
+
+void	Camera::VariousEffects()
+{
+void	python_run_frame_filter(void *in_function, cv::Mat mat);
+int		loop;
+
+	if(!mat.empty())
+	{
+		int moving_element = 0;
+		int someone_is_dragging = 0;
+		if((width > 0) && (height > 0))
+		{
+			SetCairo();
+			SetCairoScale();
+			for(loop = 0;loop < 9;loop++)
+			{
+				if(effect_state[loop] == 1)
+				{
+					if(effect_order[loop] == VIDEO_EFFECTS)
+					{
+						VideoEffects();
+					}
+					else if(effect_order[loop] == PAINT_RECOGNIZED_OBJECTS)
+					{
+						PaintRecognizedObjects(my_window->test_recognition);
+					}
+					else if(effect_order[loop] == SHOW_IMMEDIATE_LIST)
+					{
+						ShowImmediateList();
+					}
+					else if(effect_order[loop] == COLOR_IT)
+					{
+						ColorIt();
+					}
+					else if(effect_order[loop] == MISC_COPY_COMMANDS)
+					{
+						MiscCopyCommands();
+					}
+					else if(effect_order[loop] == DRAW_SHAPES)
+					{
+						DrawShapes();
+					}
+					else if(effect_order[loop] == ZOOM_BOX_DISPLAY)
+					{
+						ZoomBoxDisplay();
+					}
+					else if(effect_order[loop] == PYTHON_RUN_FRAME_FILTER)
+					{
+						python_run_frame_filter(python_filter_function, mat);
+					}
+					else if(effect_order[loop] == PYTHON_RUN_LOOP)
+					{
+						PythonRunLoop();
+					}
+				}
+			}
+			RestoreCairoScale();
+		}
+	}
+}
+
 void	Camera::Capture(int test_only)
 {
-void			python_xderefrence(void *ptr);
-void			python_run_frame_filter(void *in_function, cv::Mat mat);
-int				loop;
-int				inner;
+int		loop;
+int		inner;
 
 	if(since_time == 0)
 	{
@@ -21282,71 +21977,14 @@ int				inner;
 			}
 			if(capture_effects == 1)
 			{
-				if(!mat.empty())
-				{
-					VideoEffects();
-					SetCairo();
-					int moving_element = 0;
-					int someone_is_dragging = 0;
-					PaintRecognizedObjects(my_window->test_recognition);
-					ShowImmediateList();
-					ColorIt();
-					MiscCopyCommands();
-					DrawShapes();
-					if(zoom_box_display == 1)
-					{
-						ZoomBoxDisplay();
-					}
-					if(python_filter_function != NULL)
-					{
-						python_run_frame_filter(python_filter_function, mat);
-					}
-					for(loop = 0;loop < my_window->python_runner_cnt;loop++)
-					{
-						if(my_window->python_runner[loop] != NULL)
-						{
-							if(my_window->python_runner[loop]->function != NULL)
-							{
-								if(my_window->python_runner[loop]->frame_cnt > 0)
-								{
-									python_run_frame_filter(my_window->python_runner[loop]->function, mat);
-									my_window->python_runner[loop]->frame_cnt--;
-									if(my_window->python_runner[loop]->frame_cnt == 0)
-									{
-										python_xderefrence(my_window->python_runner[loop]->function);
-										my_window->python_runner[loop]->function = NULL;
-										delete my_window->python_runner[loop];
-										my_window->python_runner[loop] = NULL;
-										PythonRunner *tmp[128];
-										int cnt = 0;
-										for(inner = 0;inner < my_window->python_runner_cnt;inner++)
-										{
-											if(my_window->python_runner[inner] != NULL)
-											{
-												tmp[cnt] = my_window->python_runner[inner];
-												cnt++;
-											}
-										}
-										for(inner = 0;inner < cnt;inner++)
-										{
-											my_window->python_runner[inner] = tmp[inner];
-										}
-										my_window->python_runner_cnt = cnt;
-									}
-								}
-							}
-						}
-					}
-				}
+				VariousEffects();
 			}
 			if(my_window->timestamp == 1)
 			{
-				SetCairo();
 				TimestampFrame();
 			}
 			if(show_alias == 1)
 			{
-				SetCairo();
 				ImprintAlias();
 			}
 			if(snapshot_trigger_condition == SNAPSHOT_TRIGGER_CONTINUOUS)
@@ -21565,6 +22203,61 @@ int	inner;
 						int use_w = win->misc_copy[loop]->ww;
 						int use_h = win->misc_copy[loop]->hh;
 						rectangle(mat, Point(use_x, use_y), Point(use_x + use_w, use_y + use_h), Scalar(255, 255, 255), 1);
+					}
+				}
+				else if(win->misc_copy[loop]->type == MISC_COPY_BLUR)
+				{
+					if(win->misc_copy[loop]->source == this)
+					{
+						int use_x = win->misc_copy[loop]->xx;
+						int use_y = win->misc_copy[loop]->yy;
+						int use_w = win->misc_copy[loop]->ww;
+						int use_h = win->misc_copy[loop]->hh;
+						blur_it(this, 73, use_x, use_y, use_w, use_h);
+					}
+				}
+				else if(win->misc_copy[loop]->type == MISC_COPY_SHARPEN)
+				{
+					if(win->misc_copy[loop]->source == this)
+					{
+						int use_x = win->misc_copy[loop]->xx;
+						int use_y = win->misc_copy[loop]->yy;
+						int use_w = win->misc_copy[loop]->ww;
+						int use_h = win->misc_copy[loop]->hh;
+						sharpen(this, 73, use_x, use_y, use_w, use_h);
+					}
+				}
+				else if(win->misc_copy[loop]->type == MISC_COPY_PIXELATE)
+				{
+					if(win->misc_copy[loop]->source == this)
+					{
+						int use_x = win->misc_copy[loop]->xx;
+						int use_y = win->misc_copy[loop]->yy;
+						int use_w = win->misc_copy[loop]->ww;
+						int use_h = win->misc_copy[loop]->hh;
+						pixelate_it(this, 73, use_x, use_y, use_w, use_h);
+					}
+				}
+				else if(win->misc_copy[loop]->type == MISC_COPY_HOLE)
+				{
+					if(win->misc_copy[loop]->source == this)
+					{
+						int use_x = win->misc_copy[loop]->xx;
+						int use_y = win->misc_copy[loop]->yy;
+						int use_w = win->misc_copy[loop]->ww;
+						int use_h = win->misc_copy[loop]->hh;
+						hole(this, 73, use_x, use_y, use_w, use_h);
+					}
+				}
+				else if(win->misc_copy[loop]->type == MISC_COPY_BLEND)
+				{
+					if(win->misc_copy[loop]->source == this)
+					{
+						int use_x = win->misc_copy[loop]->xx;
+						int use_y = win->misc_copy[loop]->yy;
+						int use_w = win->misc_copy[loop]->ww;
+						int use_h = win->misc_copy[loop]->hh;
+						blend_it(this, use_x, use_y, use_w, use_h);
 					}
 				}
 				else if(win->misc_copy[loop]->type == MISC_COPY_MAGNIFY)
@@ -22283,6 +22976,7 @@ VideoCapture	*Camera::CreateCameraCapture(char *source, int num)
 				cam_cap = NULL;
 			}
 			sprintf(path, "/dev/video%d", num);
+			strcpy(original_path, path);
 		}
 	}
 	else
@@ -22580,10 +23274,69 @@ VideoCapture	*Camera::CreateCameraCapture(char *source, int num)
 						cp++;
 					}
 				}
-				else
+				if(strncmp(cp, "[note=", strlen("[note=")) == 0)
 				{
-					cp++;
+					*cp = '\0';
+					cp += strlen("[note=");
+					char *start = cp;
+					while((*cp != '\0') && (*cp != ']'))
+					{
+						if(*cp == '\\')
+						{
+							cp++;
+						}
+						if(*cp != '\0')
+						{
+							cp++;
+						}
+					}
+					if(*cp == ']')
+					{
+						*cp = '\0';
+						if(note != NULL)
+						{
+							free(note);
+						}
+						note = strdup(start);
+					}
 				}
+				if(strncmp(cp, "[note_placement=", strlen("[note_placement=")) == 0)
+				{
+					*cp = '\0';
+					cp += strlen("[note_placement=");
+					int nn = atoi(cp);
+					if((nn > -1) && (nn < 7))
+					{
+						note_placement = nn;
+					}
+					while((*cp != '\0') && (*cp != ']'))
+					{
+						cp++;
+					}
+					if(*cp == ']')
+					{
+						cp++;
+					}
+				}
+				if(strncmp(cp, "[note_font_size=", strlen("[note_font_size=")) == 0)
+				{
+					*cp = '\0';
+					cp += strlen("[note_font_size=");
+					int nn = atoi(cp);
+					if((nn > 3) && (nn < 65))
+					{
+						note_font_size = nn;
+					}
+					while((*cp != '\0') && (*cp != ']'))
+					{
+						cp++;
+					}
+					if(*cp == ']')
+					{
+						cp++;
+					}
+				}
+				cp++;
 			}
 			if(strncasecmp(source, "blank://", strlen("blank://")) == 0)
 			{
@@ -23972,6 +24725,8 @@ static Mat	local_mat;
 										pthread_mutex_unlock(&my_window->muxer_mutex);
 										record_error = 1;
 										record = 0;
+										triggers_requested = 0;
+										my_window->RecordOff(this);
 										my_window->SetErrorMessage("Encoding Error: Not recording.");
 									}
 									else
@@ -24029,6 +24784,8 @@ static Mat	local_mat;
 										pthread_mutex_unlock(&my_window->muxer_mutex);
 										record = 0;
 										record_error = 1;
+										triggers_requested = 0;
+										my_window->RecordOff(this);
 										if(no_go == 0)
 										{
 											my_window->SetErrorMessage("Encoding Error: Not recording.");
@@ -24395,21 +25152,24 @@ void	Camera::V4L_Command(int command)
 
 void	Camera::ZoomBoxDisplay()
 {
-	cv::Rect roi;
-	roi.x = zoom_box_x - image_sx;
-	roi.y = zoom_box_y - image_sy;
+	if(zoom_box_display == 1)
+	{
+		cv::Rect roi;
+		roi.x = zoom_box_x - image_sx;
+		roi.y = zoom_box_y - image_sy;
 
-	roi.width = zoom_box_w;
-	roi.height = zoom_box_h;
-	Mat crop = mat(roi);
+		roi.width = zoom_box_w;
+		roi.height = zoom_box_h;
+		Mat crop = mat(roi);
 
-	double amt1 = (double)mat.cols / (double)zoom_box_w;
-	double amt2 = (double)mat.rows / (double)zoom_box_h;
-	double amt = amt1;
-	if(amt2 < amt1) amt = amt2;
-	Size sz(display_width, display_height);
-	cv::resize(crop, crop, sz, 0, 0, INTER_AREA);
-	mat = crop.clone();
+		double amt1 = (double)mat.cols / (double)zoom_box_w;
+		double amt2 = (double)mat.rows / (double)zoom_box_h;
+		double amt = amt1;
+		if(amt2 < amt1) amt = amt2;
+		Size sz(display_width, display_height);
+		cv::resize(crop, crop, sz, 0, 0, INTER_AREA);
+		mat = crop.clone();
+	}
 }
 
 void	Camera::VideoEffects()
@@ -24489,7 +25249,8 @@ void	Camera::VideoEffects()
 				if(this == my_window->DisplayedCamera())
 				{
 					if((my_window->last_cam->mat.cols == mat.cols)
-					&& (my_window->last_cam->mat.rows == mat.rows))
+					&& (my_window->last_cam->mat.rows == mat.rows)
+					&& (my_window->last_cam->mat.channels() == mat.channels()))
 					{
 						double val = my_window->transition_interval;
 						double out = pow(val, 3.32192809489);
@@ -24628,6 +25389,7 @@ void	Camera::VideoEffects()
 
 void	Camera::ImprintAlias()
 {
+	SetCairo();
 	if(cairo_context != NULL)
 	{
 		char buf[4096];
@@ -24679,6 +25441,7 @@ void	Camera::TimestampFrame()
 {
 int		interpret_output_path(MyWin *win, char *in, int limit, char *out, int *clock_type);
 
+	SetCairo();
 	if(cairo_context != NULL)
 	{
 		char buf[4096];
@@ -24744,6 +25507,7 @@ void	Camera::SnapshotFrame()
 	if(strlen(buf) > 0)
 	{
 		Mat out;
+		Capture();
 		cvtColor(mat, out, COLOR_RGB2BGR);
 		if(snapshot_scale > 0.0)
 		{
@@ -25963,6 +26727,328 @@ void	Camera::PasteMat(Mat mat, int sx, int sy)
 		cairo_set_source_surface(cairo_context, surface, sx, sy);
 		cairo_paint(cairo_context);
 		cairo_surface_destroy(surface);
+	}
+}
+
+// SECTION *********************************** EFFECT ORDER *******************************************
+
+EffectOrderButton::EffectOrderButton(MyWin *in_win, EffectOrderWindow *in_eow, int xx, int yy, int ww, int hh, char *lbl) : MyLightButton(in_win, xx, yy, ww, hh, lbl)
+{
+	effect_order_window = in_eow;
+	dragged = 0;
+	old_y = 0;
+
+	color(BLACK);
+	labelcolor(YELLOW);
+	labelsize(11);
+	align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+}
+
+int	EffectOrderButton::handle(int event)
+{
+int		loop;
+
+	int flag = 0;
+	if(event == FL_PUSH)
+	{
+		old_y = Fl::event_y();
+		dragged = 0;
+		flag = 1;
+	}
+	else if(event == FL_DRAG)
+	{
+		int yy = Fl::event_y();
+		int dy = yy - old_y;
+		parent()->insert(*this, 9);
+		resize(x(), y() + dy, w(), h());
+		redraw();
+		old_y = yy;
+		dragged = 1;
+		flag = 1;
+	}
+	else if(event == FL_RELEASE)
+	{
+		if(dragged == 1)
+		{
+			int yy = Fl::event_y();
+			int dy = yy - old_y;
+			yy = y() + dy;
+			yy -= parent()->y();
+			int pos = 0;
+			if(yy > 0)
+			{
+				pos = (yy / 20) + 1;
+			}
+			if(pos < 0) pos = 0;
+			if(pos > 9) pos = 9;
+			parent()->insert(*this, pos);
+			for(loop = 0;loop < 9;loop++)
+			{
+				Fl_Widget *chld = parent()->child(loop);
+				if(chld != NULL)
+				{
+					chld->resize(chld->x(), parent()->y() + (20 * loop), chld->w(), chld->h());
+					chld->redraw();
+				}
+			}
+			dragged = 0;
+		}
+		else
+		{
+			if(value())
+			{
+				value(0);
+			}
+			else
+			{
+				value(1);
+			}
+		}
+		RegisterChange();
+		flag = 1;
+	}
+	if(flag == 0)
+	{
+		flag = MyLightButton::handle(event);
+	}
+	return(flag);
+}
+
+void	EffectOrderButton::RegisterChange()
+{
+	EffectOrderWindow *eow = effect_order_window;
+	if(eow != NULL)
+	{
+		eow->SaveToCamera();
+		eow->restore->show();
+		eow->restore->redraw();
+		eow->redraw();
+		eow->resize(eow->x(), eow->y(), eow->w(), eow->h());
+	}
+}
+
+void	effect_order_restore_cb(Fl_Widget *w, void *v)
+{
+	EffectOrderWindow *eow = (EffectOrderWindow *)v;
+	eow->Restore();
+	eow->SaveToCamera();
+	eow->restore->hide();
+	eow->resize(eow->x(), eow->y(), eow->w(), eow->h());
+}
+
+void	effect_order_accept_cb(Fl_Widget *w, void *v)
+{
+	EffectOrderWindow *eow = (EffectOrderWindow *)v;
+	eow->SaveToCamera();
+	eow->hide();
+}
+
+void	effect_order_cancel_cb(Fl_Widget *w, void *v)
+{
+	EffectOrderWindow *eow = (EffectOrderWindow *)v;
+	eow->Restore();
+	eow->SaveToCamera();
+	eow->restore->hide();
+	eow->resize(eow->x(), eow->y(), eow->w(), eow->h());
+	eow->hide();
+}
+
+EffectOrderWindow::EffectOrderWindow(MyWin *in_win) : Dialog(in_win, 400, 500, "Effect Order")
+{
+int		loop;
+
+	my_window = in_win;
+	last_saved = 0;
+
+	effect_group = new Fl_Group(10, 30, w() - 20, 9 * 20);
+	int yp = 30;
+	effect[0] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 0), w() - 20, 20, "Video Effects");
+	effect[1] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 1), w() - 20, 20, "Paint Recognized_Objects");
+	effect[2] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 2), w() - 20, 20, "Show Immediate List");
+	effect[3] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 3), w() - 20, 20, "Color It");
+	effect[4] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 4), w() - 20, 20, "Misc Copy Commands");
+	effect[5] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 5), w() - 20, 20, "Draw Shapes");
+	effect[6] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 6), w() - 20, 20, "Zoom Box Display");
+	effect[7] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 7), w() - 20, 20, "Python Run Frame Filter");
+	effect[8] = new EffectOrderButton(in_win, this, 10, 30 + (20 * 8), w() - 20, 20, "Python Run Loop");
+	effect_group->end();
+	for(loop = 0;loop < 9;loop++)
+	{
+		effect[loop]->value(1);
+		yp += 20;
+	}
+	yp += 30;
+	accept = new MyButton(my_window, (w() / 2) - ((w() / 3) + 30), yp, 60, 20, "Accept");
+	accept->box(FL_FLAT_BOX);
+	accept->color(DARK_GRAY);
+	accept->labelcolor(WHITE);
+	accept->labelsize(12);
+	accept->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	accept->callback(effect_order_accept_cb, this);
+	accept->copy_tooltip("Accept the order");
+
+	restore = new MyButton(my_window, (w() / 2) - 30, yp, 60, 20, "Restore");
+	restore->box(FL_FLAT_BOX);
+	restore->color(DARK_GRAY);
+	restore->labelcolor(WHITE);
+	restore->labelsize(12);
+	restore->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	restore->copy_tooltip("Restore the order as it was when the dialog appeared");
+	restore->callback(effect_order_restore_cb, this);
+	restore->hide();
+
+	cancel = new MyButton(my_window, (w() / 2) + ((w() / 3) - 30), yp, 60, 20, "Cancel");
+	cancel->box(FL_FLAT_BOX);
+	cancel->color(DARK_GRAY);
+	cancel->labelcolor(WHITE);
+	cancel->labelsize(12);
+	cancel->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	cancel->copy_tooltip("Cancel and close the dialog");
+	cancel->callback(effect_order_cancel_cb, this);
+	end();
+	resize(x(), y(), w(), yp + 40);
+}
+
+void	EffectOrderWindow::show()
+{
+int		loop;
+
+	Camera *cam = my_window->DisplayedCamera();
+	if(cam != NULL)
+	{
+		for(loop = 0;loop < 9;loop++)
+		{
+			effect[loop]->value(cam->effect_state[loop]);
+			if(cam->effect_order[loop] == VIDEO_EFFECTS)
+			{
+				effect[loop]->label("Video Effects");
+			}
+			else if(cam->effect_order[loop] == PAINT_RECOGNIZED_OBJECTS)
+			{
+				effect[loop]->label("Paint Recognized_Objects");
+			}
+			else if(cam->effect_order[loop] == SHOW_IMMEDIATE_LIST)
+			{
+				effect[loop]->label("Show Immediate List");
+			}
+			else if(cam->effect_order[loop] == COLOR_IT)
+			{
+				effect[loop]->label("Color It");
+			}
+			else if(cam->effect_order[loop] == MISC_COPY_COMMANDS)
+			{
+				effect[loop]->label("Misc Copy Commands");
+			}
+			else if(cam->effect_order[loop] == DRAW_SHAPES)
+			{
+				effect[loop]->label("Draw Shapes");
+			}
+			else if(cam->effect_order[loop] == ZOOM_BOX_DISPLAY)
+			{
+				effect[loop]->label("Zoom Box Display");
+			}
+			else if(cam->effect_order[loop] == PYTHON_RUN_FRAME_FILTER)
+			{
+				effect[loop]->label("Python Run Frame Filter");
+			}
+			else if(cam->effect_order[loop] == PYTHON_RUN_LOOP)
+			{
+				effect[loop]->label("Python Run Loop");
+			}
+		}
+	}
+	if(last_saved == 0)
+	{
+		for(loop = 0;loop < effect_group->children();loop++)
+		{
+			EffectOrderButton *w = (EffectOrderButton *)effect_group->child(loop);
+			if(w != NULL)
+			{
+				char *lbl = (char *)w->label();
+				if(lbl != NULL)
+				{
+					last_label[loop] = lbl;
+					last_state[loop] = w->value();
+				}
+			}
+		}
+		last_saved = 1;
+	}
+	Dialog::show();
+}
+
+void	EffectOrderWindow::Restore()
+{
+int		loop;
+
+	for(loop = 0;loop < effect_group->children();loop++)
+	{
+		EffectOrderButton *w = (EffectOrderButton *)effect_group->child(loop);
+		if(w != NULL)
+		{
+			w->label(last_label[loop]);
+			w->value(last_state[loop]);
+		}
+	}
+	redraw();
+}
+
+void	EffectOrderWindow::SaveToCamera()
+{
+int		loop;
+
+	for(loop = 0;loop < effect_group->children();loop++)
+	{
+		EffectOrderButton *w = (EffectOrderButton *)effect_group->child(loop);
+		if(w != NULL)
+		{
+			char *lbl = (char *)w->label();
+			if(lbl != NULL)
+			{
+				int val = w->value();
+				Camera *cam = my_window->DisplayedCamera();
+				if(cam != NULL)
+				{
+					cam->effect_state[loop] = val;
+					if(strcmp(lbl, "Video Effects") == 0)
+					{
+						cam->effect_order[loop] = VIDEO_EFFECTS;
+					}
+					else if(strcmp(lbl, "Paint Recognized_Objects") == 0)
+					{
+						cam->effect_order[loop] = PAINT_RECOGNIZED_OBJECTS;
+					}
+					else if(strcmp(lbl, "Show Immediate List") == 0)
+					{
+						cam->effect_order[loop] = SHOW_IMMEDIATE_LIST;
+					}
+					else if(strcmp(lbl, "Color It") == 0)
+					{
+						cam->effect_order[loop] = COLOR_IT;
+					}
+					else if(strcmp(lbl, "Misc Copy Commands") == 0)
+					{
+						cam->effect_order[loop] = MISC_COPY_COMMANDS;
+					}
+					else if(strcmp(lbl, "Draw Shapes") == 0)
+					{
+						cam->effect_order[loop] = DRAW_SHAPES;
+					}
+					else if(strcmp(lbl, "Zoom Box Display") == 0)
+					{
+						cam->effect_order[loop] = ZOOM_BOX_DISPLAY;
+					}
+					else if(strcmp(lbl, "Python Run Frame Filter") == 0)
+					{
+						cam->effect_order[loop] = PYTHON_RUN_FRAME_FILTER;
+					}
+					else if(strcmp(lbl, "Python Run Loop") == 0)
+					{
+						cam->effect_order[loop] = PYTHON_RUN_LOOP;
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -28866,7 +29952,7 @@ char			buf[4096];
 		launch_select->color(color());
 		launch_select->callback(launch_select_x11_window_cb, this);
 
-		launch_path = new MyInput(0, 36, 200, 18, "Path");
+		launch_path = new MyInput(my_window, 0, 36, 200, 18, "Path");
 		launch_path->callback(launch_really_select_x11_window_cb, this);
 		launch_path->when(FL_WHEN_ENTER_KEY);
 		launch_path->box(FL_FRAME_BOX);
@@ -28884,7 +29970,7 @@ char			buf[4096];
 		or_box->labelcolor(FL_GRAY);
 		new_yp += 20;
 
-		SimpleScroll *scroll = new SimpleScroll(my_window, 0, new_yp + 20, 200, 780);
+		SimpleScroll *scroll = new SimpleScroll(my_window, this, 0, new_yp + 20, 200, 780);
 		int ay = 4;
 		int max_w = -1000;
 		fl_font(FL_HELVETICA, 9);
@@ -30105,7 +31191,7 @@ TimerWindow::TimerWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, hh,
 	use_clock->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	use_clock->callback(timer_window_use_clock_cb, this);
 	use_clock->value(1);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		use_clock->box(FL_FLAT_BOX);
 	}
@@ -30121,7 +31207,7 @@ TimerWindow::TimerWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, hh,
 	use_timer->type(FL_RADIO_BUTTON);
 	use_timer->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	use_timer->callback(timer_window_use_timer_cb, this);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		use_timer->box(FL_FLAT_BOX);
 	}
@@ -30136,7 +31222,7 @@ TimerWindow::TimerWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, hh,
 	use_military->labelcolor(YELLOW);
 	use_military->labelsize(9);
 	use_military->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		use_military->box(FL_FLAT_BOX);
 	}
@@ -30157,7 +31243,7 @@ TimerWindow::TimerWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, hh,
 	format0->labelsize(9);
 	format0->type(FL_TOGGLE_BUTTON);
 	format0->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		format0->box(FL_FLAT_BOX);
 	}
@@ -30172,7 +31258,7 @@ TimerWindow::TimerWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, hh,
 	format1->type(FL_RADIO_BUTTON);
 	format1->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 	format1->hide();
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		format1->box(FL_FLAT_BOX);
 	}
@@ -30188,7 +31274,7 @@ TimerWindow::TimerWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, hh,
 	format2->type(FL_RADIO_BUTTON);
 	format2->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 	format2->value(1);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		format2->box(FL_FLAT_BOX);
 	}
@@ -30203,7 +31289,7 @@ TimerWindow::TimerWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, hh,
 	format3->labelsize(9);
 	format3->type(FL_RADIO_BUTTON);
 	format3->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		format3->box(FL_FLAT_BOX);
 	}
@@ -31399,6 +32485,10 @@ int		loop;
 	}
 	select_button_group->end();
 	end();
+	if((yp + 10) > h())
+	{
+		resize(x(), y(), w(), yp + 10);
+	}
 	hide();
 }
 
@@ -31703,6 +32793,63 @@ void	prev_page_objects_cb(Fl_Widget *w, void *v)
 		win->ShowObjects();
 	}
 }
+
+// SECTION *********************************** TEST CODEC CHOICE *******************************************
+
+void	accept_test_codec_cb(Fl_Widget *w, void *v)
+{
+	TestCodecChoice *tcc = (TestCodecChoice *)v;
+	tcc->hide();
+	Fl::delete_widget(tcc);
+	tcc->my_window->ReallyRunCodecTest();
+}
+
+void	cancel_test_codec_cb(Fl_Widget *w, void *v)
+{
+	TestCodecChoice *tcc = (TestCodecChoice *)v;
+	tcc->hide();
+	Fl::delete_widget(tcc);
+
+	if(global_log_window != NULL)
+	{
+		global_log_window->hide();
+	}
+}
+
+TestCodecChoice::TestCodecChoice(MyWin *in_win, char *quest) : Dialog(in_win, 420, 80, "Test Codecs")
+{
+	my_window = in_win;
+
+	Fl_Box *question = new Fl_Box(2, 2, w() - 4, 40);
+	question->box(FL_FLAT_BOX);
+	question->color(BLACK);
+	question->labelcolor(WHITE);
+	question->labelsize(11);
+	question->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	question->copy_label(quest);
+
+	MyButton *accept = new MyButton(my_window, (w() / 3) - 50, h() - 37, 100, 20, "Accept");
+	accept->box(FL_FLAT_BOX);
+	accept->color(BLACK);
+	accept->labelcolor(YELLOW);
+	accept->labelsize(11);
+	accept->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	accept->callback(accept_test_codec_cb, this);
+
+	MyButton *cancel = new MyButton(my_window, ((w() / 3) * 2) - 50, h() - 37, 100, 20, "Cancel");
+	cancel->box(FL_FLAT_BOX);
+	cancel->color(BLACK);
+	cancel->labelcolor(YELLOW);
+	cancel->labelsize(11);
+	cancel->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	cancel->callback(cancel_test_codec_cb, this);
+	end();
+}
+
+TestCodecChoice::~TestCodecChoice()
+{
+}
+
 
 // SECTION *********************************** PULSE AUDIO FILTER *******************************************
 
@@ -32354,8 +33501,8 @@ void	PulseMicrophone::SaveAsJSON(FILE *fp)
 int	loop;
 
 	fprintf(fp, "{\n");
-	fprintf(fp, "\t\"name\": \"%s\",\n", name);
-	fprintf(fp, "\t\"alias\": \"%s\",\n", alias);
+	fprintf(fp, "\t\"name\": \"%s\",\n", DQ(name));
+	fprintf(fp, "\t\"alias\": \"%s\",\n", DQ(alias));
 	fprintf(fp, "\t\"in use\": %d,\n", in_use);
 	fprintf(fp, "\t\"mute\": %d,\n", mute);
 	fprintf(fp, "\t\"number of samples\": %d,\n", number_of_samples);
@@ -32387,7 +33534,7 @@ int	loop;
 		fprintf(fp, "\t\t\"filter plugin name\": [");
 		for(loop = 0;loop < filter_plugin_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", filter_plugin_name[loop]);
+			fprintf(fp, "\"%s\"", DQ(filter_plugin_name[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -32399,7 +33546,7 @@ int	loop;
 		}
 	}
 	fprintf(fp, "\t\"ndi capture\": %d,\n", ndi_capture);
-	fprintf(fp, "\t\"ndi path\": \"%s\"\n", ndi_path);
+	fprintf(fp, "\t\"ndi path\": \"%s\"\n", DQ(ndi_path));
 	fprintf(fp, "}");
 }
 
@@ -32875,7 +34022,7 @@ PulseAudioButton::PulseAudioButton(MyWin *in_win, char *in_dev_name, int hz, int
 	alias_button->labelcolor(WHITE);
 	alias_button->labelsize(9);
 	alias_button->align(FL_ALIGN_LEFT | FL_ALIGN_WRAP | FL_ALIGN_INSIDE);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		alias_button->box(FL_FLAT_BOX);
 	}
@@ -32891,7 +34038,7 @@ PulseAudioButton::PulseAudioButton(MyWin *in_win, char *in_dev_name, int hz, int
 	select_button->labelcolor(YELLOW);
 	select_button->labelsize(9);
 	select_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		select_button->box(FL_FLAT_BOX);
 	}
@@ -32929,6 +34076,10 @@ PulseAudioButton::PulseAudioButton(MyWin *in_win, char *in_dev_name, int hz, int
 	delete_button->align(FL_ALIGN_CENTER | FL_ALIGN_WRAP | FL_ALIGN_INSIDE);
 	delete_button->box(FL_FRAME_BOX);
 	delete_button->callback(pulse_audio_button_delete_cb, this);
+	if(my_window->hide_menu == 1)
+	{
+		delete_button->hide();
+	}
 	start_y += 17;
 
 	volume2 = new MySlider(my_window, xx + 30, start_y, ww - 30, 16, "", NULL, 1);
@@ -33134,7 +34285,7 @@ void	PulseAudioButton::Stop()
 	{
 		microphone->Stop();
 	}
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		select_button->box(FL_FLAT_BOX);
 	}
@@ -33153,10 +34304,10 @@ void	v4l_zoom_out_cb(void *v)
 	V4L_Button *b = (V4L_Button *)v;
 	if(b->zooming == 1)
 	{
-		MyWin *main_win = b->my_win->my_win;
+		MyWin *main_win = b->my_window;
 		if(main_win != NULL)
 		{
-			Camera *cam = main_win->camera[b->my_win->index];
+			Camera *cam = main_win->camera[b->thumb_group->index];
 			if(cam->v4l_capable == 1)
 			{
 				cam->V4L_Command(V4L_ZOOM_OUT);
@@ -33171,10 +34322,10 @@ void	v4l_zoom_in_cb(void *v)
 	V4L_Button *b = (V4L_Button *)v;
 	if(b->zooming == 1)
 	{
-		MyWin *main_win = b->my_win->my_win;
+		MyWin *main_win = b->my_window;
 		if(main_win != NULL)
 		{
-			Camera *cam = main_win->camera[b->my_win->index];
+			Camera *cam = main_win->camera[b->thumb_group->index];
 			if(cam->v4l_capable == 1)
 			{
 				cam->V4L_Command(V4L_ZOOM_IN);
@@ -33189,10 +34340,10 @@ void	v4l_focus_far_cb(void *v)
 	V4L_Button *b = (V4L_Button *)v;
 	if(b->focusing == 1)
 	{
-		MyWin *main_win = b->my_win->my_win;
+		MyWin *main_win = b->my_window;
 		if(main_win != NULL)
 		{
-			Camera *cam = main_win->camera[b->my_win->index];
+			Camera *cam = main_win->camera[b->thumb_group->index];
 			if(cam->v4l_capable == 1)
 			{
 				cam->V4L_Command(V4L_FOCUS_FAR);
@@ -33207,10 +34358,10 @@ void	v4l_focus_near_cb(void *v)
 	V4L_Button *b = (V4L_Button *)v;
 	if(b->focusing == 1)
 	{
-		MyWin *main_win = b->my_win->my_win;
+		MyWin *main_win = b->my_window;
 		if(main_win != NULL)
 		{
-			Camera *cam = main_win->camera[b->my_win->index];
+			Camera *cam = main_win->camera[b->thumb_group->index];
 			if(cam->v4l_capable == 1)
 			{
 				cam->V4L_Command(V4L_FOCUS_NEAR);
@@ -33220,10 +34371,10 @@ void	v4l_focus_near_cb(void *v)
 	}
 }
 
-V4L_Button::V4L_Button(MyWin *in_window, ThumbGroup *in_win, int xx, int yy, int ww, int hh, char *lbl) : MyButton(in_window, xx, yy, ww, hh, lbl)
+V4L_Button::V4L_Button(MyWin *in_window, ThumbGroup *in_thumb_group, int xx, int yy, int ww, int hh, char *lbl) : MyButton(in_window, xx, yy, ww, hh, lbl)
 {
 	my_window = in_window;
-	my_win = in_win;
+	thumb_group = in_thumb_group;
 	zooming = 0;
 	focusing = 0;
 }
@@ -33239,60 +34390,60 @@ int	V4L_Button::handle(int event)
 	{
 		if(event == FL_PUSH)
 		{
-			MyWin *main_win = my_win->my_win;
+			MyWin *main_win = my_window;
 			if(main_win != NULL)
 			{
-				Camera *cam = main_win->camera[my_win->index];
+				Camera *cam = main_win->camera[thumb_group->index];
 				if(cam->v4l_capable == 1)
 				{
-					if(this == my_win->up_left)
+					if(this == thumb_group->up_left)
 					{
 						cam->V4L_Motion(V4L_UP | V4L_LEFT);
 					}
-					else if(this == my_win->up)
+					else if(this == thumb_group->up)
 					{
 						cam->V4L_Motion(V4L_UP);
 					}
-					else if(this == my_win->up_right)
+					else if(this == thumb_group->up_right)
 					{
 						cam->V4L_Motion(V4L_UP | V4L_RIGHT);
 					}
-					else if(this == my_win->left)
+					else if(this == thumb_group->left)
 					{
 						cam->V4L_Motion(V4L_LEFT);
 					}
-					else if(this == my_win->right)
+					else if(this == thumb_group->right)
 					{
 						cam->V4L_Motion(V4L_RIGHT);
 					}
-					else if(this == my_win->down_left)
+					else if(this == thumb_group->down_left)
 					{
 						cam->V4L_Motion(V4L_DOWN | V4L_LEFT);
 					}
-					else if(this == my_win->down)
+					else if(this == thumb_group->down)
 					{
 						cam->V4L_Motion(V4L_DOWN);
 					}
-					else if(this == my_win->down_right)
+					else if(this == thumb_group->down_right)
 					{
 						cam->V4L_Motion(V4L_DOWN | V4L_RIGHT);
 					}
-					else if(this == my_win->zoom_out)
+					else if(this == thumb_group->zoom_out)
 					{
 						zooming = 1;
 						Fl::add_timeout(0.01, v4l_zoom_out_cb, this);
 					}
-					else if(this == my_win->zoom_in)
+					else if(this == thumb_group->zoom_in)
 					{
 						zooming = 1;
 						Fl::add_timeout(0.01, v4l_zoom_in_cb, this);
 					}
-					else if(this == my_win->focus_far)
+					else if(this == thumb_group->focus_far)
 					{
 						focusing = 1;
 						Fl::add_timeout(0.01, v4l_focus_far_cb, this);
 					}
-					else if(this == my_win->focus_near)
+					else if(this == thumb_group->focus_near)
 					{
 						focusing = 1;
 						Fl::add_timeout(0.01, v4l_focus_near_cb, this);
@@ -33302,22 +34453,22 @@ int	V4L_Button::handle(int event)
 		}
 		else if(event == FL_RELEASE)
 		{
-			MyWin *main_win = my_win->my_win;
+			MyWin *main_win = my_window;
 			if(main_win != NULL)
 			{
-				Camera *cam = main_win->camera[my_win->index];
+				Camera *cam = main_win->camera[thumb_group->index];
 				if(cam->v4l_capable == 1)
 				{
-					if((this == my_win->up_left)
-					|| (this == my_win->up)
-					|| (this == my_win->up_right)
-					|| (this == my_win->left)
-					|| (this == my_win->right)
-					|| (this == my_win->down_left)
-					|| (this == my_win->down)
-					|| (this == my_win->down_right)
-					|| (this == my_win->zoom_in)
-					|| (this == my_win->zoom_out))
+					if((this == thumb_group->up_left)
+					|| (this == thumb_group->up)
+					|| (this == thumb_group->up_right)
+					|| (this == thumb_group->left)
+					|| (this == thumb_group->right)
+					|| (this == thumb_group->down_left)
+					|| (this == thumb_group->down)
+					|| (this == thumb_group->down_right)
+					|| (this == thumb_group->zoom_in)
+					|| (this == thumb_group->zoom_out))
 					{
 						cam->V4L_Motion(V4L_STOP);
 					}
@@ -33531,7 +34682,7 @@ PTZ_LockWindow::PTZ_LockWindow(MyWin *in_win) : Dialog(in_win, 360, 300, 620, 60
 	last_x = 0;
 	last_y = 0;
 
-	scroll = new SimpleScroll(my_window, 2, new_yp + 34, 408, h() - 98, "Assigned");
+	scroll = new SimpleScroll(my_window, this, 2, new_yp + 34, 408, h() - 98, "Assigned");
 	scroll->box(FL_FLAT_BOX);
 	scroll->color(fl_rgb_color(20, 20, 25));
 	scroll->labelsize(11);
@@ -33693,9 +34844,9 @@ void	PTZ_LockWindow::draw()
 	Fl_Window::draw();
 }
 
-PTZ_Button::PTZ_Button(MyWin *in_window, PTZ_Window *in_win, int xx, int yy, int ww, int hh, char *lbl) : MyButton(in_window, xx, yy, ww, hh, lbl)
+PTZ_Button::PTZ_Button(MyWin *in_window, PTZ_Window *ptz_win, int xx, int yy, int ww, int hh, char *lbl) : MyButton(in_window, xx, yy, ww, hh, lbl)
 {
-	my_window = in_win;
+	ptz_window = ptz_win;
 }
 
 PTZ_Button::~PTZ_Button()
@@ -33709,10 +34860,45 @@ int	PTZ_Button::handle(int event)
 	{
 		if(active())
 		{
-			my_window->ViscaButtonCommands(this, event);
+			ptz_window->ViscaButtonCommands(this, event);
 		}
 	}
-	flag = MyButton::handle(event);
+	else if(event == FL_MOUSEWHEEL)
+	{
+		int b_type = (long int)user_data();
+		if((b_type == PTZ_ZOOM_IN)
+		|| (b_type == PTZ_ZOOM_OUT))
+		{
+			int direction = Fl::event_dy();
+			if(direction > 0)
+			{
+				my_window->ZoomALittle(ptz_window->instance, 'w');
+			}
+			else if(direction < 0)
+			{
+				my_window->ZoomALittle(ptz_window->instance, 's');
+			}
+			flag = 1;
+		}
+		else if((b_type == PTZ_FOCUS_FAR)
+		|| (b_type == PTZ_FOCUS_NEAR))
+		{
+			int direction = Fl::event_dy();
+			if(direction > 0)
+			{
+				my_window->FocusALittle(ptz_window->instance, 'w');
+			}
+			else if(direction < 0)
+			{
+				my_window->FocusALittle(ptz_window->instance, 's');
+			}
+			flag = 1;
+		}
+	}
+	if(flag == 0)
+	{
+		flag = MyButton::handle(event);
+	}
 	return(flag);
 }
 
@@ -34264,8 +35450,8 @@ void	ptz_set_speed_cb(Fl_Widget *w, void *v)
 		{
 			if(win->ptz_zoomer_speed == 0)
 			{
-				win->ptz_zoom_speed = (int)((40959.0 / 1000.0) * val);
-				if(win->ptz_zoom_speed > 39) win->ptz_zoom_speed = 39;
+				win->ptz_zoom_speed = (int)(7.0 * val);
+				if(win->ptz_zoom_speed > 7) win->ptz_zoom_speed = 7;
 			}
 			else
 			{
@@ -34309,6 +35495,7 @@ void	ptz_bind_camera_cb(Fl_Widget *w, void *v)
 		if(val == 1)
 		{
 			win->bound_camera = cam;
+			strcpy(win->bound_camera_alias, cam->alias);
 			win->ptz_bound_name_box->value(cam->alias);
 			win->bound_camera->prefer_ndi = win->prefer_ndi;
 			win->bound_camera->prefer_v4l = win->prefer_v4l;
@@ -34317,6 +35504,7 @@ void	ptz_bind_camera_cb(Fl_Widget *w, void *v)
 		{
 			win->ptz_bound_name_box->value("");
 			win->bound_camera = NULL;
+			strcpy(win->bound_camera_alias, "");
 		}
 	}
 }
@@ -34350,7 +35538,9 @@ void	ptz_alias_button_cb(Fl_Widget *w, void *v)
 void	ptz_contract_cb(Fl_Widget *w, void *v)
 {
 	PTZ_Window *win = (PTZ_Window *)v;
-	if(win->ptz_contract_group->visible())
+	if((win->ptz_contract_group->visible())
+	|| (win->ptz_big_joy_group->visible())
+	|| (win->ptz_named_presets->visible()))
 	{
 		win->Contract();
 	}
@@ -34361,17 +35551,184 @@ void	ptz_contract_cb(Fl_Widget *w, void *v)
 	win->redraw();
 }
 
+void	ptz_dock_cb(Fl_Widget *w, void *v)
+{
+	PTZ_Window *win = (PTZ_Window *)v;
+	MyWin *my_window = win->my_window;
+	if(my_window != NULL)
+	{
+		int nn = win->instance;
+		if(my_window->button_group_side == SIDE_RIGHT)
+		{
+			int xx = 10 + (nn * 300);
+			int yy = my_window->h() - win->h();
+			win->resize(xx, yy, win->w(), win->h());
+		}
+		else
+		{
+			int xx = (my_window->w() - 310) - (nn * 300);
+			int yy = my_window->h() - win->h();
+			win->resize(xx, yy, win->w(), win->h());
+		}
+		win->ptz_dock_button->hide();
+	}
+}
+
+void	change_pan_tilt_style_cb(Fl_Widget *w, void *v)
+{
+	PTZ_Window *win = (PTZ_Window *)v;
+	if(win->pan_tilt_style == PAN_TILT_STYLE_BUTTONS)
+	{
+		win->ptz_contract_group->show();
+		win->ptz_big_joy_group->hide();
+		win->pan_tilt_style = PAN_TILT_STYLE_JOYSTICK;
+		win->pan_tilt_button_group->hide();
+		win->pan_tilt_joystick_group->show();
+		win->pan_tilt_joystick_group->resize(win->x() + 15, win->y() + 167, 70, 70);
+		win->pt_joystick->resize(0, 0, 70, 70);
+	}
+	else if(win->pan_tilt_style == PAN_TILT_STYLE_JOYSTICK)
+	{
+		win->ptz_contract_group->hide();
+		win->ptz_big_joy_group->show();
+		win->pan_tilt_style = PAN_TILT_STYLE_BIG_JOYSTICK;
+	}
+	else if(win->pan_tilt_style == PAN_TILT_STYLE_BIG_JOYSTICK)
+	{
+		win->ptz_contract_group->show();
+		win->ptz_big_joy_group->hide();
+		win->pan_tilt_style = PAN_TILT_STYLE_BUTTONS;
+		win->pan_tilt_joystick_group->hide();
+		win->pan_tilt_button_group->show();
+	}
+	win->redraw();
+}
+
+void	pt_big_zoom_roller_cb(Fl_Widget *w, void *v)
+{
+	Fl_Roller *roller = (Fl_Roller *)w;
+	PTZ_Window *win = (PTZ_Window *)v;
+	double val = roller->value();
+	if(val < 0.0)
+	{
+		win->ptz_zoom_speed = abs(val);
+		win->my_window->ViscaCommand(win->instance, PTZ_ZOOM_OUT);
+	}
+	else if(val > 0.0)
+	{
+		win->ptz_zoom_speed = abs(val);
+		win->my_window->ViscaCommand(win->instance, PTZ_ZOOM_IN);
+	}
+	else
+	{
+		win->my_window->ViscaCommand(win->instance, PTZ_ZOOM_STOP);
+	}
+}
+
+void	pt_big_focus_roller_cb(Fl_Widget *w, void *v)
+{
+	Fl_Roller *roller = (Fl_Roller *)w;
+	PTZ_Window *win = (PTZ_Window *)v;
+	double val = roller->value();
+	if(val < 0.0)
+	{
+		win->ptz_focus_speed = abs(val);
+		win->my_window->ViscaCommand(win->instance, PTZ_FOCUS_FAR);
+	}
+	else if(val > 0.0)
+	{
+		win->ptz_focus_speed = abs(val);
+		win->my_window->ViscaCommand(win->instance, PTZ_FOCUS_NEAR);
+	}
+	else
+	{
+		win->my_window->ViscaCommand(win->instance, PTZ_FOCUS_STOP);
+	}
+}
+
+void	scroll_detector_cb(void *v)
+{
+	MyZoomRoller *mzr = (MyZoomRoller *)v;
+	mzr->handle(FL_RELEASE);
+}
+
+MyZoomRoller::MyZoomRoller(MyWin *in_win, PTZ_Window *in_ptz_win, int xx, int yy, int ww, int hh, char *lbl) : Fl_Roller(xx, yy, ww, hh, lbl)
+{
+	my_window = in_win;
+	ptz_window = in_ptz_win;
+}
+
+MyZoomRoller::~MyZoomRoller()
+{
+	Fl::remove_timeout(scroll_detector_cb, this);
+}
+
+int	MyZoomRoller::handle(int event)
+{
+	int flag = 0;
+	if((event == FL_FOCUS)
+	|| (event == FL_UNFOCUS))
+	{
+		flag = 1;
+	}
+	else if(event == FL_ENTER)
+	{
+		Fl::focus(this);
+		flag = 1;
+	}
+	else if(event == FL_RELEASE)
+	{
+		value(0.0);
+		do_callback();
+		flag = 1;
+	}
+	else if(event == FL_DRAG)
+	{
+	}
+	else if(event == FL_PUSH)
+	{
+		value(0.0);
+	}
+	else if(event == FL_MOUSEWHEEL)
+	{
+		Fl::remove_timeout(scroll_detector_cb, this);
+		Fl::add_timeout(0.2, scroll_detector_cb, this);
+		int direction = Fl::event_dy();
+		if(direction > 0)
+		{
+			double val = value();
+			val += step();
+			value(val);
+		}
+		else
+		{
+			double val = value();
+			val -= step();
+			value(val);
+		}
+		do_callback();
+		flag = 1;
+		redraw();
+	}
+	if(flag == 0)
+	{
+		flag = Fl_Roller::handle(event);
+	}
+	return(flag);
+}
+
 PTZ_Window::PTZ_Window(MyWin *in_win, char *in_alias, int in_instance, int in_xx, int in_yy, int in_ww, int in_hh) : SlidingElement(in_win, OPEN_UP, 0, 0, in_ww, in_hh)
 {
-int	loop;
-int	inner;
-int	outer;
-int	aa, ab, ac;
-char buf[8192];
+int		loop;
+int		inner;
+int		outer;
+int		aa, ab, ac;
+char	 buf[8192];
 
 	my_window = in_win;
 	popup = NULL;
 	bound_camera = NULL;
+	strcpy(bound_camera_alias, "");
 	contracted = 1;
 	hovering = 0;
 	key_table[MY_KEY_DOWN] = 0;
@@ -34395,9 +35752,17 @@ char buf[8192];
 	pan_tilt_style = PAN_TILT_STYLE_BUTTONS;
 	ndi_focus = 0.5;
 	ndi_focus_accel = 0.1;
-
+	currently_editing = NULL;
+	current_preset = 0;
+	preset_group_mode = PTZ_PRESET_GROUP_MODE_BUTTONS;
+	initial_left = x();
+	initial_bottom = my_window->h() - (y() + h());
+	for(loop = 0;loop < NUMBER_OF_PRESETS;loop++)
+	{
+		ptz_preset_name[loop] = NULL;
+	}
 	color(BLACK);
-	if(my_window->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		box(FL_FLAT_BOX);
 	}
@@ -34433,7 +35798,7 @@ char buf[8192];
 		zoom_node[loop].magnification = 0.0;
 	}
 	ptz_focus_speed = 1;
-	ptz_zoom_speed = 20;
+	ptz_zoom_speed = 3;
 	ptz_zoomer_speed = 0;
 	ptz_adjust_speed_for_zoom = 0;
 	ptz_zoom_reading = -1;
@@ -34452,16 +35817,25 @@ char buf[8192];
 	}
 	int start_x = 2;
 	int start_y = 2;
-	ptz_alias_button = new MyButton(my_window, 2, 2, w() - 24, 20, alias);
+	ptz_alias_box = new Fl_Box(2, 2, w() - 84, 20, alias);
+	ptz_alias_box->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	ptz_alias_box->box(FL_FLAT_BOX);
+	ptz_alias_box->color(DARK_GRAY);
+	ptz_alias_box->labelcolor(WHITE);
+	ptz_alias_box->labelsize(11);
+	ptz_alias_box->show();
+
+	ptz_alias_button = new MyButton(my_window, 2, 2, w() - 84, 20, alias);
 	ptz_alias_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-	ptz_alias_button->box(FL_NO_BOX);
+	ptz_alias_button->box(FL_FLAT_BOX);
 	ptz_alias_button->color(BLACK);
 	ptz_alias_button->labelcolor(WHITE);
 	ptz_alias_button->labelsize(11);
 	ptz_alias_button->copy_tooltip("Set the PTZ alias");
 	ptz_alias_button->callback(ptz_alias_button_cb, this);
+	ptz_alias_button->hide();
 
-	ptz_alias_input = new MyInput(40, 2, w() - 64, 20, "Alias");
+	ptz_alias_input = new MyInput(my_window, 40, 2, w() - 104, 20, "Alias");
 	ptz_alias_input->align(FL_ALIGN_LEFT);
 	ptz_alias_input->box(FL_FRAME_BOX);
 	ptz_alias_input->color(BLACK);
@@ -34474,6 +35848,15 @@ char buf[8192];
 	ptz_alias_input->when(FL_WHEN_RELEASE | FL_WHEN_ENTER_KEY | FL_WHEN_NOT_CHANGED);
 	ptz_alias_input->callback(ptz_alias_input_cb, this);
 	ptz_alias_input->hide();
+
+	ptz_dock_button = new MyButton(my_window, w() - 60, 2, 40, 20, "Dock");
+	ptz_dock_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	ptz_dock_button->box(FL_NO_BOX);
+	ptz_dock_button->color(BLACK);
+	ptz_dock_button->labelcolor(WHITE);
+	ptz_dock_button->labelsize(8);
+	ptz_dock_button->copy_tooltip("Dock this window");
+	ptz_dock_button->callback(ptz_dock_cb, this);
 
 	ptz_contract_button = new MyButton(my_window, w() - 20, 2, 20, 20, "@2>");
 	ptz_contract_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
@@ -34498,6 +35881,54 @@ char buf[8192];
 	start_y = AddZoomFocusAperture(60, save_y2);
 	start_y = AddCameraControlButtons(15, 168);
 	ptz_contract_group->end();
+	AddNamedPresets();
+
+	ptz_big_joy_group = new Fl_Group(0, 20, w(), h() - 20);
+		big_joystick_group = new Fl_Window(1, 20, w() - 2, h() - 21);
+			pt_label2 = new Fl_Button(0, 0, 100, 20, "Pan/Tilt");
+			pt_label2->box(FL_NO_BOX);
+			pt_label2->color(YELLOW);
+			pt_label2->labelcolor(YELLOW);
+			pt_label2->labelsize(9);
+			pt_label2->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+			pt_label2->copy_tooltip("Select between joystick and button interfaces for pan/zoom/tilt");
+			pt_label2->callback(change_pan_tilt_style_cb, this);
+			pt_big_joystick = new PanTiltJoystick(my_window, this, 10, 20, w() - 50, w() - 50);
+
+			pt_big_joystick->pt_big_zoom_roller = new MyZoomRoller(my_window, this, w() - 30, 40, 15, 100, "Zoom");
+			pt_big_joystick->pt_big_zoom_roller->labelsize(8);
+			pt_big_joystick->pt_big_zoom_roller->labelcolor(WHITE);
+			pt_big_joystick->pt_big_zoom_roller->range(-10, 10);
+			pt_big_joystick->pt_big_zoom_roller->bounds(-10, 10);
+			pt_big_joystick->pt_big_zoom_roller->step(0.1);
+			pt_big_joystick->pt_big_zoom_roller->value(0.0);
+			pt_big_joystick->pt_big_zoom_roller->align(FL_ALIGN_TOP | FL_ALIGN_CENTER);
+			pt_big_joystick->pt_big_zoom_roller->callback(pt_big_zoom_roller_cb, this);
+
+			pt_big_joystick->pt_big_focus_roller = new MyZoomRoller(my_window, this, w() - 30, 160, 15, 100, "Focus");
+			pt_big_joystick->pt_big_focus_roller->labelsize(8);
+			pt_big_joystick->pt_big_focus_roller->labelcolor(WHITE);
+			pt_big_joystick->pt_big_focus_roller->range(-10, 10);
+			pt_big_joystick->pt_big_focus_roller->bounds(-10, 10);
+			pt_big_joystick->pt_big_focus_roller->step(0.1);
+			pt_big_joystick->pt_big_focus_roller->align(FL_ALIGN_TOP | FL_ALIGN_CENTER);
+			pt_big_joystick->pt_big_focus_roller->callback(pt_big_focus_roller_cb, this);
+			
+		big_joystick_group->end();
+		big_joystick_group->box(FL_FLAT_BOX);
+		big_joystick_group->color(BLACK);
+	ptz_big_joy_group->end();
+	ptz_big_joy_group->hide();
+
+	ptz_contract_button2 = new MyButton(my_window, w() - 20, h() - 20, 20, 20, "@2>");
+	ptz_contract_button2->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	ptz_contract_button2->box(FL_NO_BOX);
+	ptz_contract_button2->color(BLACK);
+	ptz_contract_button2->labelcolor(WHITE);
+	ptz_contract_button2->labelsize(8);
+	ptz_contract_button2->copy_tooltip("Contract this window");
+	ptz_contract_button2->callback(ptz_contract_cb, this);
+
 	resize(in_xx, in_yy, w(), h());
 
 	pan_tilt_button_group->hide();
@@ -34506,13 +35937,18 @@ char buf[8192];
 	{
 		pan_tilt_button_group->show();
 	}
-	else
+	else if(pan_tilt_style == PAN_TILT_STYLE_JOYSTICK)
+	{
+		pan_tilt_joystick_group->show();
+	}
+	else if(pan_tilt_style == PAN_TILT_STYLE_BIG_JOYSTICK)
 	{
 		pan_tilt_joystick_group->show();
 	}
 	if((my_window->initial_ptz_x[instance] > -1) && (my_window->initial_ptz_y[instance] > -1))
 	{
-		resize(my_window->initial_ptz_x[instance], my_window->initial_ptz_y[instance], w(), h());
+		initial_left = my_window->initial_ptz_x[instance];
+		initial_bottom = my_window->initial_ptz_y[instance];
 		ptz_contract_cb(NULL, this);
 	}
 	else
@@ -34834,31 +36270,99 @@ void	PTZ_Window::CenterCameraOnPixel(int click_x, int click_y, uint16_t visca_zo
 void	PTZ_Window::Contract()
 {
 	ptz_contract_group->hide();
-	resize(x(), my_window->h() - 24, w(), 24);
+	ptz_big_joy_group->hide();
+	ptz_named_presets->hide();
+	resize(initial_left, (my_window->h() - initial_bottom) - 24, w(), 24);
+
+	ptz_alias_box->resize(x() + 2, y() + 2, w() - 24, 20);
 	ptz_alias_button->resize(x() + 2, y() + 2, w() - 24, 20);
 	ptz_contract_button->resize(x() + (w() - 20), y() + 2, 20, 20);
+	ptz_dock_button->resize(x() + (w() - 60), y() + 2, 40, 20);
 	ptz_contract_button->copy_label("@8>");
+	ptz_contract_button2->copy_label("@8>");
 	ptz_contract_button->copy_tooltip("Expand this window");
-	ptz_alias_button->callback(ptz_contract_cb, this);
-	ptz_alias_button->copy_tooltip("Expand this window");
+	ptz_contract_button2->copy_tooltip("Expand this window");
+	ptz_contract_button2->hide();
+	ptz_alias_button->color(BLACK);
+	ptz_alias_button->deactivate();
+	ptz_alias_button->hide();
+	ptz_alias_box->show();
 	ptz_alias_input->hide();
+
+	ptz_dock_button->hide();
+	int xx = 10 + (instance * 300);
+	int yy = my_window->h() - h();
+	if(my_window->button_group_side != SIDE_RIGHT)
+	{
+		xx = (my_window->w() - 310) - (instance * 300);
+		yy = my_window->h() - h();
+	}
+	if((xx != x()) || (yy != y()))
+	{
+		ptz_dock_button->show();
+	}
 	contracted = 1;
 }
 
 void	PTZ_Window::Expand()
 {
-	ptz_contract_group->show();
-	resize(x(), my_window->h() - 330, w(), 330);
+	if(pan_tilt_style != PAN_TILT_STYLE_BIG_JOYSTICK)
+	{
+		ptz_contract_group->show();
+	}
+	else
+	{
+		ptz_big_joy_group->show();
+	}
+	resize(initial_left, (my_window->h() - initial_bottom) - 330, w(), 330);
+
 	ptz_contract_button->copy_label("@2>");
+	ptz_contract_button2->copy_label("@2>");
 	ptz_contract_button->copy_tooltip("Contract this window");
-	ptz_alias_button->callback(ptz_alias_button_cb, this);
+	ptz_contract_button2->copy_tooltip("Contract this window");
+	ptz_contract_button2->show();
 	ptz_alias_button->copy_tooltip("Set the PTZ alias");
+	ptz_alias_button->color(BLACK);
+	ptz_alias_button->activate();
+	ptz_alias_button->show();
 	ptz_alias_input->hide();
+	ptz_alias_box->hide();
+
+	ptz_dock_button->hide();
+	int xx = 10 + (instance * 300);
+	int yy = my_window->h() - h();
+	if(my_window->button_group_side != SIDE_RIGHT)
+	{
+		xx = (my_window->w() - 310) - (instance * 300);
+		yy = my_window->h() - h();
+	}
+	if((xx != x()) || (yy != y()))
+	{
+		ptz_dock_button->show();
+	}
 	contracted = 0;
 }
 
 void	PTZ_Window::resize(int xx, int yy, int ww, int hh)
 {
+	initial_left = xx;
+	initial_bottom = my_window->h() - (yy + hh);
+	if((ww == w()) && (hh == h()))
+	{
+		ptz_dock_button->show();
+		if(initial_bottom < 0) 
+		{
+			initial_bottom = 0;
+			if(contracted == 1)
+			{
+				yy = my_window->h() - 24;
+			}
+			else
+			{
+				yy = my_window->h() - 330;
+			}
+		}
+	}
 	SlidingElement::resize(xx, yy, ww, hh);
 }
 
@@ -35071,6 +36575,84 @@ void	PTZ_Window::ParseJSON(cJSON *json)
 	}
 }
 
+void	PTZ_Window::LoadNamedPresetsAsJSON(char *filename)
+{
+	char *buf = ReadWholeFile(filename);
+	if(buf != NULL)
+	{
+		cJSON *json = cJSON_Parse(buf);
+		if(json != NULL)
+		{
+			LoadNamedPresetsAsSJON(json);
+		}
+		else
+		{
+			fprintf(stderr, "Error: Unable to parse json %s\n", filename);
+		}
+		free(buf);
+	}
+}
+
+void	PTZ_Window::LoadNamedPresetsAsSJON(cJSON *json)
+{
+	cJSON *named_preset_item = NULL;
+	cJSON *named_preset_items = json_parse_array(json, "ptz named presets");
+	if(named_preset_items != NULL)
+	{
+		int cnt = 0;
+		cJSON_ArrayForEach(named_preset_item, named_preset_items)
+		{
+			if(named_preset_item->valuestring != NULL)
+			{
+				if(ptz_preset_name[cnt] != NULL)
+				{
+					free(ptz_preset_name[cnt]);
+					ptz_preset_name[cnt] = NULL;
+				}
+				ptz_preset_name[cnt] = strdup(named_preset_item->valuestring);
+				cnt++;
+			}
+		}
+	}
+}
+
+void	PTZ_Window::SaveNamedPresetsAsJSON(FILE *fp)
+{
+int		outer;
+int		inner;
+
+	fprintf(fp, "\t\"ptz named presets\": [\n");
+	for(inner = 0;inner < NUMBER_OF_PRESETS;inner++)
+	{
+		char *str = "";
+		if(ptz_preset_name[inner] != NULL)
+		{
+			str = ptz_preset_name[inner];
+		}
+		if(inner < NUMBER_OF_PRESETS - 1)
+		{
+			fprintf(fp, "\t\t\"%s\",\n", DQ(str));
+		}
+		else
+		{
+			fprintf(fp, "\t\t\"%s\"\n", DQ(str));
+		}
+	}
+	fprintf(fp, "\t]\n");
+}
+
+void	PTZ_Window::SaveNamedPresetsAsJSON(char *filename)
+{
+	FILE *fp = fopen(filename, "w");
+	if(fp != NULL)
+	{
+		fprintf(fp, "{\n");
+		SaveNamedPresetsAsJSON(fp);
+		fprintf(fp, "}\n");
+		fclose(fp);
+	}
+}
+
 void	PTZ_Window::SaveZoomParamsAsJSON(char *filename)
 {
 	FILE *fp = fopen(filename, "w");
@@ -35119,7 +36701,7 @@ int		inner;
 	fprintf(fp, "\t\"instance\": %d,\n", instance);
 	fprintf(fp, "\t\"showing\": %d,\n", showing);
 	fprintf(fp, "\t\"pinned\": %d,\n", pinned);
-	fprintf(fp, "\t\"alias\": \"%s\",\n", alias);
+	fprintf(fp, "\t\"alias\": \"%s\",\n", DQ(alias));
 	fprintf(fp, "\t\"contracted\": %d,\n", contracted);
 	fprintf(fp, "\t\"hovering\": %d,\n", hovering);
 	fprintf(fp, "\t\"key table\": [");
@@ -35167,7 +36749,7 @@ int		inner;
 			fprintf(fp, "],\n");
 		}
 	}
-	fprintf(fp, "\t\"ptz current device path\": \"%s\",\n", ptz_current_device_path);
+	fprintf(fp, "\t\"ptz current device path\": \"%s\",\n", DQ(ptz_current_device_path));
 	fprintf(fp, "\t\"ptz speed slider value\": %f,\n", ptz_speed_slider_value);
 	fprintf(fp, "\t\"ptz pan speed\": %f,\n", ptz_pan_speed);
 	fprintf(fp, "\t\"ptz tilt speed\": %f,\n", ptz_tilt_speed);
@@ -35546,24 +37128,6 @@ int	PTZ_Window::AddSpeedSlider(int start_x, int start_y)
 	return(start_y);
 }
 
-void	change_pan_tilt_style_cb(Fl_Widget *w, void *v)
-{
-	PTZ_Window *win = (PTZ_Window *)v;
-	if(win->pan_tilt_style == PAN_TILT_STYLE_BUTTONS)
-	{
-		win->pan_tilt_style = PAN_TILT_STYLE_JOYSTICK;
-		win->pan_tilt_button_group->hide();
-		win->pan_tilt_joystick_group->show();
-	}
-	else
-	{
-		win->pan_tilt_style = PAN_TILT_STYLE_BUTTONS;
-		win->pan_tilt_joystick_group->hide();
-		win->pan_tilt_button_group->show();
-	}
-	win->redraw();
-}
-
 int	PTZ_Window::AddPanTiltButtons(int start_x, int start_y)
 {
 	int yy = start_y;
@@ -35588,72 +37152,72 @@ int	PTZ_Window::AddPanTiltButtonPanel(int start_x, int yy)
 	pan_tilt_button_group->color(BLACK);
 
 	ptz_up_button = new PT_Button(my_window, this, 25, 5, 20, 20, "@#8>");
-	ptz_up_button->box(FL_FRAME);
-	ptz_up_button->color(YELLOW);
+	ptz_up_button->box(FL_FRAME_BOX);
+	ptz_up_button->color(BLACK);
 	ptz_up_button->labelcolor(YELLOW);
 	ptz_up_button->copy_tooltip("Move camera up using VISCA or V4L");
 	ptz_up_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	ptz_up_button->user_data((void *)PTZ_UP);
 
 	ptz_up_right_button = new PT_Button(my_window, this, 50, 0, 20, 20, "@#9>");
-	ptz_up_right_button->box(FL_FRAME);
-	ptz_up_right_button->color(YELLOW);
+	ptz_up_right_button->box(FL_FRAME_BOX);
+	ptz_up_right_button->color(BLACK);
 	ptz_up_right_button->labelcolor(YELLOW);
 	ptz_up_right_button->copy_tooltip("Move camera up and right using VISCA or V4L");
 	ptz_up_right_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	ptz_up_right_button->user_data((void *)PTZ_UP_RIGHT);
 
 	ptz_up_left_button = new PT_Button(my_window, this, 0, 0, 20, 20, "@#7>");
-	ptz_up_left_button->box(FL_FRAME);
-	ptz_up_left_button->color(YELLOW);
+	ptz_up_left_button->box(FL_FRAME_BOX);
+	ptz_up_left_button->color(BLACK);
 	ptz_up_left_button->labelcolor(YELLOW);
 	ptz_up_left_button->copy_tooltip("Move camera up and left using VISCA or V4L");
 	ptz_up_left_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	ptz_up_left_button->user_data((void *)PTZ_UP_LEFT);
 
 	ptz_down_button = new PT_Button(my_window, this, 25, 45, 20, 20, "@#2>");
-	ptz_down_button->box(FL_FRAME);
-	ptz_down_button->color(DARK_BLUE);
+	ptz_down_button->box(FL_FRAME_BOX);
+	ptz_down_button->color(BLACK);
 	ptz_down_button->labelcolor(YELLOW);
 	ptz_down_button->copy_tooltip("Move camera down using VISCA or V4L");
 	ptz_down_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	ptz_down_button->user_data((void *)PTZ_DOWN);
 
 	ptz_down_right_button = new PT_Button(my_window, this, 50, 50, 20, 20, "@#3>");
-	ptz_down_right_button->box(FL_FRAME);
-	ptz_down_right_button->color(DARK_BLUE);
+	ptz_down_right_button->box(FL_FRAME_BOX);
+	ptz_down_right_button->color(BLACK);
 	ptz_down_right_button->labelcolor(YELLOW);
 	ptz_down_right_button->copy_tooltip("Move camera down and right using VISCA or V4L");
 	ptz_down_right_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	ptz_down_right_button->user_data((void *)PTZ_DOWN_RIGHT);
 
 	ptz_down_left_button = new PT_Button(my_window, this, 0, 50, 20, 20, "@#1>");
-	ptz_down_left_button->box(FL_FRAME);
-	ptz_down_left_button->color(DARK_BLUE);
+	ptz_down_left_button->box(FL_FRAME_BOX);
+	ptz_down_left_button->color(BLACK);
 	ptz_down_left_button->labelcolor(YELLOW);
 	ptz_down_left_button->copy_tooltip("Move camera down and left using VISCA or V4L");
 	ptz_down_left_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	ptz_down_left_button->user_data((void *)PTZ_DOWN_LEFT);
 
 	ptz_left_button = new PT_Button(my_window, this, 5, 25, 20, 20, "@#4>");
-	ptz_left_button->box(FL_FRAME);
-	ptz_left_button->color(DARK_BLUE);
+	ptz_left_button->box(FL_FRAME_BOX);
+	ptz_left_button->color(BLACK);
 	ptz_left_button->labelcolor(YELLOW);
 	ptz_left_button->copy_tooltip("Move camera left using VISCA or V4L");
 	ptz_left_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	ptz_left_button->user_data((void *)PTZ_LEFT);
 
 	ptz_home_button = new PT_Button(my_window, this, 26, 26, 17, 17, "");
-	ptz_home_button->box(FL_FRAME);
-	ptz_home_button->color(DARK_BLUE);
+	ptz_home_button->box(FL_FRAME_BOX);
+	ptz_home_button->color(BLACK);
 	ptz_home_button->labelcolor(YELLOW);
 	ptz_home_button->copy_tooltip("Move to the camera to home position using VISCA or V4L");
 	ptz_home_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	ptz_home_button->user_data((void *)PTZ_HOME);
 
 	ptz_right_button = new PT_Button(my_window, this, 45, 25, 20, 20, "@#>");
-	ptz_right_button->box(FL_FRAME);
-	ptz_right_button->color(DARK_BLUE);
+	ptz_right_button->box(FL_FRAME_BOX);
+	ptz_right_button->color(BLACK);
 	ptz_right_button->labelcolor(YELLOW);
 	ptz_right_button->copy_tooltip("Move the camera right using VISCA or V4L");
 	ptz_right_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
@@ -35668,8 +37232,9 @@ PanTiltJoystick::PanTiltJoystick(MyWin *in_win, PTZ_Window *in_ptz_window, int x
 {
 	my_window = in_win;
 	ptz_window = in_ptz_window;
-	pos_x = w() / 2;
-	pos_y = h() / 2;
+	pos_x = x() + (w() / 2);
+	pos_y = y() + (h() / 2);
+
 	dragging = 0;
 	box(FL_FRAME_BOX);
 	color(BLACK);
@@ -35679,25 +37244,59 @@ PanTiltJoystick::~PanTiltJoystick()
 {
 }
 
+void	pt_joystick_release_cb(void *v)
+{
+	PanTiltJoystick *joy = (PanTiltJoystick *)v;
+	double dx = (double)(joy->pos_x - (joy->x() + (joy->w() / 2)));
+	double dy = (double)(joy->pos_y - (joy->y() + (joy->h() / 2)));
+	int ddx = dx / 10.0;
+	int ddy = dy / 10.0;
+	if((ddx != 0.0) || (ddy != 0.0))
+	{
+		joy->pos_x -= ddx;
+		joy->pos_y -= ddy;
+		joy->redraw();
+		Fl::repeat_timeout(0.01, pt_joystick_release_cb, joy);
+	}
+	else
+	{
+		joy->pos_x = joy->x() + (joy->w() / 2);
+		joy->pos_y =joy-> y() + (joy->h() / 2);
+		joy->redraw();
+		joy->my_window->ViscaCommand(joy->ptz_window->instance, PTZ_PAN_STOP);
+	}
+}
+
 void	PanTiltJoystick::draw()
 {
 	if(visible())
 	{
 		Fl_Box::draw();
 		fl_color(WHITE);
-		fl_arc(1, 1, w() - 2, h() - 2, 0, 360);
+		fl_arc(x() + 1, y() + 1, w() - 2, h() - 2, 0, 360);
+		fl_color(GRAY);
+		fl_line(x() + (w() / 2), y(), x() + (w() / 2), y() + h());
+		fl_line(x(), y() + (h() / 2), x() + w(), y() + (h() / 2));
 		fl_color(YELLOW);
 		fl_pie(pos_x - 5, pos_y - 5, 10, 10, 0, 360);
-		fl_color(GRAY);
-		fl_line(w() / 2, 0, w() / 2, h());
-		fl_line(0, h() / 2, w(), h() / 2);
 	}
 }
 
 int		PanTiltJoystick::handle(int event)
 {
 	int flag = 0;
-	if(event == FL_PUSH)
+	if(event == FL_SHOW)
+	{
+		if(pt_big_zoom_roller != NULL)
+		{
+			pt_big_zoom_roller->value(0.0);
+		}
+		if(pt_big_focus_roller != NULL)
+		{
+			pt_big_focus_roller->value(0.0);
+		}
+	}
+	else if(event == FL_PUSH)
 	{
 		int xx = Fl::event_x();
 		int yy = Fl::event_y();
@@ -35715,13 +37314,14 @@ int		PanTiltJoystick::handle(int event)
 			int xx = Fl::event_x();
 			int yy = Fl::event_y();
 
-			if(xx < 0) xx = 0;
-			if(xx > w()) xx = w();
-			if(yy < 0) yy = 0;
-			if(yy > h()) yy = h();
-
-			pos_x = xx;
-			pos_y = yy;
+			double dx = (double)abs(xx - (x() + (w() / 2)));
+			double dy = (double)abs(yy - (y() + (h() / 2)));
+			double dist = sqrt((dx * dx) + (dy * dy));
+			if(dist < (w() / 2))
+			{
+				pos_x = xx;
+				pos_y = yy;
+			}
 			Move();
 			redraw();
 			flag = 1;
@@ -35729,10 +37329,16 @@ int		PanTiltJoystick::handle(int event)
 	}
 	else if(event == FL_RELEASE)
 	{
-		pos_x = w() / 2;
-		pos_y = w() / 2;
-		redraw();
-		my_window->ViscaCommand(ptz_window->instance, PTZ_PAN_STOP);
+		if((pos_x == x() + (w() / 2))
+		&& (pos_y == y() + (h() / 2)))
+		{
+			Fl::remove_timeout(pt_joystick_release_cb);
+			my_window->ViscaCommand(ptz_window->instance, PTZ_PAN_STOP);
+		}
+		else
+		{
+			Fl::add_timeout(0.0, pt_joystick_release_cb, this);
+		}
 		flag = 1;
 	}
 	if(flag == 0)
@@ -35745,8 +37351,8 @@ int		PanTiltJoystick::handle(int event)
 void	PanTiltJoystick::Move()
 {
 	int instance = ptz_window->instance;
-	int use_x = pos_x - (w() / 2);
-	int use_y = pos_y - (h() / 2);
+	int use_x = pos_x - (x() + (w() / 2));
+	int use_y = pos_y - (y() + (h() / 2));
 
 	double dx_speed = 0.0;
 	double dy_speed = 0.0;
@@ -35768,8 +37374,8 @@ void	PanTiltJoystick::Move()
 		if(use_x > 0) dx_speed = 1.0;
 		else dx_speed = -1.0;
 	}
-	int x_speed = (int)abs((dx_speed * (double)use_x) / 4);
-	int y_speed = (int)abs((dy_speed * (double)use_y) / 4);
+	int x_speed = (int)abs((dx_speed * (double)use_x) / 8);
+	int y_speed = (int)abs((dy_speed * (double)use_y) / 8);
 	if((use_x > 0) && (use_y > 0))
 	{
 		my_window->ViscaCommand(instance, PTZ_DOWN_RIGHT, 2, x_speed, y_speed);
@@ -35807,13 +37413,223 @@ void	PanTiltJoystick::Move()
 int	PTZ_Window::AddPanTiltJoystickPanel(int start_x, int yy)
 {
 	pan_tilt_joystick_group = new Fl_Window(start_x + 15, yy, 70, 70);
-	pan_tilt_joystick_group->box(FL_NO_BOX);
+	pan_tilt_joystick_group->box(FL_FLAT_BOX);
+	pan_tilt_joystick_group->color(BLACK);
 
 	pt_joystick = new PanTiltJoystick(my_window, this, 0, 0, 70, 70);
+	pt_joystick->pt_big_zoom_roller = NULL;
+	pt_joystick->pt_big_focus_roller = NULL;
 
 	pan_tilt_joystick_group->end();
 	int start_y = yy + 88;
 	return(start_y);
+}
+
+void	ptz_restore_ptz_cb(Fl_Widget *w, void *v)
+{
+	PTZ_Window *win = (PTZ_Window *)v;
+	win->ptz_contract_group->show();
+	win->ptz_big_joy_group->hide();
+	win->ptz_named_presets->hide();
+	win->preset_group_mode = PTZ_PRESET_GROUP_MODE_BUTTONS;
+	win->preset_name_group->hide();
+	win->preset_button_group->show();
+	win->redraw();
+}
+
+void	ptz_preset_label_cb(Fl_Widget *w, void *v)
+{
+	PTZ_Window *win = (PTZ_Window *)v;
+	if(win->preset_group_mode == PTZ_PRESET_GROUP_MODE_BUTTONS)
+	{
+		win->preset_group_mode = PTZ_PRESET_GROUP_MODE_NAMES;
+		win->preset_name_group->show();
+		win->preset_button_group->hide();
+	}
+	else if(win->preset_group_mode == PTZ_PRESET_GROUP_MODE_NAMES)
+	{
+		win->ptz_contract_group->hide();
+		win->ptz_big_joy_group->hide();
+		win->ptz_named_presets->show();
+		win->preset_group_mode = PTZ_PRESET_GROUP_MODE_EDIT;
+	}
+	else
+	{
+		win->preset_group_mode = PTZ_PRESET_GROUP_MODE_BUTTONS;
+		win->preset_name_group->hide();
+		win->preset_button_group->show();
+	}
+	win->redraw();
+}
+
+void	ptz_edit_preset_name_cb(Fl_Widget *w, void *v)
+{
+	Fl_Input *in = (Fl_Input *)w;
+	PTZ_Window *win = (PTZ_Window *)v;
+	char *str = (char *)in->value();
+	if(win->currently_editing != NULL)
+	{
+		win->currently_editing->copy_label(str);
+		win->currently_editing->show();
+		for(int loop = 0;loop < NUMBER_OF_PRESETS;loop++)
+		{
+			if(win->currently_editing == win->preset_name[loop])
+			{
+				if(win->ptz_preset_name[loop] != NULL)
+				{
+					free(win->ptz_preset_name[loop]);
+					win->ptz_preset_name[loop] = NULL;
+				}
+				win->ptz_preset_name[loop] = strdup(str);
+			}
+		}
+	}
+	char filename[4096];
+	sprintf(filename, "%s_named_presets.json", win->alias);
+	win->SaveNamedPresetsAsJSON(filename);
+	in->hide();
+	win->currently_editing = NULL;
+}
+
+void	edit_preset_name_cb(Fl_Widget *w, void *v)
+{
+int		loop;
+
+	MyButton *b = (MyButton *)w;
+	PTZ_Window *win = (PTZ_Window *)v;
+	if(win->ptz_edit_input->visible())
+	{
+		if(win->currently_editing != NULL)
+		{
+			ptz_edit_preset_name_cb(win->ptz_edit_input, win);
+		}
+	}
+	for(loop = 0;loop < NUMBER_OF_PRESETS;loop++)
+	{
+		if(b == win->preset_name[loop])
+		{
+			win->currently_editing = win->preset_name[loop];
+			win->preset_name[loop]->hide();
+			int xx = win->preset_name[loop]->x();
+			int yy = win->preset_name[loop]->y();
+			win->ptz_edit_input->resize(xx, yy - 1, win->w() - 100, 13);
+			win->ptz_edit_input->value(win->preset_name[loop]->label());
+			win->ptz_edit_input->insert_position(strlen(win->preset_name[loop]->label()), 0);
+			win->ptz_edit_input->take_focus();
+			win->ptz_edit_input->show();
+			Fl::focus(win->ptz_edit_input);
+		}
+	}
+}
+
+void	go_to_named_preset_cb(Fl_Widget *w, void *v)
+{
+int		loop;
+
+	MyButton *b = (MyButton *)w;
+	PTZ_Window *win = (PTZ_Window *)v;
+	for(loop = 0;loop < NUMBER_OF_PRESETS;loop++)
+	{
+		if(b == win->go_to_preset_name[loop])
+		{
+			win->PTZ_RecallPosition(20, loop);
+		}
+	}
+}
+
+void	go_to_current_preset_cb(Fl_Widget *w, void *v)
+{
+	MyButton *b = (MyButton *)w;
+	PTZ_Window *win = (PTZ_Window *)v;
+	win->PTZ_RecallPosition(20, win->current_preset);
+}
+
+void	show_next_preset_name_cb(Fl_Widget *w, void *v)
+{
+	MyButton *b = (MyButton *)w;
+	PTZ_Window *win = (PTZ_Window *)v;
+	win->current_preset++;
+	if(win->current_preset >= NUMBER_OF_PRESETS)
+	{
+		win->current_preset = 0;
+	}
+	win->redraw();
+}
+
+void	show_prev_preset_name_cb(Fl_Widget *w, void *v)
+{
+	MyButton *b = (MyButton *)w;
+	PTZ_Window *win = (PTZ_Window *)v;
+	win->current_preset--;
+	if(win->current_preset < 0)
+	{
+		win->current_preset = NUMBER_OF_PRESETS - 1;
+	}
+	win->redraw();
+}
+
+void	PTZ_Window::AddNamedPresets()
+{
+int		loop;
+char	buf[256];
+
+	char filename[4096];
+	sprintf(filename, "%s_named_presets.json", alias);
+	LoadNamedPresetsAsJSON(filename);
+
+	int yy = 20;
+	ptz_named_presets = new Fl_Group(0, yy, w(), h() - yy);
+	ptz_named_presets->color(BLACK);
+	ptz_named_presets->box(FL_FLAT_BOX);
+
+	yy += 5;
+	MyButton *ptz_restore_label = new MyButton(my_window, 0, yy, w(), 20, "Presets");
+	ptz_restore_label->box(FL_NO_BOX);
+	ptz_restore_label->color(YELLOW);
+	ptz_restore_label->labelcolor(YELLOW);
+	ptz_restore_label->labelsize(11);
+	ptz_restore_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	ptz_restore_label->callback(ptz_restore_ptz_cb, this);
+	ptz_restore_label->show();
+	yy += 22;
+
+	ptz_edit_input = new Fl_Input(0, 0, w() - 100, 13);
+	ptz_edit_input->textsize(9);
+	ptz_edit_input->box(FL_FRAME_BOX);
+	ptz_edit_input->color(BLACK);
+	ptz_edit_input->textcolor(WHITE);
+	ptz_edit_input->cursor_color(WHITE);
+	ptz_edit_input->when(FL_WHEN_RELEASE | FL_WHEN_ENTER_KEY_ALWAYS);
+	ptz_edit_input->callback(ptz_edit_preset_name_cb, this);
+	ptz_edit_input->hide();
+
+	for(loop = 0;loop < NUMBER_OF_PRESETS;loop++)
+	{
+		sprintf(buf, "%d:", loop + 1);
+		go_to_preset_name[loop] = new MyButton(my_window, 0, yy, 70, 11, "Edit");
+		go_to_preset_name[loop]->box(FL_FLAT_BOX);
+		go_to_preset_name[loop]->color(DARK_GRAY);
+		go_to_preset_name[loop]->labelcolor(YELLOW);
+		go_to_preset_name[loop]->labelsize(9);
+		go_to_preset_name[loop]->copy_label(buf);
+		go_to_preset_name[loop]->align(FL_ALIGN_INSIDE | FL_ALIGN_RIGHT);
+		go_to_preset_name[loop]->callback(go_to_named_preset_cb, this);
+
+		char *str = "";
+		if(ptz_preset_name[loop] != NULL)
+		{
+			str = ptz_preset_name[loop];
+		}
+		preset_name[loop] = new MyButton(my_window, 70, yy, w() - 100, 11, str);
+		preset_name[loop]->box(FL_FLAT_BOX);
+		preset_name[loop]->color(BLACK);
+		preset_name[loop]->labelcolor(YELLOW);
+		preset_name[loop]->labelsize(9);
+		preset_name[loop]->callback(edit_preset_name_cb, this);
+		yy += 12;
+	}
+	ptz_named_presets->end();
+	ptz_named_presets->hide();
 }
 
 int	PTZ_Window::AddCamerasAndPresets(int start_x, int start_y)
@@ -35842,14 +37658,19 @@ int	loop;
 		ptz_camera_select_button[loop]->copy_tooltip("Select the VISCA camera controlled by this dialog");
 		ptz_camera_select_button[loop]->callback(ptz_select_camera_cb, this);
 	}
-	yy += 40;
-	Fl_Box *preset_label = new Fl_Box(start_x, yy, 150, 20, "Presets");
-	preset_label->box(FL_NO_BOX);
-	preset_label->color(YELLOW);
-	preset_label->labelcolor(YELLOW);
-	preset_label->labelsize(9);
-	preset_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-	yy += 20;
+	yy += 44;
+	MyButton *ptz_preset_label = new MyButton(my_window, start_x, yy, 150, 20, "Presets");
+	ptz_preset_label->box(FL_NO_BOX);
+	ptz_preset_label->color(YELLOW);
+	ptz_preset_label->labelcolor(YELLOW);
+	ptz_preset_label->labelsize(9);
+	ptz_preset_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	ptz_preset_label->callback(ptz_preset_label_cb, this);
+	yy += 16;
+
+	preset_button_group = new Fl_Group(0, yy, 180, 34);
+	preset_button_group->box(FL_FLAT_BOX);
+	preset_button_group->color(BLACK);
 
 	ptz_preset_page = 0;
 	ptz_camera_preset_page_back_button = new MyButton(my_window, start_x + 5, yy, 10, 18, "@4>");
@@ -35907,6 +37728,42 @@ int	loop;
 	ptz_camera_preset_page_forward_button->labelsize(11);
 	ptz_camera_preset_page_forward_button->copy_tooltip("Page forward through VISCA camera numbers");
 	ptz_camera_preset_page_forward_button->callback(ptz_preset_page_forward_cb, this);
+	preset_button_group->end();
+	preset_button_group->show();
+
+	preset_name_group = new Fl_Group(0, yy, 180, 34, "");
+	preset_name_group->box(FL_FLAT_BOX);
+	preset_name_group->color(BLACK);
+	preset_name_back_button = new MyButton(my_window, start_x + 5, yy, 10, 18, "@4>");
+	preset_name_back_button->box(FL_THIN_UP_BOX);
+	preset_name_back_button->box(FL_NO_BOX);
+	preset_name_back_button->color(DARK_BLUE);
+	preset_name_back_button->labelcolor(YELLOW);
+	preset_name_back_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	preset_name_back_button->labelsize(11);
+	preset_name_back_button->copy_tooltip("Page back through camera numbers");
+	preset_name_back_button->callback(show_prev_preset_name_cb, this);
+
+	preset_name_display = new MyButton(my_window, start_x + 15, yy, 140, 20);
+	preset_name_display->box(FL_FRAME_BOX);
+	preset_name_display->color(BLACK);
+	preset_name_display->labelcolor(WHITE);
+	preset_name_display->labelsize(11);
+	preset_name_display->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	preset_name_display->callback(go_to_current_preset_cb, this);
+
+	preset_name_forward_button = new MyButton(my_window, (start_x + 15 + (7 * 20)), yy, 10, 18, "@6>");
+	preset_name_forward_button->box(FL_THIN_UP_BOX);
+	preset_name_forward_button->box(FL_NO_BOX);
+	preset_name_forward_button->color(DARK_BLUE);
+	preset_name_forward_button->labelcolor(YELLOW);
+	preset_name_forward_button->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	preset_name_forward_button->labelsize(11);
+	preset_name_forward_button->copy_tooltip("Next preset");
+	preset_name_forward_button->callback(show_next_preset_name_cb, this);
+	preset_name_group->end();
+	preset_name_group->hide();
+
 	yy += 32;
 	start_y = yy;
 	return(start_y);
@@ -35996,6 +37853,7 @@ int	inner;
 	ptz_current_interface = NULL;
 	ptz_current_camera = NULL;
 	ptz_interface_index = 0;
+	push_time = 0;
 
 	ptz_interface_button = new SelectButton(my_window, start_x, start_y, 160, 20, "Interfaces");
 	ptz_interface_button->box(FL_FLAT_BOX);
@@ -36081,7 +37939,6 @@ int	inner;
 									if(strcmp(cam->alias, my_window->ptz_lock_alias[loop][nn]) == 0)
 									{
 										cam->ptz_lock_interface = loop;
-										cam->ptz_lock_camera = nn;
 									}
 								}
 							}
@@ -36092,6 +37949,7 @@ int	inner;
 									if(bound_camera == NULL)
 									{
 										bound_camera = cam;
+										strcpy(bound_camera_alias, cam->alias);
 										cam->prefer_ndi = my_window->ptz_prefer_ndi[instance];
 										cam->prefer_v4l = my_window->ptz_prefer_v4l[instance];
 									}
@@ -36160,6 +38018,14 @@ PTZ_Window::~PTZ_Window()
 int	aa, ab, ac;
 int	loop;
 
+	for(loop = 0;loop < NUMBER_OF_PRESETS;loop++)
+	{
+		if(ptz_preset_name[loop] != NULL)
+		{
+			free(ptz_preset_name[loop]);
+			ptz_preset_name[loop] = NULL;
+		}
+	}
 	for(loop = 0;loop < NUMBER_OF_CAMERAS;loop++)
 	{
 		ptz_camera_select_button[loop] = NULL;
@@ -36288,6 +38154,21 @@ int	loop;
 					}
 					if(no_go == 0)
 					{
+						if(ptz_big_joy_group->visible())
+						{
+							child_cnt = ptz_big_joy_group->children();
+							for(loop = 0;loop < child_cnt;loop++)
+							{
+								Fl_Widget *chld = ptz_big_joy_group->child(loop);
+								if(Fl::event_inside(chld))
+								{
+									no_go = 1;
+								}
+							}
+						}
+					}
+					if(no_go == 0)
+					{
 						if(bound_camera != my_window->DisplayedCamera())
 						{
 							if(my_window->alt_displayed_source == -1)
@@ -36297,6 +38178,13 @@ int	loop;
 						}
 					}
 				}
+				else
+				{
+					if(Fl::event_inside(ptz_alias_button))
+					{
+						push_time = precise_time();
+					}
+				}
 			}
 			Fl_Group *p = parent();
 			p->remove(this);
@@ -36304,6 +38192,15 @@ int	loop;
 			p->redraw();
 			redraw();
 		}
+	}
+	else if(event == FL_RELEASE)
+	{
+		time_t diff = precise_time() - push_time;
+		if(diff < 750000)
+		{
+			ptz_contract_button->do_callback();
+		}
+		push_time = 0;
 	}
 	else if(event == FL_ENTER)
 	{
@@ -36316,10 +38213,17 @@ int	loop;
 	}
 	else if(event == FL_MOUSEWHEEL)
 	{
-		if(hovering == 1)
+		if(!pt_big_joystick->visible())
 		{
-			ptz_contract_cb(NULL, this);
-			flag = 1;
+			if(hovering == 1)
+			{
+				ptz_contract_cb(NULL, this);
+				flag = 1;
+			}
+		}
+		else
+		{
+			flag = pt_big_joystick->handle(event);
 		}
 	}
 	else if(event == FL_KEYBOARD)
@@ -36438,7 +38342,6 @@ int	loop;
 	{
 		if(hovering == 1)
 		{
-			int dir = 0;
 			int key = Fl::event_key();
 			if(key == FL_Down)
 			{
@@ -36494,6 +38397,27 @@ int	loop;
 
 void	PTZ_Window::draw()
 {
+int		loop;
+
+	if(ptz_preset_name[current_preset] != NULL)
+	{
+		if(strlen(ptz_preset_name[current_preset]) > 0)
+		{
+			preset_name_display->label(ptz_preset_name[current_preset]);
+		}
+		else
+		{
+			char buf[64];
+			sprintf(buf, "%d", current_preset);
+			preset_name_display->copy_label(buf);
+		}
+	}
+	else
+	{
+		char buf[64];
+		sprintf(buf, "%d", current_preset);
+		preset_name_display->copy_label(buf);
+	}
 	SlidingElement::draw();
 	if(bound_camera != NULL)
 	{
@@ -37002,6 +38926,7 @@ int	PTZ_Window::PTZ_RecallPosition(int speed, int num)
 			{
 				GoToPTZPosition(speed, pos->pan, pos->tilt, pos->zoom, pos->focus);
 				r = 1;
+				current_preset = num;
 			}
 		}
 	}
@@ -37010,6 +38935,7 @@ int	PTZ_Window::PTZ_RecallPosition(int speed, int num)
 		if(ptz_current_interface != NULL)
 		{
 			VISCA_memory_recall(ptz_current_interface, ptz_current_camera, num);
+			current_preset = num;
 			r = 1;
 		}
 	}
@@ -37384,8 +39310,8 @@ char		buf[256];
 				if(fp != NULL)
 				{
 					fprintf(fp, "{\n");
-					fprintf(fp, "\t\"container\": \"%s\",\n", buf);
-					fprintf(fp, "\t\"extension\": \"%s\",\n", buf);
+					fprintf(fp, "\t\"container\": \"%s\",\n", DQ(buf));
+					fprintf(fp, "\t\"extension\": \"%s\",\n", DQ(buf));
 					fprintf(fp, "\t\"video codec\": %d,\n", video_id);
 					fprintf(fp, "\t\"audio codec\": %d\n", audio_id);
 					fprintf(fp, "}\n");
@@ -37495,7 +39421,7 @@ ListMenu::ListMenu(void *in_win, int xx, int yy, int ww, int hh, char *lbl) : Fl
 	box(FL_FRAME_BOX);
 	color(BLACK);
 	border(0);
-		scroll = new SimpleScroll(NULL, 2, 24, ww - 4, h() - 26, lbl);
+		scroll = new SimpleScroll(NULL, NULL, 2, 24, ww - 4, h() - 26, lbl);
 		scroll->align(FL_ALIGN_TOP);
 		scroll->labelcolor(WHITE);
 		scroll->box(FL_FLAT_BOX);
@@ -37671,7 +39597,7 @@ int	loop;
 		csw->audio_codec->Clear();
 		for(loop = 0;loop < mf->audio_codec_cnt;loop++)
 		{
-			if(mf->audio_id[loop] != 0)
+			if((mf->audio_id[loop] != 0) && (mf->audio_bad[loop] != 1))
 			{
 				int video_id = my_find_codec_by_name(0, csw->container_selected, csw->video_codec_selected);
 				int audio_id = my_find_codec_by_name(1, csw->container_selected, mf->audio_codec[loop]);
@@ -37744,7 +39670,7 @@ int	loop;
 			int found = -1;
 			for(loop = 0;loop < mf->video_codec_cnt;loop++)
 			{
-				if(mf->video_id[loop] != 0)
+				if((mf->video_id[loop] != 0) && (mf->video_bad[loop] != 1))
 				{
 					int bad = win->IsCodecAllBad(mf->name, mf->video_id[loop]);
 					if(bad == 0)
@@ -37811,6 +39737,42 @@ void	container_menu_focus_cb(void *v)
 	csw->audio_codec->color(BLACK);
 }
 
+int		test_if_valid(MyFormat *mf, MyWin *win)
+{
+int		loop;
+
+	int good = 0;
+	int v_cnt = 0;
+	int a_cnt = 0;
+	for(loop = 0;loop < mf->video_codec_cnt;loop++)
+	{
+		if((mf->video_id[loop] != 0) && (mf->video_bad[loop] != 1))
+		{
+			int bad = win->IsCodecAllBad(mf->name, mf->video_id[loop]);
+			if(bad == 0)
+			{
+				v_cnt++;
+			}
+		}
+	}
+	for(loop = 0;loop < mf->audio_codec_cnt;loop++)
+	{
+		if((mf->audio_id[loop] != 0) && (mf->audio_bad[loop] != 1))
+		{
+			int bad = win->IsCodecAllBad(mf->name, mf->video_id[loop]);
+			if(bad == 0)
+			{
+				a_cnt++;
+			}
+		}
+	}
+	if((v_cnt > 0) && (a_cnt > 0))
+	{
+		good = 1;
+	}
+	return(good);
+}
+
 void	container_menu_cb(Fl_Widget *w, void *v)
 {
 int		loop;
@@ -37846,24 +39808,27 @@ int		loop;
 			MyFormat *mf = global_my_format[loop];
 			if(mf->invalid == 0)
 			{
-				MyToggleButton *button = new MyToggleButton(win, 4, yy, 176, 20, mf->name);
-				button->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-				button->box(FL_FLAT_BOX);
-				button->color(BLACK);
-				button->down_color(GRAY);
-				button->labelcolor(YELLOW);
-				button->type(FL_RADIO_BUTTON);
-				button->clear_visible_focus();
-				button->value(0);
-				button->callback(codecs_menu_cb, cs);
-				button->redraw();
-				cs->container->Add(button);
-				if(strcmp(mf->name, win->use_container) == 0)
+				if(test_if_valid(mf, win))
 				{
-					found = cs->container->item_cnt - 1;
-					found_button = button;
+					MyToggleButton *button = new MyToggleButton(win, 4, yy, 176, 20, mf->name);
+					button->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+					button->box(FL_FLAT_BOX);
+					button->color(BLACK);
+					button->down_color(GRAY);
+					button->labelcolor(YELLOW);
+					button->type(FL_RADIO_BUTTON);
+					button->clear_visible_focus();
+					button->value(0);
+					button->callback(codecs_menu_cb, cs);
+					button->redraw();
+					cs->container->Add(button);
+					if(strcmp(mf->name, win->use_container) == 0)
+					{
+						found = cs->container->item_cnt - 1;
+						found_button = button;
+					}
+					yy += 20;
 				}
-				yy += 20;
 			}
 		}
 		cs->show();
@@ -38204,7 +40169,7 @@ CommandKeySettingsWindow::CommandKeySettingsWindow(MyWin *in_win, int ww, int hh
 	char *str = NULL;
 	ww = 280;
 
-	SimpleScroll *scroll = new SimpleScroll(my_window, 10, y_pos, 260, 760);
+	SimpleScroll *scroll = new SimpleScroll(my_window, this, 10, y_pos, 260, 760);
 	scroll->color(BLACK);
 
 	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_TOGGLE_RECORD]);
@@ -38399,6 +40364,9 @@ CommandKeySettingsWindow::CommandKeySettingsWindow(MyWin *in_win, int ww, int hh
 	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_OPEN_PTZ]);
 	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "OPEN PTZ", str); cnt++; y_pos += 18;
 
+	str = my_window->CommandKeyName(my_window->command_key[MY_KEY_REPEAT_LAST_BUTTON]);
+	command_key_group[cnt] = new CommandKeyGroup(this, 10, y_pos, ww, 18, "REPEAT LAST BUTTON", str); cnt++; y_pos += 18;
+
 	scroll->end();
 
 	command_key_cnt = cnt;
@@ -38544,6 +40512,7 @@ void	MenuButton::draw()
 	}
 	else
 	{
+		labelcolor(YELLOW);
 		if(entered == 0)
 		{
 			labelfont(FL_HELVETICA);
@@ -38552,7 +40521,6 @@ void	MenuButton::draw()
 		{
 			labelfont(FL_HELVETICA + FL_BOLD);
 		}
-		labelcolor(YELLOW);
 	}
 	MyButton::draw();
 }
@@ -39829,7 +41797,7 @@ int	loop;
 	{
 		rows_nn = row_lock;
 	}
-	scroll = new SimpleScroll(my_window, (w() / 2) - 150, new_yp + 182, 300, 550);
+	scroll = new SimpleScroll(my_window, this, (w() / 2) - 150, new_yp + 182, 300, 550);
 	scroll->box(FL_FRAME_BOX);
 	scroll->color(BLACK);
 	pack = new Fl_Pack((w() / 2) - 150, new_yp + 182, 300, 100);
@@ -40393,6 +42361,27 @@ void	review_muxed_button_cb(Fl_Widget *w, void *v)
 	}
 }
 
+int	MyWin::CheckIfReviewFootage()
+{
+	int rr = 0;
+	if(muxing == 1)
+	{
+		if(use_last_muxed == NULL)
+		{
+			use_last_muxed = last_muxed_list[0];
+		}
+		if(use_last_muxed != NULL)
+		{
+			rr = 1;
+		}
+	}
+	else
+	{
+		rr = 1;
+	}
+	return(rr);
+}
+
 void	review_button_cb(Fl_Widget *w, void *v)
 {
 int		extract_audio(void *update_win, int *prg, char *in_filename, char *out_filename, int hz, int channels);
@@ -40590,11 +42579,211 @@ void	exit_warning_cb(void *v)
 	win->exit_warning = 0;
 }
 
+void	MyWin::CloseAllWindows()
+{
+	if(alert_window != NULL)
+	{
+		alert_window->hide();
+	}
+	if(anim_timeline != NULL)
+	{
+		anim_timeline->hide();
+	}
+	if(audio_filter_plugins_window != NULL)
+	{
+		audio_filter_plugins_window->hide();
+	}
+	if(audio_library_window != NULL)
+	{
+		audio_library_window->hide();
+	}
+	if(audio_settings_window != NULL)
+	{
+		audio_settings_window->hide();
+	}
+	if(camera_settings_window != NULL)
+	{
+		camera_settings_window->hide();
+	}
+	if(codec_selection_window != NULL)
+	{
+		codec_selection_window->hide();
+	}
+	if(color_it_window != NULL)
+	{
+		color_it_window->hide();
+	}
+	if(effect_order_window != NULL)
+	{
+		effect_order_window->hide();
+	}
+	if(command_key_settings != NULL)
+	{
+		command_key_settings->hide();
+	}
+	if(create_python_button_window != NULL)
+	{
+		create_python_button_window->hide();
+	}
+	if(current_fps_window != NULL)
+	{
+		current_fps_window->hide();
+	}
+	if(dynamic_string_window != NULL)
+	{
+		dynamic_string_window->hide();
+	}
+	if(edit_output_window != NULL)
+	{
+		edit_output_window->hide();
+	}
+	if(embed_app_settings != NULL)
+	{
+		embed_app_settings->hide();
+	}
+	if(encode_speed_window != NULL)
+	{
+		encode_speed_window->hide();
+	}
+	if(filter_built_in_window != NULL)
+	{
+		filter_built_in_window->hide();
+	}
+	if(filter_plugins_window != NULL)
+	{
+		filter_plugins_window->hide();
+	}
+	if(fltk_plugin_window != NULL)
+	{
+		fltk_plugin_window->hide();
+	}
+	if(ui_settings_window != NULL)
+	{
+		ui_settings_window->hide();
+	}
+	if(immediate_drawing_window != NULL)
+	{
+		immediate_drawing_window->hide();
+	}
+	if(misc_video_settings_window != NULL)
+	{
+		misc_video_settings_window->hide();
+	}
+	if(monitor_window != NULL)
+	{
+		monitor_window->hide();
+	}
+	if(ndi_source_window != NULL)
+	{
+		ndi_source_window->hide();
+	}
+	if(new_ptz_window != NULL)
+	{
+		new_ptz_window->hide();
+	}
+	if(new_source_window != NULL)
+	{
+		new_source_window->hide();
+	}
+	if(pseudo_camera_window != NULL)
+	{
+		pseudo_camera_window->hide();
+	}
+	if(ptz_lock_window != NULL)
+	{
+		ptz_lock_window->hide();
+	}
+	if(pulse_audio_filter_window != NULL)
+	{
+		pulse_audio_filter_window->hide();
+	}
+	if(python_button_window != NULL)
+	{
+		python_button_window->hide();
+	}
+	if(python_filter_window != NULL)
+	{
+		python_filter_window->hide();
+	}
+	if(review != NULL)
+	{
+		review->hide();
+	}
+	if(review_muxed != NULL)
+	{
+		review_muxed->hide();
+	}
+	if(select_output_window != NULL)
+	{
+		select_output_window->hide();
+	}
+	if(snapshot_settings_window != NULL)
+	{
+		snapshot_settings_window->hide();
+	}
+	if(source_select_window != NULL)
+	{
+		source_select_window->hide();
+	}
+	if(specify_irc_window != NULL)
+	{
+		specify_irc_window->hide();
+	}
+	if(specify_url_window != NULL)
+	{
+		specify_url_window->hide();
+	}
+	if(status_window != NULL)
+	{
+		status_window->hide();
+	}
+	if(text_edit_window != NULL)
+	{
+		text_edit_window->hide();
+	}
+	if(timer_window != NULL)
+	{
+		timer_window->hide();
+	}
+	if(transitions_window != NULL)
+	{
+		transitions_window->hide();
+	}
+	if(trigger_window != NULL)
+	{
+		trigger_window->hide();
+	}
+	if(video_settings_window != NULL)
+	{
+		video_settings_window->hide();
+	}
+	if(video_window != NULL)
+	{
+		video_window->hide();
+	}
+	CloseAllStandalone();
+	if(global_log_window != NULL)
+	{
+		global_log_window->hide();
+	}
+	hide();
+}
+
+void	no_quit_cb(Fl_Widget *w, void *v)
+{
+}
+
 void	quit_cb(Fl_Widget *w, void *v)
 {
 void	exit_timer_cb(void *v);
 
 	MyWin *win = (MyWin *)v;
+	int cnt = 0;
+	while((win->no_exit == 1) && (cnt < 60))
+	{
+		sleep(1);
+		cnt++;
+	}
 	if((w == NULL) || (win->recording == 0) || (win->exit_warning > 0))
 	{
 		time_t now = time(0);
@@ -40603,19 +42792,7 @@ void	exit_timer_cb(void *v);
 		Fl::check();
 
 		win->Done();
-		if(win->review != NULL)
-		{
-			win->review->hide();
-		}
-		if(win->immediate_drawing_window != NULL)
-		{
-			win->immediate_drawing_window->hide();
-		}
-		if(win->anim_timeline != NULL)
-		{
-			win->anim_timeline->hide();
-		}
-		win->hide();
+		win->CloseAllWindows();
 	}
 	else
 	{
@@ -40874,18 +43051,18 @@ void	keyboard_settings_button_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_settings_button_cb(Fl_Widget *w, void *v)
+void	ui_settings_button_cb(Fl_Widget *w, void *v)
 {
 	MyWin *win = (MyWin *)v;
-	if(!win->gui_settings_window->visible())
+	if(!win->ui_settings_window->visible())
 	{
-		win->gui_settings_window->show();
-		win->gui_settings_window->take_focus();
-		win->gui_settings_window->set_non_modal();
+		win->ui_settings_window->show();
+		win->ui_settings_window->take_focus();
+		win->ui_settings_window->set_non_modal();
 	}
 	else
 	{
-		win->gui_settings_window->hide();
+		win->ui_settings_window->hide();
 	}
 }
 
@@ -41101,6 +43278,24 @@ void	dynamic_coloring(MyWin *win)
 	else
 	{
 		win->color_it_window->hide();
+	}
+}
+
+void	order_effects_button_cb(Fl_Widget *w, void *v)
+{
+	MyWin *win = (MyWin *)v;
+	Camera *cam = win->DisplayedCamera();
+	if(cam != NULL)
+	{
+		if(!win->effect_order_window->visible())
+		{
+			win->effect_order_window->set_non_modal();
+			win->effect_order_window->show();
+		}
+		else
+		{
+			win->effect_order_window->hide();
+		}
 	}
 }
 
@@ -41803,6 +43998,7 @@ MyWin::MyWin(
 	, int in_ptz_reverse_h[NUMBER_OF_INTERFACES]
 	, int in_ptz_reverse_v[NUMBER_OF_INTERFACES]
 	, int in_ptz_start_position[NUMBER_OF_INTERFACES]
+	, int in_ptz_initial_camera[NUMBER_OF_INTERFACES]
 	, char *in_ptz_alias[NUMBER_OF_INTERFACES]
 	, int in_ptz_home_on_launch
 	, char *in_yolo_onnx
@@ -41844,6 +44040,7 @@ MyWin::MyWin(
 	, int use_fast_start
 	, int use_threaded_object_recognition
 	, int use_tiled_object_recognition
+	, int use_hide_menu
 	, char *lbl)
 	: Fl_Double_Window(in_w, in_h, lbl)
 {
@@ -41853,7 +44050,9 @@ int	outer;
 char	update_buf[256];
 
 	global_my_window = this;
+	no_exit = 0;
 	fast_start = use_fast_start;
+	hide_menu = use_hide_menu;
 	InitializeVariables();
 
 	resizable(this);
@@ -42026,7 +44225,14 @@ char	update_buf[256];
 	}
 	else
 	{
-		display_width = ww;
+		if(ww > 1280)
+		{
+			display_width = (int)(ww * 0.66666);
+		}
+		else
+		{
+			display_width = ww;
+		}
 	}
 	if(display_hh > -1)
 	{
@@ -42034,7 +44240,14 @@ char	update_buf[256];
 	}
 	else
 	{
-		display_height = hh;
+		if(hh > 720)
+		{
+			display_height = (int)(hh * 0.66666);
+		}
+		else
+		{
+			display_height = hh;
+		}
 	}
 	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
 	{
@@ -42093,7 +44306,7 @@ char	update_buf[256];
 	misc_video_settings_window = NULL;
 	camera_settings_window = NULL;
 	snapshot_settings_window = NULL;
-	gui_settings_window = NULL;
+	ui_settings_window = NULL;
 	transitions_window = NULL;
 	create_python_button_window = NULL;
 	python_buttons = NULL;
@@ -42160,7 +44373,7 @@ char	update_buf[256];
 
 	if((disregard_settings & 2) != 2)
 	{
-		start_win->Update("Loading GUI Settings");
+		start_win->Update("Loading UI Settings");
 		ReadGUISettings();
 	}
 	rubberband_mode = SCROLL_MODE;
@@ -42241,8 +44454,10 @@ char	update_buf[256];
 	{
 		recognize_class_name[loop] = NULL;
 	}
-	strcpy(yolo_onnx_filename, YOLO_ONNX_FILENAME);
-	strcpy(yolo_names_filename, YOLO_NAMES_FILENAME);
+	char current_path[PATH_MAX];
+	where_am_i(current_path);
+	sprintf(yolo_onnx_filename, "%s/%s", current_path, YOLO_ONNX_FILENAME);
+	sprintf(yolo_names_filename, "%s/%s", current_path, YOLO_NAMES_FILENAME);
 	if(in_yolo_onnx != NULL)
 	{
 		strcpy(yolo_onnx_filename, in_yolo_onnx);
@@ -42409,6 +44624,7 @@ char	update_buf[256];
 		ptz_reverse_h[loop] = in_ptz_reverse_h[loop];
 		ptz_reverse_v[loop] = in_ptz_reverse_v[loop];
 		ptz_start_position[loop] = in_ptz_start_position[loop];
+		ptz_initial_camera[loop] = in_ptz_initial_camera[loop];
 	}
 	ptz_zoom = 0;
 	ptz_panning = 0;
@@ -42851,6 +45067,12 @@ int	loop;
 		Fl::delete_widget(color_it_window);
 		color_it_window = NULL;
 	}
+	if(effect_order_window != NULL)
+	{
+		effect_order_window->hide();
+		Fl::delete_widget(effect_order_window);
+		effect_order_window = NULL;
+	}
 	if(transitions_window != NULL)
 	{
 		transitions_window->hide();
@@ -42932,6 +45154,82 @@ int	loop;
 		}
 	}
 	available_audio_cnt = 0;
+}
+
+void	MyWin::RestackPTZWindows()
+{
+int		loop;
+
+	int cnt = 0;
+	for(loop = 0;loop < ptz_device_cnt;loop++)
+	{
+		PTZ_Window *ptz = ptz_window[loop];
+		if(ptz != NULL)
+		{
+			if(ptz->showing == 1)
+			{
+				int nx = (w() - 310) - (cnt * 300);
+				if(button_group_side == SIDE_RIGHT)
+				{
+					nx = 10 + (cnt * 300);
+				}
+				ptz->resize(nx, ptz->y(), ptz->w(), ptz->h());
+				cnt++;
+			}
+		}
+	}
+}
+
+int		MyWin::FontIndexByName(char *name)
+{
+int		loop;
+
+	int found = -1;
+	if(strcmp(name, "Sans") == 0)
+	{
+		found = 0;
+	}
+	else if(strcmp(name, "Sans Bold") == 0)
+	{
+		found = 1;
+	}
+	else
+	{
+		int nn = number_of_fonts;
+		for(loop = 0;((loop < nn) && (found == -1));loop++)
+		{
+			char *str = (char *)Fl::get_font_name(loop);
+			if(str != NULL)
+			{
+				if(strcmp(str, name) == 0)
+				{
+					found = loop;
+				}
+			}
+		}
+	}
+	return(found);
+}
+
+int	MyWin::PassMousewheelToPTZWindow(int event)
+{
+int		loop;
+
+	int flag = 0;
+	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+	{
+		if(ptz_window[loop] != NULL)
+		{
+			if(ptz_window[loop]->contracted == 0)
+			{
+				if(Fl::event_inside(ptz_window[loop]))
+				{
+					flag = ptz_window[loop]->handle(event);
+				}
+			}
+		}
+	}
+	return(flag);
 }
 
 void	MyWin::SnapToGrid(int& ux, int& uy, int& use_w, int& use_h)
@@ -43261,6 +45559,11 @@ void	Camera::Info()
 void	out_function(char *ptr);
 char	buf[32768];
 
+	if(global_log_window != NULL)
+	{
+		global_log_window->SetColumnWidth(250);
+		global_log_window->SetCount(0);
+	}
 	out_function("@bGeneral Info\t\n");
 	sprintf(buf, "Alias:\t%s\n", alias);
 	out_function(buf);
@@ -43647,6 +45950,7 @@ int	outer, inner;
 	misc_copy = NULL;
 	pulse_mixer = NULL;
 	color_it_window = NULL;
+	effect_order_window = NULL;
 	pulse_audio_filter_window = NULL;
 	shape = NULL;
 	dump_type = NULL;
@@ -43699,7 +46003,7 @@ int	outer, inner;
 	snapshot_settings_button = NULL;
 	native_resolution_button = NULL;
 	keyboard_settings_button = NULL;
-	gui_settings_button = NULL;
+	ui_settings_button = NULL;
 	transitions_button = NULL;
 	create_python_button = NULL;
 	python_buttons = NULL;
@@ -43711,6 +46015,7 @@ int	outer, inner;
 	python_output_filter_button = NULL;
 	fltk_plugin_button = NULL;
 	toggle_camera_effects_button = NULL;
+	order_effects_button = NULL;
 	save_camera_button = NULL;
 	load_camera_button = NULL;
 	codecs_button = NULL;
@@ -43735,7 +46040,7 @@ int	outer, inner;
 	audio_settings_window = NULL;
 	camera_settings_window = NULL;
 	snapshot_settings_window = NULL;
-	gui_settings_window = NULL;
+	ui_settings_window = NULL;
 	embed_app_settings = NULL;
 	transitions_window = NULL;
 	create_python_button_window = NULL;
@@ -43770,6 +46075,7 @@ int	outer, inner;
 	hide_guidelines = 0;
 	sweeping_guidelines = 1;
 	exit_warning = 0;
+	last_button = NULL;
 	threading_object_recognition = 0;
 	for(loop = 0;loop < 100000;loop++)
 	{
@@ -43820,8 +46126,8 @@ int	outer, inner;
 	LoadSliderShortcuts("slider_shortcuts.txt");
 	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
 	{
-		initial_ptz_x[loop] = 0;
-		initial_ptz_y[loop] = 0;
+		initial_ptz_x[loop] = -1;
+		initial_ptz_y[loop] = -1;
 		ptz_window[loop] = NULL;
 	}
 	for(loop = 0;loop < 1024;loop++)
@@ -43872,6 +46178,7 @@ int	outer, inner;
 		ptz_reverse_h[outer] = 0;
 		ptz_reverse_v[outer] = 0;
 		ptz_start_position[outer] = -1;
+		ptz_initial_camera[outer] = 0;
 		ptz_interface_type[outer] = 0;
 		for(inner = 0;inner < NUMBER_OF_CAMERAS;inner++)
 		{
@@ -44026,7 +46333,7 @@ int	outer, inner;
 	last_push_x = 0;
 	last_push_y = 0;
 	button_panel_sz = 0;
-	gui_scale_factor = 0.0;
+	ui_scale_factor = 0.0;
 	image_display_scale = 0.0;
 	camera_caps_cnt = 0;
 	retain_commands = 0;
@@ -44519,7 +46826,7 @@ void	MyWin::LoadJSON(char *filename)
 	}
 	else
 	{
-		fprintf(stderr, "Error: Cannor load JSON file: %s\n", filename);
+		fprintf(stderr, "Error: Cannot load JSON file: %s\n", filename);
 	}
 }
 
@@ -44536,7 +46843,7 @@ int	inner;
 		fprintf(fp, "\t\"source\": [");
 		for(loop = 0;loop < source_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", source[loop]);
+			fprintf(fp, "\"%s\"", DQ(source[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -44554,7 +46861,7 @@ int	inner;
 		fprintf(fp, "\t\t\"audio source\": [");
 		for(loop = 0;loop < audio_source_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", audio_source[loop]);
+			fprintf(fp, "\"%s\"", DQ(audio_source[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -44586,7 +46893,7 @@ int	inner;
 	fprintf(fp, "\t\"record on start\": %d,\n", record_on_start);
 	if(record_on_start_alias != NULL)
 	{
-		fprintf(fp, "\t\"record on start alias\": \"%s\",\n", record_on_start_alias);
+		fprintf(fp, "\t\"record on start alias\": \"%s\",\n", DQ(record_on_start_alias));
 	}
 	fprintf(fp, "\t\"hour\": %d,\n", hour);
 	fprintf(fp, "\t\"minute\": %d,\n", minute);
@@ -44594,33 +46901,28 @@ int	inner;
 	fprintf(fp, "\t\"year\": %d,\n", year);
 	fprintf(fp, "\t\"month\": %d,\n", month);
 	fprintf(fp, "\t\"day\": %d,\n", day);
-	fprintf(fp, "\t\"snapshot filename format\": \"%s\",\n", snapshot_filename_format);
+	fprintf(fp, "\t\"snapshot filename format\": \"%s\",\n", DQ(snapshot_filename_format));
 	fprintf(fp, "\t\"animate panels\": %d,\n", animate_panels);
 	fprintf(fp, "\t\"exclude directories\": %d,\n", file_selector_exclude_directories);
 	fprintf(fp, "\t\"use tooltips\": %d,\n", use_tooltips);
 	fprintf(fp, "\t\"snapshot copy to copy buffer\": %d,\n", snapshot_copy_to_copy_buffer);
 	fprintf(fp, "\t\"snapshot entire desktop\": %d,\n", snapshot_entire_desktop);
 	fprintf(fp, "\t\"snapshot main window\": %d,\n", snapshot_main_window);
-	fprintf(fp, "\t\"last used filename\": \"%s\",\n", last_used_filename);
+	fprintf(fp, "\t\"last used filename\": \"%s\",\n", DQ(last_used_filename));
 	fprintf(fp, "\t\"transparent interface\": %d,\n", transparent_interface);
 	fprintf(fp, "\t\"status color r\": %d,\n", status_color_r);
 	fprintf(fp, "\t\"status color g\": %d,\n", status_color_g);
 	fprintf(fp, "\t\"status color b\": %d,\n", status_color_b);
 	fprintf(fp, "\t\"status color a\": %d,\n", status_color_a);
-	fprintf(fp, "\t\"ndi stream name\": \"%s\",\n", ndi_stream_name);
+	fprintf(fp, "\t\"ndi stream name\": \"%s\",\n", DQ(ndi_stream_name));
 	fprintf(fp, "\t\"ndi streaming\": %d,\n", ndi_streaming);
 	fprintf(fp, "\t\"ndi send video format\": %d,\n", ndi_send_video_format);
-	fprintf(fp, "\t\"joystick path\": \"%s\",\n", joystick_path);
+	fprintf(fp, "\t\"joystick path\": \"%s\",\n", DQ(joystick_path));
 	if(python_filter_function != NULL)
 	{
 		if(python_filter_code != NULL)
 		{
-			char *out = escape_double_quotes(python_filter_code);
-			if(out != NULL)
-			{
-				fprintf(fp, "\t\"python filter output code\": \"%s\",\n", out);
-				free(out);
-			}
+			fprintf(fp, "\t\"python filter output code\": \"%s\",\n", DQ(python_filter_code));
 		}
 	}
 	fprintf(fp, "\t\"recognize class cnt\": %d,\n", recognize_class_cnt);
@@ -44630,7 +46932,7 @@ int	inner;
 		fprintf(fp, "\t\"recognize class name\": [");
 		for(loop = 0;loop < recognize_class_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", recognize_class_name[loop]);
+			fprintf(fp, "\"%s\"", DQ(recognize_class_name[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -44641,19 +46943,19 @@ int	inner;
 			}
 		}
 	}
-	fprintf(fp, "\t\"yolo onnx filename\": \"%s\",\n", yolo_onnx_filename);
-	fprintf(fp, "\t\"yolo names filename\": \"%s\",\n", yolo_names_filename);
+	fprintf(fp, "\t\"yolo onnx filename\": \"%s\",\n", DQ(yolo_onnx_filename));
+	fprintf(fp, "\t\"yolo names filename\": \"%s\",\n", DQ(yolo_names_filename));
 	fprintf(fp, "\t\"forced fps\": %d,\n", forced_fps);
 	fprintf(fp, "\t\"forced interval\": %f,\n", forced_interval);
 	fprintf(fp, "\t\"speed factor\": %f,\n", speed_factor);
 	fprintf(fp, "\t\"minimum fps\": %f,\n", minimum_fps);
 	if(jpeg_streaming != NULL)
 	{
-		fprintf(fp, "\t\"jpeg streaming\": \"%s\",\n", jpeg_streaming);
+		fprintf(fp, "\t\"jpeg streaming\": \"%s\",\n", DQ(jpeg_streaming));
 	}
 	fprintf(fp, "\t\"jpeg streaming port\": %d,\n", jpeg_streaming_port);
 	fprintf(fp, "\t\"streaming\": %d,\n", streaming);
-	fprintf(fp, "\t\"stream url\": \"%s\",\n", stream_url);
+	fprintf(fp, "\t\"stream url\": \"%s\",\n", DQ(stream_url));
 	fprintf(fp, "\t\"stream only\": %d,\n", stream_only);
 	fprintf(fp, "\t\"streaming audio quality\": %d,\n", streaming_audio_quality);
 	fprintf(fp, "\t\"image origin x\": %d,\n", image_origin_x);
@@ -44684,7 +46986,7 @@ int	inner;
 		}
 	}
 	fprintf(fp, "\t\"button panel sz\": %d,\n", button_panel_sz);
-	fprintf(fp, "\t\"gui scale factor\": %f,\n", gui_scale_factor);
+	fprintf(fp, "\t\"gui scale factor\": %f,\n", ui_scale_factor);
 	fprintf(fp, "\t\"image display scale\": %f,\n", image_display_scale);
 	fprintf(fp, "\t\"retain commands\": %d,\n", retain_commands);
 	fprintf(fp, "\t\"retain cameras\": %d,\n", retain_cameras);
@@ -44705,7 +47007,7 @@ int	inner;
 		fprintf(fp, "\t\"output name\": [");
 		for(loop = 0;loop < output_path_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", output_name[loop]);
+			fprintf(fp, "\"%s\"", DQ(output_name[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -44718,7 +47020,7 @@ int	inner;
 		fprintf(fp, "\t\"output path\": [");
 		for(loop = 0;loop < output_path_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", output_path[loop]);
+			fprintf(fp, "\"%s\"", DQ(output_path[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -44777,9 +47079,9 @@ int	inner;
 			{
 				PythonButton *pb = (PythonButton *)pack->child(loop);
 				fprintf(fp, "\t\t{\n");
-				fprintf(fp, "\t\t\t\"label\": \"%s\",\n", pb->label());
-				fprintf(fp, "\t\t\t\"path\": \"%s\",\n", pb->path);
-				fprintf(fp, "\t\t\t\"entry function\": \"%s\",\n", pb->entry_function);
+				fprintf(fp, "\t\t\t\"label\": \"%s\",\n", DQ((char *)pb->label()));
+				fprintf(fp, "\t\t\t\"path\": \"%s\",\n", DQ(pb->path));
+				fprintf(fp, "\t\t\t\"entry function\": \"%s\",\n", DQ(pb->entry_function));
 				fprintf(fp, "\t\t\t\"frame cnt\": %d\n", pb->frame_cnt);
 				if(loop < (nn - 1))
 				{
@@ -44840,12 +47142,12 @@ int	inner;
 	}
 	if(dump_type != NULL)
 	{
-		fprintf(fp, "\t\"dump type\": \"%s\",\n", dump_type);
+		fprintf(fp, "\t\"dump type\": \"%s\",\n", DQ(dump_type));
 	}
-	fprintf(fp, "\t\"mux format\": \"%s\",\n", mux_format);
+	fprintf(fp, "\t\"mux format\": \"%s\",\n", DQ(mux_format));
 	fprintf(fp, "\t\"audio thumbnail cnt\": %d,\n", audio_thumbnail_cnt);
 	fprintf(fp, "\t\"visible debug\": %d,\n", visible_debug);
-	fprintf(fp, "\t\"filename\": \"%s\",\n", filename);
+	fprintf(fp, "\t\"filename\": \"%s\",\n", DQ(filename));
 	fprintf(fp, "\t\"interest cnt\": %d,\n", interest_cnt);
 	if(interest_cnt > 0)
 	{
@@ -44879,7 +47181,7 @@ int	inner;
 	}
 	fprintf(fp, "\t\"zoom boxing\": %d,\n", zoom_boxing);
 	fprintf(fp, "\t\"timestamp\": %d,\n", timestamp);
-	fprintf(fp, "\t\"timestamp format\": \"%s\",\n", timestamp_format);
+	fprintf(fp, "\t\"timestamp format\": \"%s\",\n", DQ(timestamp_format));
 	fprintf(fp, "\t\"timestamp rr\": %d,\n", timestamp_rr);
 	fprintf(fp, "\t\"timestamp gg\": %d,\n", timestamp_gg);
 	fprintf(fp, "\t\"timestamp bb\": %d,\n", timestamp_bb);
@@ -44925,7 +47227,7 @@ int	inner;
 		fprintf(fp, "\t\"ptz device path\": [");
 		for(loop = 0;loop < ptz_device_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", ptz_device_path[loop]);
+			fprintf(fp, "\"%s\"", DQ(ptz_device_path[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -44937,7 +47239,7 @@ int	inner;
 		{
 			for(inner = 0;inner < NUMBER_OF_CAMERAS;inner++)
 			{
-				fprintf(fp, "\"%s\"", ptz_lock_alias[loop][inner]);
+				fprintf(fp, "\"%s\"", DQ(ptz_lock_alias[loop][inner]));
 				if(inner < NUMBER_OF_CAMERAS - 1)
 				{
 					fprintf(fp, ",");
@@ -44952,7 +47254,7 @@ int	inner;
 		fprintf(fp, "\t\"ptz alias\": [");
 		for(loop = 0;loop < ptz_device_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", ptz_alias[loop]);
+			fprintf(fp, "\"%s\"", DQ(ptz_alias[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -44962,7 +47264,7 @@ int	inner;
 		fprintf(fp, "\t\"ptz bind alias\": [");
 		for(loop = 0;loop < ptz_device_cnt;loop++)
 		{
-			fprintf(fp, "\"%s\"", ptz_bind_alias[loop]);
+			fprintf(fp, "\"%s\"", DQ(ptz_bind_alias[loop]));
 			if(loop != nn)
 			{
 				fprintf(fp, ",");
@@ -44981,10 +47283,10 @@ int	inner;
 	fprintf(fp, "\t\"transmitting\": %d,\n", transmitting);
 	fprintf(fp, "\t\"move corner\": %d,\n", move_corner);
 	fprintf(fp, "\t\"resize corner\": %d,\n", resize_corner);
-	fprintf(fp, "\t\"use extension\": \"%s\",\n", use_extension);
-	fprintf(fp, "\t\"use container\": \"%s\",\n", use_container);
-	fprintf(fp, "\t\"video codec name\": \"%s\",\n", video_codec_name);
-	fprintf(fp, "\t\"audio codec name\": \"%s\",\n", audio_codec_name);
+	fprintf(fp, "\t\"use extension\": \"%s\",\n", DQ(use_extension));
+	fprintf(fp, "\t\"use container\": \"%s\",\n", DQ(use_container));
+	fprintf(fp, "\t\"video codec name\": \"%s\",\n", DQ(video_codec_name));
+	fprintf(fp, "\t\"audio codec name\": \"%s\",\n", DQ(audio_codec_name));
 	fprintf(fp, "\t\"render mouse\": %d,\n", render_mouse);
 	fprintf(fp, "\t\"tutorial mode\": %d,\n", tutorial_mode);
 	SaveCamerasAsJSON(fp);
@@ -45236,6 +47538,8 @@ int		outer;
 		}
 	}
 	success = json_parse_int(json, "transparent interface", transparent_interface);
+	Transparent(transparent_interface);
+
 	success = json_parse_int(json, "status color r", status_color_r);
 	success = json_parse_int(json, "status color g", status_color_g);
 	success = json_parse_int(json, "status color b", status_color_b);
@@ -45338,7 +47642,7 @@ int		outer;
 		}
 	}
 	success = json_parse_int(json, "button panel sz", button_panel_sz);
-	success = json_parse_double(json, "gui scale factor", gui_scale_factor);
+	success = json_parse_double(json, "gui scale factor", ui_scale_factor);
 	success = json_parse_double(json, "image display scale", image_display_scale);
 	success = json_parse_int(json, "retain commands", retain_commands);
 	success = json_parse_int(json, "retain cameras", retain_cameras);
@@ -46031,6 +48335,18 @@ int		loop;
 			{
 				strcpy(cam->format_code, format_code);
 			}
+			char *note = json_parse_string(name, "note");
+			if(note != NULL)
+			{
+				if(cam->note != NULL)
+				{
+					free(cam->note);
+					cam->note = NULL;
+				}
+				cam->note = strdup(note);
+			}
+			success = json_parse_int(name, "note placement", cam->note_placement);
+			success = json_parse_int(name, "note font size", cam->note_font_size);
 			char *local_python_filter_code = json_parse_string(name, "python filter code");
 			if(local_python_filter_code != NULL)
 			{
@@ -46346,6 +48662,26 @@ int		loop;
 						}
 					}
 				}
+			}
+			cJSON *eo = NULL;
+			cJSON *eos = json_parse_array(name, "effect order");
+			int cnt = 0;
+			int ii = 0;
+			cJSON_ArrayForEach(eo, eos)
+			{
+				if(cnt < 18)
+				{
+					if((cnt % 2) == 0)
+					{
+						cam->effect_order[ii] = eo->valueint;
+					}
+					else
+					{
+						cam->effect_state[ii] = eo->valueint;
+						ii++;
+					}
+				}
+				cnt++;
 			}
 		}
 	}
@@ -47339,7 +49675,7 @@ void	MyWin::SaveTransition()
 		}
 		else if(transition == TRANSITION_PLUGIN)
 		{
-			fprintf(fp, "\t\"transition\": \"%s\"\n", transition_plugin);
+			fprintf(fp, "\t\"transition\": \"%s\"\n", DQ(transition_plugin));
 		}
 		fprintf(fp, "}\n");
 		fclose(fp);
@@ -47414,8 +49750,8 @@ void	MyWin::SaveCodecs()
 	if(fp != NULL)
 	{
 		fprintf(fp, "{\n");
-		fprintf(fp, "\t\"container\": \"%s\",\n", use_container);
-		fprintf(fp, "\t\"extension\": \"%s\",\n", use_extension);
+		fprintf(fp, "\t\"container\": \"%s\",\n", DQ(use_container));
+		fprintf(fp, "\t\"extension\": \"%s\",\n", DQ(use_extension));
 		fprintf(fp, "\t\"video codec\": %d,\n", use_video_codec);
 		fprintf(fp, "\t\"audio codec\": %d\n", use_audio_codec);
 		fprintf(fp, "}\n");
@@ -48194,7 +50530,7 @@ void	MyWin::ShowObjects()
 {
 int		loop;
 int		inner;
-char	*sorted_list[1024];
+char	*sorted_list[MAXIMUM_OBJECTS];
 
 	Camera *cam = DisplayedCamera();
 	if(cam != NULL)
@@ -48209,8 +50545,8 @@ char	*sorted_list[1024];
 		}
 		qsort(sorted_list, recognize_class_cnt, sizeof(char *), cmpstringp);
 
-		int start = 80 * object_menu->object_page;
-		for(loop = 0;loop < 80;loop++)
+		int start = OBJECTS_PER_PAGE * object_menu->object_page;
+		for(loop = 0;loop < OBJECTS_PER_PAGE;loop++)
 		{
 			int nn = start + loop;
 			if(nn < recognize_class_cnt)
@@ -48243,9 +50579,10 @@ char	*sorted_list[1024];
 		object_menu->object_done_button->show();
 		object_menu->object_apply_all_button->show();
 
-		if(recognize_class_cnt > 80)
+		if(recognize_class_cnt > OBJECTS_PER_PAGE)
 		{
-			if((recognize_class_cnt / 80) > object_menu->object_page)
+			int remaining = recognize_class_cnt - (OBJECTS_PER_PAGE * object_menu->object_page);
+			if(remaining > OBJECTS_PER_PAGE)
 			{
 				object_menu->object_next_button->show();
 			}
@@ -48540,6 +50877,7 @@ int	MyWin::SetupCamera(char *source, char *in_alias, int r_ww, int r_hh, int fz,
 				}
 			}
 			UpdateThumbButtons();
+			ShowPTZForNewSource(cam);
 		}
 		else
 		{
@@ -48547,6 +50885,28 @@ int	MyWin::SetupCamera(char *source, char *in_alias, int r_ww, int r_hh, int fz,
 		}
 	}
 	return(rr);
+}
+
+void	MyWin::ShowPTZForNewSource(Camera *cam)
+{
+int		loop;
+
+	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+	{
+		PTZ_Window *ptz = ptz_window[loop];
+		if(ptz != NULL)
+		{
+			if(strlen(ptz->bound_camera_alias) > 0)
+			{
+				if(strcasecmp(ptz->bound_camera_alias, cam->alias) == 0)
+				{
+					ptz->showing = 1;
+					ptz->show();
+				}
+			}
+		}
+	}
+	RestackPTZWindows();
 }
 
 void	review_win_cb(void *v)
@@ -48725,6 +51085,7 @@ void	MyWin::PTZ_DoCommand(int index, int button, int arg_cnt, int arg0, int arg1
 static char	buf1[256];
 static char	buf2[256];
 
+	no_exit = 1;
 	PTZ_Window *win = ptz_window[index];
 	int zoom_factor = 0;
 	use_pan_speed = -1;
@@ -49538,6 +51899,7 @@ static char	buf2[256];
 		}
 	}
 	ptz_window[index]->UpdatePTZButtons();
+	no_exit = 0;
 }
 
 void	ptz_zoom_cb(void *v)
@@ -50624,6 +52986,7 @@ int		loop;
 			if(exit_timer == 0)
 			{
 				InitiateExit();
+				command_key[MY_KEY_EXIT] = FL_Escape;
 			}
 			else
 			{
@@ -50653,6 +53016,16 @@ int		loop;
 		{
 			ReallyTogglePTZ();
 			flag = 1;
+		}
+		else if((key == command_key[MY_KEY_REPEAT_LAST_BUTTON]) && (!ctrl) && (!alt) && (!shift))
+		{
+			if(last_button != NULL)
+			{
+				char buf[256];
+				sprintf(buf, "Message:%s", last_button->label());
+				SetErrorMessage(buf, 1);
+				last_button->do_callback();
+			}
 		}
 	}
 	else
@@ -51379,18 +53752,18 @@ int	local_y[100];
 	int flag = 0;
 	if(interest_cnt < 100)
 	{
-		int off_x = (w() / 2) - (camera[current_source]->width / 2);
-		int off_y = (h() / 2) - (camera[current_source]->height / 2);
+		int off_x = (w() / 2) - (camera[current_source]->display_width / 2);
+		int off_y = (h() / 2) - (camera[current_source]->display_height / 2);
 		int xx = Fl::event_x();
 		int yy = Fl::event_y();
 
 		if((xx > off_x)
 		&& (yy > off_y)
-		&& (xx < off_x + camera[current_source]->width)
-		&& (yy < off_y + camera[current_source]->height))
+		&& (xx < off_x + camera[current_source]->display_width)
+		&& (yy < off_y + camera[current_source]->display_height))
 		{
-			int nx = (10.0 / (double)camera[current_source]->width) * (double)(xx - off_x);
-			int ny = (10.0 / (double)camera[current_source]->height) * (double)(yy - off_y);
+			int nx = (10.0 / (double)camera[current_source]->display_width) * (double)(xx - off_x);
+			int ny = (10.0 / (double)camera[current_source]->display_height) * (double)(yy - off_y);
 			int no_go = -1;
 			for(loop = 0;loop < interest_cnt;loop++)
 			{
@@ -51432,6 +53805,44 @@ int	local_y[100];
 		}
 	}
 	return(flag);
+}
+
+int		push_on_child(Fl_Group *parent, int xx, int yy)
+{
+int		loop;
+
+	int no_go = 0;
+	for(loop = 0;((loop < parent->children()) && (no_go == 0));loop++)
+	{
+		Fl_Widget *chld = parent->child(loop);
+		if(chld != NULL)
+		{
+			if(chld->visible())
+			{
+				int bgx = chld->x();
+				int bgy = chld->y();	
+				int bgw = chld->w();
+				int bgh = chld->h();
+				if((bgw < parent->w()) || (bgh < parent->h()))
+				{
+					if((xx >= bgx) && (xx <= (bgx + bgw))
+					&& (yy >= bgy) && (yy <= (bgy + bgh)))
+					{
+						no_go = 1;
+					}
+				}
+				if(no_go == 0)
+				{
+					Fl_Group *group = chld->as_group();
+					if(group != NULL)
+					{
+						no_go = push_on_child(group, xx, yy);
+					}
+				}
+			}
+		}
+	}
+	return(no_go);
 }
 
 int	MyWin::HandlePushForPTZ(Camera *cam)
@@ -51503,6 +53914,18 @@ int	loop;
 										{
 											my_ptz_index = loop;
 										}
+									}
+								}
+							}
+							if(no_go == 0)
+							{
+								Fl_Widget *push_widget = Fl::belowmouse();
+								if(push_widget != NULL)
+								{
+									no_go = 1;
+									if((push_widget == this) || ((push_widget->w() == w()) && (push_widget->h() == h())))
+									{
+										no_go = 0;
 									}
 								}
 							}
@@ -52137,7 +54560,10 @@ int	loop;
 		{
 			if(ptz_window[loop] != NULL)
 			{
-				ptz_window[loop]->resize(10 + (loop * 300), ptz_window[loop]->y(), ptz_window[loop]->w(), ptz_window[loop]->h());
+				if(ptz_window[loop]->initial_bottom == 0)
+				{
+					ptz_window[loop]->resize(10 + (loop * 300), ptz_window[loop]->y(), ptz_window[loop]->w(), ptz_window[loop]->h());
+				}
 			}
 		}
 	}
@@ -52151,7 +54577,10 @@ int	loop;
 		{
 			if(ptz_window[loop] != NULL)
 			{
-				ptz_window[loop]->resize(((w() - 10) - ptz_window[loop]->w()) - (300 * loop), ptz_window[loop]->y(), ptz_window[loop]->w(), ptz_window[loop]->h());
+				if(ptz_window[loop]->initial_bottom == 0)
+				{
+					ptz_window[loop]->resize(((w() - 10) - ptz_window[loop]->w()) - (300 * loop), ptz_window[loop]->y(), ptz_window[loop]->w(), ptz_window[loop]->h());
+				}
 			}
 		}
 	}
@@ -52281,11 +54710,11 @@ int	loop;
 
 			if((xx > off_x)
 			&& (yy > off_y)
-			&& (xx < off_x + camera[current_source]->width)
-			&& (yy < off_y + camera[current_source]->height))
+			&& (xx < off_x + camera[current_source]->display_width)
+			&& (yy < off_y + camera[current_source]->display_height))
 			{
-				int nx = (10.0 / (double)camera[current_source]->width) * (double)(xx - off_x);
-				int ny = (10.0 / (double)camera[current_source]->height) * (double)(yy - off_y);
+				int nx = (10.0 / (double)camera[current_source]->display_width) * (double)(xx - off_x);
+				int ny = (10.0 / (double)camera[current_source]->display_height) * (double)(yy - off_y);
 				nominal_interest_x = nx;
 				nominal_interest_y = ny;
 			}
@@ -52421,37 +54850,40 @@ int	loop;
 						}
 					}
 				}
-				if((cam->image_sx > 0) && (cam->image_sy > 0))
+				if(rubberband_mode == REPOSITION_MODE)
 				{
-					int diff_x = xx - cam->image_sx;
-					int diff_y = yy - cam->image_sy;
-					if((diff_x < 25) && (diff_y < 25)
-					&& (diff_x >= 0) && (diff_y >= 0))
+					if((cam->image_sx > 0) && (cam->image_sy > 0))
 					{
-						move_corner = 1;
+						int diff_x = xx - cam->image_sx;
+						int diff_y = yy - cam->image_sy;
+						if((diff_x < 25) && (diff_y < 25)
+						&& (diff_x >= 0) && (diff_y >= 0))
+						{
+							move_corner = 1;
+						}
 					}
-				}
-				if((cam->display_width < w()) && (cam->display_height < h()))
-				{
-					int diff_x = (cam->image_sx + cam->display_width) - xx;
-					int diff_y = (cam->image_sy + cam->display_height) - yy;
-					if((diff_x < 25) && (diff_y < 25)
-					&& (diff_x >= 0) && (diff_y >= 0))
+					if((cam->display_width < w()) && (cam->display_height < h()))
 					{
-						resize_corner = 1;
+						int diff_x = (cam->image_sx + cam->display_width) - xx;
+						int diff_y = (cam->image_sy + cam->display_height) - yy;
+						if((diff_x < 25) && (diff_y < 25)
+						&& (diff_x >= 0) && (diff_y >= 0))
+						{
+							resize_corner = 1;
+						}
 					}
-				}
-				if((cam->display_width != cam->width) 
-				|| (cam->display_height != cam->height)
-				|| (cam->image_sx != (w() / 2) - (cam->width / 2))
-				|| (cam->image_sy != (h() / 2) - (cam->height / 2)))
-				{
-					int diff_x = xx - cam->image_sx;
-					int diff_y = (cam->image_sy + cam->display_height) - yy;
-					if((diff_x < 25) && (diff_y < 25)
-					&& (diff_x >= 0) && (diff_y >= 0))
+					if((cam->display_width != cam->width) 
+					|| (cam->display_height != cam->height)
+					|| (cam->image_sx != (w() / 2) - (cam->width / 2))
+					|| (cam->image_sy != (h() / 2) - (cam->height / 2)))
 					{
-						restore_corner = 1;
+						int diff_x = xx - cam->image_sx;
+						int diff_y = (cam->image_sy + cam->display_height) - yy;
+						if((diff_x < 25) && (diff_y < 25)
+						&& (diff_x >= 0) && (diff_y >= 0))
+						{
+							restore_corner = 1;
+						}
 					}
 				}
 			}
@@ -53008,107 +55440,121 @@ int	MyWin::HandleMousewheelPTZ(Camera *cam)
 	int flag = 0;
 	if(cam->ptz_lock_interface != -1)
 	{
-		int instance = -1;
-		if(ptz_window[cam->ptz_lock_interface] != NULL)
+		int xx = Fl::event_x();
+		int yy = Fl::event_y();
+		int cx1 = (w() / 2) - 500;
+		int cx2 = (w() / 2) + 500;
+		int cy1 = (h() - 120);
+		int cy2 = h();
+		if((xx < cx1) || (xx > cx2)
+		|| (yy < cy1) || (yy > cy2))
 		{
-			instance = ptz_window[cam->ptz_lock_interface]->ptz_interface_index;
-		}
-		if(instance != -1)
-		{
-			if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOMING)
+			flag = PassMousewheelToPTZWindow(FL_MOUSEWHEEL);
+			if(flag == 0)
 			{
-				int direction = Fl::event_dy();
-				if(direction > 0)
+				int instance = -1;
+				if(ptz_window[cam->ptz_lock_interface] != NULL)
 				{
-					if(ptz_zooming == 0)
+					instance = ptz_window[cam->ptz_lock_interface]->ptz_interface_index;
+				}
+				if(instance != -1)
+				{
+					if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOMING)
 					{
-						ViscaCommand(instance, PTZ_ZOOM_IN);
-						Fl::add_timeout(0.5, ptz_zoom_cb, this);
+						int direction = Fl::event_dy();
+						if(direction > 0)
+						{
+							if(ptz_zooming == 0)
+							{
+								ViscaCommand(instance, PTZ_ZOOM_IN);
+								Fl::add_timeout(0.5, ptz_zoom_cb, this);
+								flag = 1;
+							}
+						}
+						else if(direction < 0)
+						{
+							if(ptz_zooming == 0)
+							{
+								ViscaCommand(instance, PTZ_ZOOM_OUT);
+								Fl::add_timeout(0.5, ptz_zoom_cb, this);
+								flag = 1;
+							}
+						}
+					}
+					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_FOCUS)
+					{
+						int direction = Fl::event_dy();
+						if(direction > 0)
+						{
+							ViscaCommand(instance, PTZ_FOCUS_FAR);
+							Fl::add_timeout(0.1, ptz_focus_cb, this);
+							flag = 1;
+						}
+						else if(direction < 0)
+						{
+							ViscaCommand(instance, PTZ_FOCUS_NEAR);
+							Fl::add_timeout(0.1, ptz_focus_cb, this);
+							flag = 1;
+						}
+					}
+					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOM_WITH_SPEED_CONTROL)
+					{
+						ptz_zoomer += Fl::event_dy();
+						if(ptz_zoomer > 0)
+						{
+							ptz_window[0]->ptz_zoomer_speed = abs(ptz_zoomer);
+							if(ptz_window[0]->ptz_zoomer_speed > 7)
+							{
+								ptz_window[0]->ptz_zoomer_speed = 7;
+							}
+							ViscaCommand(instance, PTZ_ZOOM_IN);
+						}
+						else if(ptz_zoomer < 0)
+						{
+							ptz_window[0]->ptz_zoomer_speed = abs(ptz_zoomer);
+							if(ptz_window[0]->ptz_zoomer_speed > 7)
+							{
+								ptz_window[0]->ptz_zoomer_speed = 7;
+							}
+							ViscaCommand(instance, PTZ_ZOOM_OUT);
+						}
+						else
+						{
+							ptz_window[0]->ptz_zoomer_speed = 0;
+							ViscaCommand(instance, PTZ_ZOOM_STOP);
+						}
 						flag = 1;
 					}
-				}
-				else if(direction < 0)
-				{
-					if(ptz_zooming == 0)
+					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_TRANSPARENCY)
 					{
-						ViscaCommand(instance, PTZ_ZOOM_OUT);
-						Fl::add_timeout(0.5, ptz_zoom_cb, this);
-						flag = 1;
+						unsigned char black_red = 0;
+						unsigned char black_green = 0;
+						unsigned char black_blue = 0;
+						unsigned char black_alpha = 0;
+						Fl::get_color(BLACK, black_red, black_green, black_blue, black_alpha);
+						unsigned char dark_gray_red = 0;
+						unsigned char dark_gray_green = 0;
+						unsigned char dark_gray_blue = 0;
+						unsigned char dark_gray_alpha = 0;
+						Fl::get_color(DARK_GRAY, dark_gray_red, dark_gray_green, dark_gray_blue, dark_gray_alpha);
+						int ii = black_alpha;
+						int sy = Fl::event_dy();
+						if(sy > 0)
+						{
+							ii++;
+							if(ii > 255) ii = 255;
+						}
+						else
+						{
+							ii--;
+							if(ii < 0) ii = 0;
+						}
+						black_alpha = ii;
+						Fl::set_color(BLACK, black_red, black_green, black_blue, black_alpha);
+						Fl::set_color(DARK_GRAY, dark_gray_red, dark_gray_green, dark_gray_blue, black_alpha);
+						redraw();
 					}
 				}
-			}
-			else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_FOCUS)
-			{
-				int direction = Fl::event_dy();
-				if(direction > 0)
-				{
-					ViscaCommand(instance, PTZ_FOCUS_FAR);
-					Fl::add_timeout(0.1, ptz_focus_cb, this);
-					flag = 1;
-				}
-				else if(direction < 0)
-				{
-					ViscaCommand(instance, PTZ_FOCUS_NEAR);
-					Fl::add_timeout(0.1, ptz_focus_cb, this);
-					flag = 1;
-				}
-			}
-			else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOM_WITH_SPEED_CONTROL)
-			{
-				ptz_zoomer += Fl::event_dy();
-				if(ptz_zoomer > 0)
-				{
-					ptz_window[0]->ptz_zoomer_speed = abs(ptz_zoomer);
-					if(ptz_window[0]->ptz_zoomer_speed > 20)
-					{
-						ptz_window[0]->ptz_zoomer_speed = 20;
-					}
-					ViscaCommand(instance, PTZ_ZOOM_IN);
-				}
-				else if(ptz_zoomer < 0)
-				{
-					ptz_window[0]->ptz_zoomer_speed = abs(ptz_zoomer);
-					if(ptz_window[0]->ptz_zoomer_speed > 20)
-					{
-						ptz_window[0]->ptz_zoomer_speed = 20;
-					}
-					ViscaCommand(instance, PTZ_ZOOM_OUT);
-				}
-				else
-				{
-					ptz_window[0]->ptz_zoomer_speed = 0;
-					ViscaCommand(instance, PTZ_ZOOM_STOP);
-				}
-				flag = 1;
-			}
-			else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_TRANSPARENCY)
-			{
-				unsigned char black_red = 0;
-				unsigned char black_green = 0;
-				unsigned char black_blue = 0;
-				unsigned char black_alpha = 0;
-				Fl::get_color(BLACK, black_red, black_green, black_blue, black_alpha);
-				unsigned char dark_gray_red = 0;
-				unsigned char dark_gray_green = 0;
-				unsigned char dark_gray_blue = 0;
-				unsigned char dark_gray_alpha = 0;
-				Fl::get_color(DARK_GRAY, dark_gray_red, dark_gray_green, dark_gray_blue, dark_gray_alpha);
-				int ii = black_alpha;
-				int sy = Fl::event_dy();
-				if(sy > 0)
-				{
-					ii++;
-					if(ii > 255) ii = 255;
-				}
-				else
-				{
-					ii--;
-					if(ii < 0) ii = 0;
-				}
-				black_alpha = ii;
-				Fl::set_color(BLACK, black_red, black_green, black_blue, black_alpha);
-				Fl::set_color(DARK_GRAY, dark_gray_red, dark_gray_green, dark_gray_blue, black_alpha);
-				redraw();
 			}
 		}
 	}
@@ -53822,6 +56268,41 @@ int		loop;
 					int use_y = yy - cam->image_sy;
 					win->AddMiscCopy(cam, MISC_COPY_MAGNIFY, local, 1, NULL, use_x, use_y, ww, hh);
 				}
+				else if(strcmp(str, "Blur") == 0)
+				{
+					Mat local;
+					int use_x = xx - cam->image_sx;
+					int use_y = yy - cam->image_sy;
+					win->AddMiscCopy(cam, MISC_COPY_BLUR, local, 1, NULL, use_x, use_y, ww, hh);
+				}
+				else if(strcmp(str, "Pixelate") == 0)
+				{
+					Mat local;
+					int use_x = xx - cam->image_sx;
+					int use_y = yy - cam->image_sy;
+					win->AddMiscCopy(cam, MISC_COPY_PIXELATE, local, 1, NULL, use_x, use_y, ww, hh);
+				}
+				else if(strcmp(str, "Sharpen") == 0)
+				{
+					Mat local;
+					int use_x = xx - cam->image_sx;
+					int use_y = yy - cam->image_sy;
+					win->AddMiscCopy(cam, MISC_COPY_SHARPEN, local, 1, NULL, use_x, use_y, ww, hh);
+				}
+				else if(strcmp(str, "Hole") == 0)
+				{
+					Mat local;
+					int use_x = xx - cam->image_sx;
+					int use_y = yy - cam->image_sy;
+					win->AddMiscCopy(cam, MISC_COPY_HOLE, local, 1, NULL, use_x, use_y, ww, hh);
+				}
+				else if(strcmp(str, "Blend") == 0)
+				{
+					Mat local;
+					int use_x = xx - cam->image_sx;
+					int use_y = yy - cam->image_sy;
+					win->AddMiscCopy(cam, MISC_COPY_BLEND, local, 1, NULL, use_x, use_y, ww, hh);
+				}
 				else if(strcmp(str, "Border") == 0)
 				{
 					Mat local;
@@ -53884,6 +56365,13 @@ int		loop;
 					win->rubberband_y = cam->image_sy;
 					win->rubberband_w = cam->width;
 					win->rubberband_h = cam->height;
+				}
+				else if(strcmp(str, "Deselect All") == 0)
+				{
+					win->rubberband_x = -1;
+					win->rubberband_y = -1;
+					win->rubberband_w = -1;
+					win->rubberband_h = -1;
 				}
 				else if(strcmp(str, "Edit Text") == 0)
 				{
@@ -53977,7 +56465,6 @@ int	loop;
 							popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 60);
 							popup->browser->callback(rubberband_popup_cb, this);
 							popup->browser->clear();
-							if(guideline_mode == VERTICAL_GUIDELINE)
 							popup->browser->add("Dynamic Copy");
 							popup->browser->add("Static Copy");
 							popup->browser->add("Copy to Clipboard");
@@ -53990,13 +56477,19 @@ int	loop;
 								popup->browser->add("Source Camera");
 							}
 							popup->browser->add("Select All");
+							popup->browser->add("Deselect All");
 							popup->browser->add("Cut Out");
 							popup->browser->add("Fill");
 							popup->browser->add("Crop");
 							popup->browser->add("Text");
 							popup->browser->add("Rectangle");
-							popup->browser->add("Magnify");
 							popup->browser->add("Border");
+							popup->browser->add("Magnify");
+							popup->browser->add("Blur");
+							popup->browser->add("Sharpen");
+							popup->browser->add("Pixelate");
+							popup->browser->add("Hole");
+							popup->browser->add("Blend");
 							popup->browser->add("Reverse");
 							popup->browser->add("Video Settings");
 							popup->browser->add("Flip Horizontally");
@@ -54080,6 +56573,13 @@ int	loop;
 							}
 							popup->browser->add("Load Image");
 							popup->browser->add("Select All");
+							if((rubberband_x > -1)
+							|| (rubberband_y > -1)
+							|| (rubberband_w > -1)
+							|| (rubberband_h > -1))
+							{
+								popup->browser->add("Deselect All");
+							}
 							if(cam->type == CAMERA_TYPE_SPLIT)
 							{
 								popup->browser->add("Blank");
@@ -54436,70 +56936,110 @@ int	loop;
 	return(flag);
 }
 
+void	MyWin::Opaque(int flag)
+{
+int		loop;
+
+	transparent_interface &= ~flag;
+	if((transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
+	{
+		if(ptz_mode != 0)
+		{
+			for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+			{
+				if(ptz_window[loop] != NULL)
+				{
+					ptz_window[loop]->box(FL_FLAT_BOX);
+					ptz_window[loop]->redraw();
+				}
+			}
+		}
+		for(loop = 0;loop < 128;loop++)
+		{
+			if(thumbnail[loop] != NULL)
+			{
+				thumbnail[loop]->box(FL_FLAT_BOX);
+				thumbnail[loop]->redraw();
+			}
+		}
+		for(loop = 0;loop < audio_thumbnail_cnt;loop++)
+		{
+			if(audio_thumbnail[loop] != NULL)
+			{
+				audio_thumbnail[loop]->alias_button->box(FL_FLAT_BOX);
+				audio_thumbnail[loop]->select_button->box(FL_FLAT_BOX);
+				audio_thumbnail[loop]->redraw();
+			}
+		}
+		if(button_group != NULL)
+		{
+			button_group->box(FL_FLAT_BOX);
+		}
+	}
+	if((transparent_interface & TRANSPARENT_DIALOGS) != TRANSPARENT_DIALOGS)
+	{
+		for(loop = 0;loop < registered_shaped_dialog_cnt;loop++)
+		{
+			if(registered_shaped_dialog[loop] != NULL)
+			{
+				registered_shaped_dialog[loop]->no_shape = 1;
+				registered_shaped_dialog[loop]->rebuild_shape();
+				registered_shaped_dialog[loop]->redraw();
+			}
+		}
+	}
+}
+
 void	MyWin::Transparent(int flag)
 {
 int	loop;
 
-	transparent_interface = flag;
-	if(ptz_mode != 0)
+	transparent_interface |= flag;
+	if((transparent_interface & TRANSPARENT_PANELS) == TRANSPARENT_PANELS)
 	{
-		for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+		if(ptz_mode != 0)
 		{
-			if(ptz_window[loop] != NULL)
+			for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
 			{
-				if(flag == 1)
+				if(ptz_window[loop] != NULL)
 				{
 					ptz_window[loop]->box(FL_NO_BOX);
+					ptz_window[loop]->redraw();
 				}
-				else
-				{
-					ptz_window[loop]->box(FL_FLAT_BOX);
-				}
-				ptz_window[loop]->redraw();
 			}
 		}
-	}
-	for(loop = 0;loop < 128;loop++)
-	{
-		if(thumbnail[loop] != NULL)
+		for(loop = 0;loop < 128;loop++)
 		{
-			if(flag == 1)
+			if(thumbnail[loop] != NULL)
 			{
 				thumbnail[loop]->box(FL_NO_BOX);
+				thumbnail[loop]->redraw();
 			}
-			else
-			{
-				thumbnail[loop]->box(FL_FLAT_BOX);
-			}
-			thumbnail[loop]->redraw();
 		}
-	}
-	for(loop = 0;loop < audio_thumbnail_cnt;loop++)
-	{
-		if(audio_thumbnail[loop] != NULL)
+		for(loop = 0;loop < audio_thumbnail_cnt;loop++)
 		{
-			if(flag == 1)
+			if(audio_thumbnail[loop] != NULL)
 			{
 				audio_thumbnail[loop]->alias_button->box(FL_NO_BOX);
 				audio_thumbnail[loop]->select_button->box(FL_NO_BOX);
+				audio_thumbnail[loop]->redraw();
 			}
-			else
-			{
-				audio_thumbnail[loop]->alias_button->box(FL_FLAT_BOX);
-				audio_thumbnail[loop]->select_button->box(FL_FLAT_BOX);
-			}
-			audio_thumbnail[loop]->redraw();
 		}
-	}
-	if(button_group != NULL)
-	{
-		if(flag == 1)
+		if(button_group != NULL)
 		{
 			button_group->box(FL_NO_BOX);
 		}
-		else
+	}
+	if((transparent_interface & TRANSPARENT_DIALOGS) == TRANSPARENT_DIALOGS)
+	{
+		for(loop = 0;loop < registered_shaped_dialog_cnt;loop++)
 		{
-			button_group->box(FL_FLAT_BOX);
+			if(registered_shaped_dialog[loop] != NULL)
+			{
+				registered_shaped_dialog[loop]->no_shape = 0;
+				registered_shaped_dialog[loop]->rebuild_shape();
+				registered_shaped_dialog[loop]->redraw();
+			}
 		}
 	}
 }
@@ -54542,9 +57082,9 @@ void	codec_test_count_frames(void *v)
 	MyWin *win = (MyWin *)v;
 	if(win->tested_mux != NULL)
 	{
-		if((win->tested_mux->video_frames < 3) && (win->codec_test_timeout < 10))
+		if((win->tested_mux->video_frames < 30) && (win->codec_test_timeout < 100))
 		{
-			Fl::repeat_timeout(0.1, codec_test_count_frames, win);
+			Fl::repeat_timeout(0.01, codec_test_count_frames, win);
 		}
 		else
 		{
@@ -54602,48 +57142,29 @@ char	buf[256];
 			ext = cp + 1;
 		}
 		double time_it = 0.0;
-		int no_go = 0;
-		no_go = win->IsTestedCodecCombo(video_id, audio_id);
-		if(no_go == 0)
+		win->TestMuxPerform(container, filename, ext, video_id, audio_id);
+		if(global_log_window != NULL)
 		{
-			win->TestMuxPerform(container, filename, ext, video_id, audio_id);
-			if(win->mux_test_sudden_stop == 0)
+			global_log_window->progress++;
+		}
+		if(win->mux_test_sudden_stop == 0)
+		{
+			win->codec_test_timeout = 0;
+			if(win->tested_mux != NULL)
 			{
-				win->codec_test_timeout = 0;
-				if(win->tested_mux != NULL)
+				win->tested_mux->video_frames = 0;
+				Camera *cam = win->DisplayedCamera();
+				if(cam != NULL)
 				{
-					win->tested_mux->video_frames = 0;
-					Camera *cam = win->DisplayedCamera();
-					if(cam != NULL)
-					{
-						cam->record_error = 0;
-					}
+					cam->record_error = 0;
 				}
-				Fl::repeat_timeout(0.1, codec_test_count_frames, win);
 			}
-			else
-			{
-				reset_button_cb(NULL, win);
-				record_button_cb(NULL, win);
-			}
+			Fl::repeat_timeout(0.1, codec_test_count_frames, win);
 		}
-		else if(no_go == 1)
+		else
 		{
-			char video_result[4096];
-			char audio_result[4096];
-			my_find_codec_by_id(0, video_id, video_result);
-			my_find_codec_by_id(1, audio_id, audio_result);
-			win->bad_codec_combo[win->bad_codec_combo_cnt] = new CodecCombo(container, video_id, audio_id, -1.0);
-			win->bad_codec_combo_cnt++;
-			Fl::repeat_timeout(0.01, test_codec_line_cb, win);
-		}
-		else if(no_go == 2)
-		{
-			char video_result[4096];
-			char audio_result[4096];
-			my_find_codec_by_id(0, video_id, video_result);
-			my_find_codec_by_id(1, audio_id, audio_result);
-			Fl::repeat_timeout(0.01, test_codec_line_cb, win);
+			reset_button_cb(NULL, win);
+			record_button_cb(NULL, win);
 		}
 	}
 	else
@@ -54670,6 +57191,41 @@ char	buf[256];
 
 void	MyWin::RunCodecTest()
 {
+char	buf[256];
+
+	int cnt = 0;
+	testing_codec_fp = fopen("test_codecs.txt", "r");
+	if(testing_codec_fp != NULL)
+	{
+		while(fgets(buf, 256, testing_codec_fp))
+		{
+			cnt++;
+		}
+		fclose(testing_codec_fp);
+	}
+	if(global_log_window != NULL)
+	{
+		global_log_window->SetCount(cnt);
+	}
+	int in_seconds = (cnt * 3);
+	int in_minutes = in_seconds / 60;
+	int in_hours = in_minutes / 60;
+	int minutes = in_minutes - (in_hours * 60);
+	int seconds = in_seconds - ((in_hours * 3600) + (minutes * 60));
+
+	sprintf(buf, "Testing %d combinations will take approximately %02d:%02d:%02d.\nContinue?", cnt, in_hours, minutes, seconds);
+	TestCodecChoice *tcc = new TestCodecChoice(this, buf);
+	tcc->show();
+}
+
+void	MyWin::ReallyRunCodecTest()
+{
+char	buf[256];
+
+	if(global_log_window != NULL)
+	{
+		global_log_window->SetStartTime();
+	}
 	mux_test_sudden_stop = 0;
 	testing_codec_fp = fopen("test_codecs.txt", "r");
 	if(testing_codec_fp != NULL)
@@ -54684,20 +57240,25 @@ void	MyWin::resize(int xx, int yy, int ww, int hh)
 {
 int	loop;
 
+	int old_w = w();
+	int old_h = h();
 	Fl_Double_Window::resize(xx, yy, ww, hh);
-	button_group->resize(button_group->x(), button_group->y(), button_group->w(), h());
-	for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+	if((old_w != ww) || (old_h != hh))
 	{
-		PTZ_Window *pw = ptz_window[loop];
-		if(pw != NULL)
+		button_group->resize(button_group->x(), button_group->y(), button_group->w(), h());
+		for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
 		{
-			if(pw->contracted == 1)
+			PTZ_Window *pw = ptz_window[loop];
+			if(pw != NULL)
 			{
-				pw->resize(pw->x(), h() - 30, pw->w(), pw->h());
-			}
-			else
-			{
-				pw->resize(pw->x(), h() - 330, pw->w(), pw->h());
+				if(pw->contracted == 1)
+				{
+					pw->resize(pw->x(), (h() - 24), pw->w(), pw->h());
+				}
+				else
+				{
+					pw->resize(pw->x(), (h() - 330), pw->w(), pw->h());
+				}
 			}
 		}
 	}
@@ -54705,7 +57266,8 @@ int	loop;
 
 int	MyWin::OnHide()
 {
-int	loop;
+int		loop;
+int		inner;
 
 	int show_status = 0;
 	for(loop = 0;loop < source_cnt;loop++)
@@ -54717,6 +57279,13 @@ int	loop;
 			{
 				show_status = 1;
 			}
+			for(inner = 0;inner < 128;inner++)
+			{
+				if(cam->standalone_display[inner] != NULL)
+				{
+					cam->standalone_display[inner]->show();
+				}
+			}
 		}
 	}
 	if(show_status == 1)
@@ -54724,6 +57293,27 @@ int	loop;
 		status_window->show();
 	}
 	return(0);
+}
+
+void	MyWin::CloseAllStandalone()
+{
+int		loop;
+int		inner;
+
+	for(loop = 0;loop < source_cnt;loop++)
+	{
+		if(camera[loop] != NULL)
+		{
+			Camera *cam = camera[loop];
+			for(inner = 0;inner < 128;inner++)
+			{
+				if(cam->standalone_display[inner] != NULL)
+				{
+					cam->standalone_display[inner]->hide();
+				}
+			}
+		}
+	}
 }
 
 int	MyWin::OnPaste(Camera *cam)
@@ -55045,8 +57635,8 @@ int	MyWin::OnPush(int event, Camera *cam)
 						}
 						else if(restore_corner == 1)
 						{
-							cam->display_width = cam->width;
-							cam->display_height = cam->height;
+							cam->display_width = cam->old_display_width;
+							cam->display_height = cam->old_display_height;
 							cam->image_sx = (w() / 2) - (cam->display_width / 2);
 							cam->image_sy = (h() / 2) - (cam->display_height / 2);
 							initial_video_out_x = -1000000;
@@ -55558,7 +58148,7 @@ int	MyWin::OnMousewheel(int event, Camera *cam)
 							flag = HandleMousewheelPTZ(cam);
 						}
 					}
-					else if(crop_scaling == 1)
+					if((crop_scaling == 1) && (flag == 0))
 					{
 						int direction = Fl::event_dy();
 						if(direction > 0)
@@ -55579,11 +58169,11 @@ int	MyWin::OnMousewheel(int event, Camera *cam)
 						}
 						flag = 1;
 					}
-					else if(resize_capture == 1)
+					if((resize_capture == 1) && (flag == 0))
 					{
 						flag = HandleMousewheelResizeCapture(cam);
 					}
-					else
+					if(flag == 0)
 					{
 						flag = HandleMousewheel(cam);
 					}
@@ -55646,6 +58236,12 @@ int		loop;
 					break;
 					case(FL_KEYBOARD):
 					{
+						int key = Fl::event_key();
+						if(key == 'b')
+						{
+							effect_order_window->show();
+							flag = 1;
+						}
 						flag = OnKeyboard(event, cam);
 					}
 					break;
@@ -56231,6 +58827,7 @@ char	buf[4096];
 
 int	MyWin::FindMovement(Camera *in_cam, int threshold_sz, int *cx, int *cy, int *second_cx, int *second_cy, int region_x1, int region_y1, int region_x2, int region_y2)
 {
+Mat scaled_mat;
 Mat cow_gray;
 Mat show_mat;
 int loop;
@@ -56245,6 +58842,7 @@ int cnt_array[10][10];
 	}
 	if(cam != NULL)
 	{
+		cv::resize(cam->mat, scaled_mat, cv::Size(cam->display_width, cam->display_height));
 		if(region_x1 == -1) region_x1 = 0;
 		if(region_y1 == -1) region_y1 = 0;
 		if(region_x2 == -1) region_x2 = w();
@@ -56258,7 +58856,7 @@ int cnt_array[10][10];
 		}
 		int image_sx = (w() / 2) - (cam->mat.cols / 2);
 		int image_sy = (h() / 2) - (cam->mat.rows / 2);
-		cvtColor(cam->mat, cow_gray, COLOR_RGBA2GRAY);
+		cvtColor(scaled_mat, cow_gray, COLOR_RGBA2GRAY);
 		blur(cow_gray, cow_gray, Size(7, 7));
 		if((cam->once == 1) && (cam->old_mat.cols == cow_gray.cols) && (cam->old_mat.rows == cow_gray.rows))
 		{
@@ -56425,18 +59023,18 @@ void	MyWin::MarkInterestGrid()
 {
 int	loop;
 
-	int ww = camera[current_source]->width / 10;
-	int hh = camera[current_source]->height / 10;
+	int ww = camera[current_source]->display_width / 10;
+	int hh = camera[current_source]->display_height / 10;
 	int orig_x = image_origin_x;
 	int orig_y = image_origin_y;
 	fl_color(GRAY);
-	for(loop = 0;loop < camera[current_source]->width;loop += ww)
+	for(loop = 0;loop < camera[current_source]->display_width;loop += ww)
 	{
-		fl_line(loop + orig_x, orig_y, loop + orig_x, orig_y + camera[current_source]->height);
+		fl_line(loop + orig_x, orig_y, loop + orig_x, orig_y + camera[current_source]->display_height);
 	}
-	for(loop = 0;loop < camera[current_source]->height;loop += hh)
+	for(loop = 0;loop < camera[current_source]->display_height;loop += hh)
 	{
-		fl_line(orig_x, loop + orig_y, orig_x + camera[current_source]->width, loop + orig_y);
+		fl_line(orig_x, loop + orig_y, orig_x + camera[current_source]->display_width, loop + orig_y);
 	}
 }
 
@@ -56665,7 +59263,7 @@ int			loop;
 			title_box->box(FL_FRAME_BOX);
 			title_box->labelsize(13);
 			title_box->labelcolor(YELLOW);
-			SimpleScroll *scroll = new SimpleScroll(this, 2, 30, 596, hh - 34);
+			SimpleScroll *scroll = new SimpleScroll(this, NULL, 2, 30, 596, hh - 34);
 			scroll->box(FL_FLAT_BOX);
 			scroll->color(BLACK);
 			scroll->scrollbar.hide();
@@ -56729,19 +59327,19 @@ int	loop;
 		int off_y = image_origin_y;
 		if((nominal_interest_x > -1) && (nominal_interest_y > -1))
 		{
-			int xx = nominal_interest_x * (cam->width / 10);
-			int yy = nominal_interest_y * (cam->height / 10);
+			int xx = nominal_interest_x * (cam->display_width / 10);
+			int yy = nominal_interest_y * (cam->display_height / 10);
 			fl_color(YELLOW);
-			fl_rectf(off_x + xx, off_y + yy, cam->width / 10, cam->height / 10);
+			fl_rectf(off_x + xx, off_y + yy, cam->display_width / 10, cam->display_height / 10);
 		}
 		for(loop = 0;loop < interest_cnt;loop++)
 		{
 			int nx = interest_x[loop];
 			int ny = interest_y[loop];
-			int xx = nx * (cam->width / 10);
-			int yy = ny * (cam->height / 10);
+			int xx = nx * (cam->display_width / 10);
+			int yy = ny * (cam->display_height / 10);
 			fl_color(WHITE);
-			fl_rectf(off_x + xx, off_y + yy, cam->width / 10, cam->height / 10);
+			fl_rectf(off_x + xx, off_y + yy, cam->display_width / 10, cam->display_height / 10);
 		}
 	}
 }
@@ -57034,6 +59632,7 @@ int	loop;
 		fl_color(YELLOW);
 		fl_rect(0, extent_y + 15, 260, 10);
 	}
+	video_thumbnail_group->AdjustHeight(displayed_cnt);
 }
 
 void	MyWin::TriggerCamera(Camera *cam)
@@ -57089,8 +59688,8 @@ void	MyWin::DrawPIP()
 				if(!local_mat.empty())
 				{
 					Mat new_mat;
-					int nw = local_mat.cols / 2;
-					int nh = local_mat.rows / 2;
+					int nw = camera[cam->pip_idx]->display_width / 2;
+					int nh = camera[cam->pip_idx]->display_height / 2;
 					cv::resize(local_mat, new_mat, cv::Size(nw, nh));
 					fl_draw_image((unsigned char *)new_mat.ptr(), w() - (nw + 50), h() - (nh + 50), new_mat.cols, new_mat.rows, new_mat.channels());
 					if(cam->keep_pip == 0)
@@ -57466,6 +60065,8 @@ void	MyWin::DisplayOutput(Camera *cam, Mat in_mat, Camera *alt_cam)
 							cam->image_sy = initial_video_out_y;
 						}
 						fl_draw_image((unsigned char *)dst.ptr(), cam->image_sx, cam->image_sy, cam->motion_mat.cols, cam->motion_mat.rows, cam->motion_mat.channels());
+						display_width = cam->motion_mat.cols;
+						display_height = cam->motion_mat.rows;
 						if((cam->image_sy + cam->motion_mat.rows) < Fl::h())
 						{
 							int xx = cam->image_sx;
@@ -57487,6 +60088,7 @@ void	MyWin::DisplayOutput(Camera *cam, Mat in_mat, Camera *alt_cam)
 							fl_draw(buf, xx + 10, yy, ww, 18, FL_ALIGN_LEFT);
 						}
 						cvtColor(dst, cam->alt_record_mat, COLOR_GRAY2RGBA);
+						cam->displayed_mat = dst;
 					}
 					image_origin_x = cam->image_sx;
 					image_origin_y = cam->image_sy;
@@ -57517,6 +60119,9 @@ void	MyWin::DisplayOutput(Camera *cam, Mat in_mat, Camera *alt_cam)
 						image_origin_y = use_y;
 						cam->image_sx = use_x;
 						cam->image_sy = use_y;
+						display_width = really_local_mat.cols;
+						display_height = really_local_mat.rows;
+						cam->displayed_mat = really_local_mat;
 					}
 				}
 				else
@@ -57536,6 +60141,9 @@ void	MyWin::DisplayOutput(Camera *cam, Mat in_mat, Camera *alt_cam)
 						fl_draw_image((unsigned char *)in_mat.ptr(), cam->image_sx, cam->image_sy, cam->mat.cols, cam->mat.rows, cam->mat.channels());
 						image_origin_x = cam->image_sx;
 						image_origin_y = cam->image_sy;
+						display_width = cam->mat.cols;
+						display_height = cam->mat.rows;
+						cam->displayed_mat = in_mat;
 					}
 				}
 			}
@@ -57564,6 +60172,7 @@ void	MyWin::DisplayOutput(Camera *cam, Mat in_mat, Camera *alt_cam)
 					fl_draw_image((unsigned char *)really_local_mat.ptr(), use_x, use_y, really_local_mat.cols, really_local_mat.rows, really_local_mat.channels());
 					image_origin_x = use_x;
 					image_origin_y = use_y;
+					cam->displayed_mat = really_local_mat;
 				}
 			}
 		}
@@ -57635,26 +60244,37 @@ void	MyWin::ErrorMessage()
 {
 	if(error_message != NULL)
 	{
+		char *use = error_message;
+		if(strncmp(error_message, "Message:", strlen("Message:")) == 0)
+		{
+			use = error_message + strlen("Message:");
+		}
 		fl_font(FL_HELVETICA, 32);
 		int ex = 0;
 		int ey = 0;
-		fl_measure(error_message, ex, ey);
+		fl_measure(use, ex, ey);
 		ex += 16;
 		ey += 4;
-		int xx = (Fl::w() / 2) - (ex / 2);
-		int yy = (Fl::h() / 2) - (ey / 2);
-		if(strncmp(error_message, "Warning:", strlen("Warning:")) != 0)
+		int xx = (w() / 2) - (ex / 2);
+		int yy = (h() / 2) - (ey / 2);
+		int y_offset = 0;
+		if(strncmp(error_message, "Warning:", strlen("Warning:")) == 0)
 		{
-			fl_color(RED);
+			fl_color(BLACK);
+			fl_rectf(xx, yy + y_offset, ex, ey);
+		}
+		else if(strncmp(error_message, "Message:", strlen("Message:")) == 0)
+		{
+			y_offset = (h() / 4);
 		}
 		else
 		{
-			fl_color(BLACK);
+			fl_color(RED);
+			fl_rectf(xx, yy + y_offset, ex, ey);
 		}
-		fl_rectf(xx, yy, ex, ey);
 		fl_color(WHITE);
-		fl_rect(xx, yy, ex, ey);
-		fl_draw(error_message, xx, yy, ex, ey, FL_ALIGN_CENTER);
+		fl_rect(xx, yy + y_offset, ex, ey);
+		fl_draw(use, xx, yy + y_offset, ex, ey, FL_ALIGN_CENTER);
 		if((time(0) - error_start_time) > error_timeout)
 		{
 			free(error_message);
@@ -57710,7 +60330,6 @@ char		buf[256];
 int			inner;
 int			outer;
 
-double top = since();
 	fl_color(BLACK);
 	fl_rectf(0, 0, w(), h());
 	fl_color(YELLOW);
@@ -57809,6 +60428,13 @@ double top = since();
 								cam->Record();
 							}
 						}
+						if(global_log_window != NULL)
+						{
+							if(global_log_window->visible())
+							{
+								global_log_window->redraw();
+							}
+						}
 						if(monitor_window != NULL)
 						{
 							if(monitor_window->visible())
@@ -57862,16 +60488,25 @@ double top = since();
 								{
 									fl_color(YELLOW);
 									fl_rectf(cam->image_sx + 2, cam->image_sy + 2, 25, 25);
+									fl_color(BLACK);
+									fl_font(FL_HELVETICA, 7);
+									fl_draw("Move", cam->image_sx + 2, cam->image_sy + 2, 25, 25, FL_ALIGN_CENTER);
 								}
 								if(resize_corner == 1)
 								{
 									fl_color(BLUE);
 									fl_rectf(cam->image_sx + cam->display_width - 27, cam->image_sy + cam->display_height - 27, 25, 25);
+									fl_color(WHITE);
+									fl_font(FL_HELVETICA, 7);
+									fl_draw("Size", cam->image_sx + cam->display_width - 27, cam->image_sy + cam->display_height - 27, 25, 25, FL_ALIGN_CENTER);
 								}
 								if(restore_corner == 1)
 								{
-									fl_color(FL_GREEN);
+									fl_color(fl_rgb_color(0, 64, 0));
 									fl_rectf(cam->image_sx + 2, cam->image_sy + cam->display_height - 27, 25, 25);
+									fl_color(WHITE);
+									fl_font(FL_HELVETICA, 7);
+									fl_draw("Reset", cam->image_sx + 2, cam->image_sy + cam->display_height - 27, 25, 25, FL_ALIGN_CENTER);
 								}
 								if((buttonized_visible == 1) || (someone_is_dragging == 1))
 								{
@@ -57992,16 +60627,20 @@ double top = since();
 						}
 					}
 				}
+				if(outer == displayed_source)
+				{
+					cam->DisplayNote();
+				}
 				if(split == 0)
 				{
 					cam->DrawFilterDialogs();
 					cam->HighlightShapes();
 					DrawCrosshairs(cam);
-					if(transition_cnt < 1.0)
+					if((transition_cnt < 1.0) && (transition_cnt > 0.0))
 					{
 						fl_color(BLUE);
 						fl_line_style(FL_SOLID, 4);
-						fl_line(cam->image_sx, cam->image_sy + cam->display_height, cam->image_sx + (display_width * transition_cnt), cam->image_sy + cam->display_height);
+						fl_line(cam->image_sx + 3, cam->image_sy + cam->display_height, cam->image_sx + ((display_width - 6) * transition_cnt), cam->image_sy + (cam->display_height - 3));
 						fl_line_style(FL_SOLID, 1);
 					}
 				}
@@ -58132,7 +60771,7 @@ double top = since();
 				if(mouse_moving > 0)
 				{
 					fl_color(YELLOW);
-					if(!button_group->visible())
+					if((!button_group->visible()) && (hide_menu == 0))
 					{
 						if(button_group_side == SIDE_RIGHT)
 						{
@@ -58288,7 +60927,7 @@ double top = since();
 			fl_draw(buf, cam->image_sx + 20, cam->image_sy + 20, 200, 20, FL_ALIGN_LEFT);
 		}
 	}
-	if(exit_timer > 0)
+	if((exit_timer > 0) && (hide_menu == 0))
 	{
 		if(actively_exiting == 0)
 		{
@@ -58894,6 +61533,7 @@ int	loop;
 	{
 		int mw = 0;
 		int mh = 0;
+		fl_font(FL_HELVETICA, 9);
 		fl_measure("(scroll to change)", mw, mh);
 		mw = ((w() / 2) - (mw / 2));
 
@@ -60293,7 +62933,7 @@ void	MyWin::HideButtons()
 		filter_built_in_button->hide();
 		hide_video_button->hide();
 		keyboard_settings_button->hide();
-		gui_settings_button->hide();
+		ui_settings_button->hide();
 		filter_built_in_button->hide();
 		if(filter_plugins_button != NULL)
 		{
@@ -60349,6 +62989,7 @@ void	MyWin::HideButtons()
 		pause_playing_audio_button->hide();
 		monitor_video_button->hide();
 		toggle_camera_effects_button->hide();
+		order_effects_button->hide();
 		if(audio_filter_plugins_button != NULL)
 		{
 			audio_filter_plugins_button->hide();
@@ -60364,535 +63005,551 @@ void	MyWin::ShowButtons()
 {
 void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 
-	if(record_button != NULL)
+	if(hide_menu == 0)
 	{
-		Camera *cam = NULL;
-		cam = DisplayedCamera();
-		if(cam != NULL)
+		if(record_button != NULL)
 		{
-			load_setup_button->show();
-			video_settings_button->show();
-			if(global_my_format_cnt > 0)
-			{
-				codecs_button->show();
-			}
-			if((power_all == 1) && (cam->power == 1))
-			{
-				camera_settings_button->show();
-				if(cam->triggers_requested == 1)
-				{
-					record_button->copy_label("Stop");
-					record_all_button->copy_label("All Stop");
-					if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
-					{
-						record_all_button->show();
-					}
-					else
-					{
-						record_all_button->hide();
-					}
-					encode_speed_window->show();
-					reset_camera_button->hide();
-					reset_cameras_button->hide();
-					review_muxed_button->hide();
-					review_button->hide();
-					load_setup_button->hide();
-					video_settings_button->hide();
-					if(global_my_format_cnt > 0)
-					{
-						codecs_button->hide();
-					}
-					if(audio == 1)
-					{
-						audio_mute_button->show();
-						monitor_audio_button->show();
-						audio_library_button->show();
-						audio_library_list_button->show();
-						play_audio_file_button->show();
-						audio_filter_plugins_button->show();
-						if(active_audio_playback == 1)
-						{
-							stop_playing_audio_button->show();
-							pause_playing_audio_button->show();
-						}
-						audio_settings_button->show();
-						audio_bind_to_camera_button->show();
-						audio_save_button->show();
-						audio_load_button->show();
-					}
-				}
-				else
-				{
-					record_button->copy_label("Record");
-					record_all_button->copy_label("All Record");
-					if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
-					{
-						record_all_button->show();
-					}
-					else
-					{
-						record_all_button->hide();
-					}
-					encode_speed_window->hide();
-					reset_camera_button->show();
-					reset_cameras_button->show();
-					review_muxed_button->show();
-					if(review == NULL)
-					{
-						review_button->show();
-					}
-					else
-					{
-						review_button->hide();
-					}
-					load_setup_button->show();
-					video_settings_button->show();
-					if(global_my_format_cnt > 0)
-					{
-						codecs_button->show();
-					}
-					audio_mute_button->hide();
-					audio_settings_button->hide();
-					audio_bind_to_camera_button->hide();
-					audio_save_button->hide();
-					audio_load_button->hide();
-					monitor_audio_button->hide();
-					audio_library_button->hide();
-					audio_library_list_button->hide();
-					play_audio_file_button->hide();
-					audio_filter_plugins_button->hide();
-					stop_playing_audio_button->hide();
-					pause_playing_audio_button->hide();
-				}
-			}
-			if(audio_filter_plugins_button != NULL)
-			{
-				if(audio == 1)
-				{
-					audio_filter_plugins_button->show();
-				}
-			}
-			if(use_old == 0)
-			{
-				if((power_all == 1) && (cam->power == 1))
-				{
-					record_button->show();
-					if(cam->record_trigger != 0)
-					{
-						override_button->show();
-					}
-				}
-				if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
-				{
-					record_all_button->show();
-				}
-				else
-				{
-					record_all_button->hide();
-				}
-			}
-			save_setup_button->show();
-			if(encoding == 0)
-			{
-				if(muxing == 0)
-				{
-					if(recorded_frames > 0)
-					{
-						encode_button->show();
-					}
-				}
-			}
-			if(recorded_frames > 0)
-			{
-				dump_button->show();
-			}
-			else
-			{
-				dump_button->hide();
-			}
-			show_debug_button->show();
-			test_recognition_button->show();
-			if(cam->zoom_box_display == 1)
-			{
-				zoom_box_button->copy_label("Cease Box Zoom");
-			}
-			else
-			{
-				zoom_box_button->copy_label("Box Zoom");
-			}
-			if(rubberband_mode == SCROLL_MODE)
-			{
-				zoom_box_button->show();
-			}
-			else
-			{
-				zoom_box_button->hide();
-			}
-			if(source_cnt > 1)
-			{
-				split_button->show();
-				open_standalone_button->show();
-			}
-			new_source_button->show();
+			Camera *cam = NULL;
+			cam = DisplayedCamera();
 			if(cam != NULL)
 			{
-				edit_source_button->show();
-			}
-			else
-			{
-				edit_source_button->hide();
-			}
-			if(recording == 0)
-			{
-				edit_output_button->show();
-				select_output_button->show();
-			}
-			else
-			{
-				edit_output_button->hide();
-				select_output_button->hide();
-			}
-			if((power_all == 1) && (cam->power == 1))
-			{
-				flip_horizontal_button->show();
-				flip_vertical_button->show();
-				rotate_clockwise_button->show();
-				if(cam->clockwise_rotation != 0)
+				load_setup_button->show();
+				video_settings_button->show();
+				if(global_my_format_cnt > 0)
 				{
-					clear_rotate_button->show();
+					codecs_button->show();
+				}
+				if((power_all == 1) && (cam->power == 1))
+				{
+					camera_settings_button->show();
+					if(cam->triggers_requested == 1)
+					{
+						record_button->copy_label("Stop");
+						record_all_button->copy_label("All Stop");
+						if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+						{
+							record_all_button->show();
+						}
+						else
+						{
+							record_all_button->hide();
+						}
+						encode_speed_window->show();
+						reset_camera_button->hide();
+						reset_cameras_button->hide();
+						review_muxed_button->hide();
+						review_button->hide();
+						load_setup_button->hide();
+						video_settings_button->hide();
+						if(global_my_format_cnt > 0)
+						{
+							codecs_button->hide();
+						}
+						if(audio == 1)
+						{
+							audio_mute_button->show();
+							monitor_audio_button->show();
+							audio_library_button->show();
+							audio_library_list_button->show();
+							play_audio_file_button->show();
+							audio_filter_plugins_button->show();
+							if(active_audio_playback == 1)
+							{
+								stop_playing_audio_button->show();
+								pause_playing_audio_button->show();
+							}
+							audio_settings_button->show();
+							audio_bind_to_camera_button->show();
+							audio_save_button->show();
+							audio_load_button->show();
+						}
+					}
+					else
+					{
+						record_button->copy_label("Record");
+						record_all_button->copy_label("All Record");
+						if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+						{
+							record_all_button->show();
+						}
+						else
+						{
+							record_all_button->hide();
+						}
+						encode_speed_window->hide();
+						reset_camera_button->show();
+						reset_cameras_button->show();
+						if(last_muxed_list[0] != NULL)
+						{
+							review_muxed_button->show();
+						}
+						if(review == NULL)
+						{
+							if(CheckIfReviewFootage())
+							{
+								review_button->show();
+							}
+						}
+						else
+						{
+							review_button->hide();
+						}
+						load_setup_button->show();
+						video_settings_button->show();
+						if(global_my_format_cnt > 0)
+						{
+							codecs_button->show();
+						}
+						audio_mute_button->hide();
+						audio_settings_button->hide();
+						audio_bind_to_camera_button->hide();
+						audio_save_button->hide();
+						audio_load_button->hide();
+						monitor_audio_button->hide();
+						audio_library_button->hide();
+						audio_library_list_button->hide();
+						play_audio_file_button->hide();
+						audio_filter_plugins_button->hide();
+						stop_playing_audio_button->hide();
+						pause_playing_audio_button->hide();
+					}
+				}
+				if(audio_filter_plugins_button != NULL)
+				{
+					if(audio == 1)
+					{
+						audio_filter_plugins_button->show();
+					}
+				}
+				if(use_old == 0)
+				{
+					if((power_all == 1) && (cam->power == 1))
+					{
+						record_button->show();
+						if(cam->record_trigger != 0)
+						{
+							override_button->show();
+						}
+					}
+					if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+					{
+						record_all_button->show();
+					}
+					else
+					{
+						record_all_button->hide();
+					}
+				}
+				save_setup_button->show();
+				if(encoding == 0)
+				{
+					if(muxing == 0)
+					{
+						if(recorded_frames > 0)
+						{
+							encode_button->show();
+						}
+					}
+				}
+				if(recorded_frames > 0)
+				{
+					dump_button->show();
 				}
 				else
 				{
-					clear_rotate_button->hide();
+					dump_button->hide();
 				}
-				snapshot_settings_button->show();
-				transitions_button->show();
-				create_python_button->show();
-				if(python_button_cnt > 0)
+				show_debug_button->show();
+				test_recognition_button->show();
+				if(cam->zoom_box_display == 1)
 				{
-					python_buttons->show();
+					zoom_box_button->copy_label("Cease Box Zoom");
 				}
 				else
 				{
-					python_buttons->hide();
+					zoom_box_button->copy_label("Box Zoom");
 				}
-				if((cam->width != cam->display_width) || (cam->height != cam->display_height))
+				if(rubberband_mode == SCROLL_MODE)
 				{
-					native_resolution_button->show();
-				}
-			}
-			filter_built_in_button->show();
-			python_filter_button->show();
-			python_output_filter_button->show();
-			if(cam->python_filter_function != NULL)
-			{
-				python_filter_button->copy_label("Stop Python Filter");
-				python_filter_button->callback(cancel_python_filter_cb, this);
-			}
-			else
-			{
-				python_filter_button->copy_label("Python Filter");
-				python_filter_button->callback(camera_python_filter_button_cb, this);
-			}
-			if(python_filter_function != NULL)
-			{
-				python_output_filter_button->copy_label("Stop Python Filter");
-				python_output_filter_button->callback(cancel_python_filter_cb, this);
-			}
-			else
-			{
-				python_output_filter_button->copy_label("Python Filter Output");
-				python_output_filter_button->callback(output_python_filter_button_cb, this);
-			}
-			if(global_potential_filter_cnt > 0)
-			{
-				filter_plugins_button->show();
-			}
-			if(external_pgm_button != NULL)
-			{
-				external_pgm_button->show();
-			}
-			if(fltk_plugin_button != NULL)
-			{
-				if(global_potential_fltk_cnt > 0)
-				{
-					fltk_plugin_button->show();
-				}
-			}
-			if(ptz_mode == 1)
-			{
-				ptz_lock_window_button->show();
-				if(fast_start == 0)
-				{
-					new_ptz_window_button->show();
-				}
-			}
-			keyboard_settings_button->show();
-			gui_settings_button->show();
-			save_camera_button->show();
-			load_camera_button->show();
-			timestamp_button->show();
-			if((power_all == 1) && (cam->power == 1))
-			{
-				snapshot_button->show();
-			}
-			if(jpeg_streaming != NULL)
-			{
-				jpeg_streaming_button->show();
-			}
-			reset_button->show();
-			resize_capture_button->show();
-			show_motion_debug_button->show();
-			quit_button->show();
-			if(cam->power == 1)
-			{
-				power_button->copy_label("Turn Off");
-			}
-			else
-			{
-				power_button->copy_label("Turn On");
-			}
-			power_button->show();
-			if(power_all == 1)
-			{
-				power_all_button->copy_label("Turn All Off");
-			}
-			else
-			{
-				power_all_button->copy_label("Turn All On");
-			}
-			power_all_button->show();
-			if(cycle_cameras > 0.0)
-			{
-				cycle_cameras_button->copy_label("Stop Cycling Cameras");
-			}
-			else
-			{
-				cycle_cameras_button->copy_label("Cycle Cameras");
-			}
-			if(source_cnt > 1)
-			{
-				cycle_cameras_button->show();
-			}
-			else
-			{
-				cycle_cameras_button->hide();
-			}
-			if((power_all == 1) && (cam->power == 1))
-			{
-				if(cam->mute_video == 1)
-				{
-					mute_video_button->copy_label("Unmute Video");
+					zoom_box_button->show();
 				}
 				else
 				{
-					mute_video_button->copy_label("Mute Video");
+					zoom_box_button->hide();
 				}
-				mute_video_button->show();
-				if(cam->freeze_video == 1)
+				if(source_cnt > 1)
 				{
-					freeze_button->copy_label("Defrost");
+					split_button->show();
+					open_standalone_button->show();
+				}
+				new_source_button->show();
+				if(cam != NULL)
+				{
+					edit_source_button->show();
 				}
 				else
 				{
-					freeze_button->copy_label("Freeze");
+					edit_source_button->hide();
 				}
-				freeze_button->show();
-			}
-			save_setup_button->show();
-			if((power_all == 1) && (cam->power == 1))
-			{
-				trigger_button->show();
-			}
-			if(audio == 1)
-			{
-				audio_mute_button->show();
-				audio_settings_button->show();
-				audio_bind_to_camera_button->show();
-				audio_save_button->show();
-				audio_load_button->show();
-				monitor_audio_button->show();
-				audio_library_button->show();
-				audio_library_list_button->show();
-				play_audio_file_button->show();
-				audio_filter_plugins_button->show();
-				if(active_audio_playback == 1)
+				if(recording == 0)
 				{
-					stop_playing_audio_button->show();
-					pause_playing_audio_button->show();
+					edit_output_button->show();
+					select_output_button->show();
 				}
-			}
-			if(init_detect == 1)
-			{
-				if(!net.empty()) 
+				else
 				{
-					toggle_objects_button->show();
+					edit_output_button->hide();
+					select_output_button->hide();
 				}
-			}
-			if(audio_filter_plugins_button != NULL)
-			{
+				if((power_all == 1) && (cam->power == 1))
+				{
+					flip_horizontal_button->show();
+					flip_vertical_button->show();
+					rotate_clockwise_button->show();
+					if(cam->clockwise_rotation != 0)
+					{
+						clear_rotate_button->show();
+					}
+					else
+					{
+						clear_rotate_button->hide();
+					}
+					snapshot_settings_button->show();
+					transitions_button->show();
+					create_python_button->show();
+					if(python_button_cnt > 0)
+					{
+						python_buttons->show();
+					}
+					else
+					{
+						python_buttons->hide();
+					}
+					if((cam->width != cam->display_width) || (cam->height != cam->display_height))
+					{
+						native_resolution_button->show();
+					}
+				}
+				filter_built_in_button->show();
+				python_filter_button->show();
+				python_output_filter_button->show();
+				if(cam->python_filter_function != NULL)
+				{
+					python_filter_button->copy_label("Stop Python Filter");
+					python_filter_button->callback(cancel_python_filter_cb, this);
+				}
+				else
+				{
+					python_filter_button->copy_label("Python Filter");
+					python_filter_button->callback(camera_python_filter_button_cb, this);
+				}
+				if(python_filter_function != NULL)
+				{
+					python_output_filter_button->copy_label("Stop Python Filter");
+					python_output_filter_button->callback(cancel_python_filter_cb, this);
+				}
+				else
+				{
+					python_output_filter_button->copy_label("Python Filter Output");
+					python_output_filter_button->callback(output_python_filter_button_cb, this);
+				}
+				if(global_potential_filter_cnt > 0)
+				{
+					filter_plugins_button->show();
+				}
+				if(external_pgm_button != NULL)
+				{
+					external_pgm_button->show();
+				}
+				if(fltk_plugin_button != NULL)
+				{
+					if(global_potential_fltk_cnt > 0)
+					{
+						fltk_plugin_button->show();
+					}
+				}
+				if(ptz_mode == 1)
+				{
+					ptz_lock_window_button->show();
+					if(fast_start == 0)
+					{
+						new_ptz_window_button->show();
+					}
+				}
+				keyboard_settings_button->show();
+				ui_settings_button->show();
+				save_camera_button->show();
+				load_camera_button->show();
+				timestamp_button->show();
+				if((power_all == 1) && (cam->power == 1))
+				{
+					snapshot_button->show();
+				}
+				if(jpeg_streaming != NULL)
+				{
+					jpeg_streaming_button->show();
+				}
+				reset_button->show();
+				resize_capture_button->show();
+				show_motion_debug_button->show();
+				quit_button->show();
+				if(cam->power == 1)
+				{
+					power_button->copy_label("Turn Off");
+				}
+				else
+				{
+					power_button->copy_label("Turn On");
+				}
+				power_button->show();
+				if(power_all == 1)
+				{
+					power_all_button->copy_label("Turn All Off");
+				}
+				else
+				{
+					power_all_button->copy_label("Turn All On");
+				}
+				power_all_button->show();
+				if(cycle_cameras > 0.0)
+				{
+					cycle_cameras_button->copy_label("Stop Cycling Cameras");
+				}
+				else
+				{
+					cycle_cameras_button->copy_label("Cycle Cameras");
+				}
+				if(source_cnt > 1)
+				{
+					cycle_cameras_button->show();
+				}
+				else
+				{
+					cycle_cameras_button->hide();
+				}
+				if((power_all == 1) && (cam->power == 1))
+				{
+					if(cam->mute_video == 1)
+					{
+						mute_video_button->copy_label("Unmute Video");
+					}
+					else
+					{
+						mute_video_button->copy_label("Mute Video");
+					}
+					mute_video_button->show();
+					if(cam->freeze_video == 1)
+					{
+						freeze_button->copy_label("Defrost");
+					}
+					else
+					{
+						freeze_button->copy_label("Freeze");
+					}
+					freeze_button->show();
+				}
+				save_setup_button->show();
+				if((power_all == 1) && (cam->power == 1))
+				{
+					trigger_button->show();
+				}
 				if(audio == 1)
 				{
+					audio_mute_button->show();
+					audio_settings_button->show();
+					audio_bind_to_camera_button->show();
+					audio_save_button->show();
+					audio_load_button->show();
+					monitor_audio_button->show();
+					audio_library_button->show();
+					audio_library_list_button->show();
+					play_audio_file_button->show();
 					audio_filter_plugins_button->show();
+					if(active_audio_playback == 1)
+					{
+						stop_playing_audio_button->show();
+						pause_playing_audio_button->show();
+					}
 				}
+				if(init_detect == 1)
+				{
+					if(!net.empty()) 
+					{
+						toggle_objects_button->show();
+					}
+				}
+				if(audio_filter_plugins_button != NULL)
+				{
+					if(audio == 1)
+					{
+						audio_filter_plugins_button->show();
+					}
+				}
+				filter_built_in_button->show();
+				python_filter_button->show();
+				python_output_filter_button->show();
+				monitor_video_button->show();
+				toggle_camera_effects_button->show();
+				order_effects_button->show();
 			}
-			filter_built_in_button->show();
-			python_filter_button->show();
-			python_output_filter_button->show();
-			monitor_video_button->show();
-			toggle_camera_effects_button->show();
+			else
+			{
+				if(record_button != NULL)
+					record_button->hide();
+				if(record_all_button != NULL)
+					record_all_button->hide();
+				if(audio_mute_button != NULL)
+					audio_mute_button->hide();
+				if(audio_settings_button != NULL)
+					audio_settings_button->hide();
+				if(audio_bind_to_camera_button != NULL)
+					audio_bind_to_camera_button->hide();
+				if(audio_save_button != NULL)
+					audio_save_button->hide();
+				if(audio_load_button != NULL)
+					audio_load_button->hide();
+				if(monitor_video_button != NULL)
+					monitor_video_button->hide();
+				if(monitor_audio_button != NULL)
+					monitor_audio_button->hide();
+				if(audio_library_button != NULL)
+					audio_library_button->hide();
+				if(audio_library_list_button != NULL)
+					audio_library_list_button->hide();
+				if(play_audio_file_button != NULL)
+					play_audio_file_button->hide();
+				if(stop_playing_audio_button != NULL)
+					stop_playing_audio_button->hide();
+				if(pause_playing_audio_button != NULL)
+					pause_playing_audio_button->hide();
+				if(audio_filter_plugins_button != NULL)
+					audio_filter_plugins_button->hide();
+				if(override_button != NULL)
+					override_button->hide();
+				if(encode_button != NULL)
+					encode_button->hide();
+				if(show_debug_button != NULL)
+					show_debug_button->hide();
+				if(test_recognition_button != NULL)
+					test_recognition_button->hide();
+				if(review_button != NULL)
+					review_button->hide();
+				if(reset_button != NULL)
+					reset_button->hide();
+				if(review_muxed_button != NULL)
+					review_muxed_button->hide();
+				if(zoom_box_button != NULL)
+					zoom_box_button->hide();
+				if(split_button != NULL)
+					split_button->hide();
+				if(open_standalone_button != NULL)
+					open_standalone_button->hide();
+				if(new_source_button != NULL)
+					new_source_button->show();
+				if(edit_source_button != NULL)
+					edit_source_button->hide();
+				if(edit_output_button != NULL)
+					edit_output_button->hide();
+				if(select_output_button != NULL)
+					select_output_button->hide();
+				if(reset_camera_button != NULL)
+					reset_camera_button->hide();
+				if(flip_horizontal_button != NULL)
+					flip_horizontal_button->hide();
+				if(flip_vertical_button != NULL)
+					flip_vertical_button->hide();
+				if(rotate_clockwise_button != NULL)
+					rotate_clockwise_button->hide();
+				if(clear_rotate_button != NULL)
+					clear_rotate_button->hide();
+				if(ptz_lock_window_button != NULL)
+					ptz_lock_window_button->hide();
+				if(new_ptz_window_button != NULL)
+					new_ptz_window_button->hide();
+				if(video_settings_button != NULL)
+					video_settings_button->show();
+				if(camera_settings_button != NULL)
+					camera_settings_button->hide();
+				if(snapshot_settings_button != NULL)
+					snapshot_settings_button->hide();
+				if(native_resolution_button != NULL)
+					native_resolution_button->hide();
+				if(transitions_button != NULL)
+					transitions_button->hide();
+				if(create_python_button != NULL)
+					create_python_button->hide();
+				if(python_buttons != NULL)
+					python_buttons->hide();
+				if(filter_plugins_button != NULL)
+					filter_plugins_button->hide();
+				if(filter_built_in_button != NULL)
+					filter_built_in_button->hide();
+				if(python_filter_button != NULL)
+					python_filter_button->hide();
+				if(python_output_filter_button != NULL)
+					python_output_filter_button->hide();
+				if(external_pgm_button != NULL)
+					external_pgm_button->hide();
+				if(fltk_plugin_button != NULL)
+					fltk_plugin_button->hide();
+				if(save_camera_button != NULL)
+					save_camera_button->hide();
+				if(load_camera_button != NULL)
+					load_camera_button->hide();
+				if(codecs_button != NULL)
+					codecs_button->show();
+				if(timestamp_button != NULL)
+					timestamp_button->hide();
+				if(snapshot_button != NULL)
+					snapshot_button->hide();
+				if(jpeg_streaming_button != NULL)
+					jpeg_streaming_button->hide();
+				if(reset_button != NULL)
+					reset_button->hide();
+				if(reset_cameras_button != NULL)
+					reset_cameras_button->hide();
+				if(resize_capture_button != NULL)
+					resize_capture_button->hide();
+				if(show_motion_debug_button != NULL)
+					show_motion_debug_button->hide();
+				if(quit_button != NULL)
+					quit_button->show();
+				if(power_button != NULL)
+					power_button->hide();
+				if(power_all_button != NULL)
+					power_all_button->hide();
+				if(cycle_cameras_button != NULL)
+					cycle_cameras_button->hide();
+				if(mute_video_button != NULL)
+					mute_video_button->hide();
+				if(freeze_button != NULL)
+					freeze_button->hide();
+				if(hide_video_button != NULL)
+					hide_video_button->hide();
+				if(load_setup_button != NULL)
+					load_setup_button->show();
+				if(save_setup_button != NULL)
+					save_setup_button->hide();
+				if(trigger_button != NULL)
+					trigger_button->hide();
+				if(dump_button != NULL)
+					dump_button->hide();
+				if(toggle_objects_button != NULL)
+					toggle_objects_button->hide();
+				if(toggle_camera_effects_button != NULL)
+					toggle_camera_effects_button->hide();
+				if(order_effects_button != NULL)
+					order_effects_button->hide();
+			}
+			FilterCommandButtons();
 		}
-		else
-		{
-			if(record_button != NULL)
-				record_button->hide();
-			if(record_all_button != NULL)
-				record_all_button->hide();
-			if(audio_mute_button != NULL)
-				audio_mute_button->hide();
-			if(audio_settings_button != NULL)
-				audio_settings_button->hide();
-			if(audio_bind_to_camera_button != NULL)
-				audio_bind_to_camera_button->hide();
-			if(audio_save_button != NULL)
-				audio_save_button->hide();
-			if(audio_load_button != NULL)
-				audio_load_button->hide();
-			if(monitor_video_button != NULL)
-				monitor_video_button->hide();
-			if(monitor_audio_button != NULL)
-				monitor_audio_button->hide();
-			if(audio_library_button != NULL)
-				audio_library_button->hide();
-			if(audio_library_list_button != NULL)
-				audio_library_list_button->hide();
-			if(play_audio_file_button != NULL)
-				play_audio_file_button->hide();
-			if(stop_playing_audio_button != NULL)
-				stop_playing_audio_button->hide();
-			if(pause_playing_audio_button != NULL)
-				pause_playing_audio_button->hide();
-			if(audio_filter_plugins_button != NULL)
-				audio_filter_plugins_button->hide();
-			if(override_button != NULL)
-				override_button->hide();
-			if(encode_button != NULL)
-				encode_button->hide();
-			if(show_debug_button != NULL)
-				show_debug_button->hide();
-			if(test_recognition_button != NULL)
-				test_recognition_button->hide();
-			if(review_button != NULL)
-				review_button->hide();
-			if(reset_button != NULL)
-				reset_button->hide();
-			if(review_muxed_button != NULL)
-				review_muxed_button->hide();
-			if(zoom_box_button != NULL)
-				zoom_box_button->hide();
-			if(split_button != NULL)
-				split_button->hide();
-			if(open_standalone_button != NULL)
-				open_standalone_button->hide();
-			if(new_source_button != NULL)
-				new_source_button->show();
-			if(edit_source_button != NULL)
-				edit_source_button->hide();
-			if(edit_output_button != NULL)
-				edit_output_button->hide();
-			if(select_output_button != NULL)
-				select_output_button->hide();
-			if(reset_camera_button != NULL)
-				reset_camera_button->hide();
-			if(flip_horizontal_button != NULL)
-				flip_horizontal_button->hide();
-			if(flip_vertical_button != NULL)
-				flip_vertical_button->hide();
-			if(rotate_clockwise_button != NULL)
-				rotate_clockwise_button->hide();
-			if(clear_rotate_button != NULL)
-				clear_rotate_button->hide();
-			if(ptz_lock_window_button != NULL)
-				ptz_lock_window_button->hide();
-			if(new_ptz_window_button != NULL)
-				new_ptz_window_button->hide();
-			if(video_settings_button != NULL)
-				video_settings_button->show();
-			if(camera_settings_button != NULL)
-				camera_settings_button->hide();
-			if(snapshot_settings_button != NULL)
-				snapshot_settings_button->hide();
-			if(native_resolution_button != NULL)
-				native_resolution_button->hide();
-			if(transitions_button != NULL)
-				transitions_button->hide();
-			if(create_python_button != NULL)
-				create_python_button->hide();
-			if(python_buttons != NULL)
-				python_buttons->hide();
-			if(filter_plugins_button != NULL)
-				filter_plugins_button->hide();
-			if(filter_built_in_button != NULL)
-				filter_built_in_button->hide();
-			if(python_filter_button != NULL)
-				python_filter_button->hide();
-			if(python_output_filter_button != NULL)
-				python_output_filter_button->hide();
-			if(external_pgm_button != NULL)
-				external_pgm_button->hide();
-			if(fltk_plugin_button != NULL)
-				fltk_plugin_button->hide();
-			if(save_camera_button != NULL)
-				save_camera_button->hide();
-			if(load_camera_button != NULL)
-				load_camera_button->hide();
-			if(codecs_button != NULL)
-				codecs_button->show();
-			if(timestamp_button != NULL)
-				timestamp_button->hide();
-			if(snapshot_button != NULL)
-				snapshot_button->hide();
-			if(jpeg_streaming_button != NULL)
-				jpeg_streaming_button->hide();
-			if(reset_button != NULL)
-				reset_button->hide();
-			if(reset_cameras_button != NULL)
-				reset_cameras_button->hide();
-			if(resize_capture_button != NULL)
-				resize_capture_button->hide();
-			if(show_motion_debug_button != NULL)
-				show_motion_debug_button->hide();
-			if(quit_button != NULL)
-				quit_button->show();
-			if(power_button != NULL)
-				power_button->hide();
-			if(power_all_button != NULL)
-				power_all_button->hide();
-			if(cycle_cameras_button != NULL)
-				cycle_cameras_button->hide();
-			if(mute_video_button != NULL)
-				mute_video_button->hide();
-			if(freeze_button != NULL)
-				freeze_button->hide();
-			if(hide_video_button != NULL)
-				hide_video_button->hide();
-			if(load_setup_button != NULL)
-				load_setup_button->show();
-			if(save_setup_button != NULL)
-				save_setup_button->hide();
-			if(trigger_button != NULL)
-				trigger_button->hide();
-			if(dump_button != NULL)
-				dump_button->hide();
-			if(toggle_objects_button != NULL)
-				toggle_objects_button->hide();
-			if(toggle_camera_effects_button != NULL)
-				toggle_camera_effects_button->hide();
-		}
-		FilterCommandButtons();
+		button_group->redraw();
+		redraw();
 	}
-	button_group->redraw();
-	redraw();
+	else
+	{
+		button_group->hide();
+	}
 }
 
 int	MyWin::CountActiveMics()
@@ -61434,28 +64091,10 @@ char	use_name[4096];
 
 void	MyWin::ViscaCommand(int index, int command, int arg_cnt, int arg0, int arg1, int arg2, int arg3, int arg4)
 {
-	if((command == PTZ_RELATIVE_POSITION)
-	|| (command == PTZ_ABSOLUTE_POSITION))
+	if(pthread_mutex_trylock(&visca_mutex) == 0)
 	{
-		if(pthread_mutex_trylock(&visca_mutex) == 0)
-		{
-			visca_command = command;
-			ptz_window_index = index;
-			visca_arg_cnt = arg_cnt;
-			visca_arg[0] = arg0;
-			visca_arg[1] = arg1;
-			visca_arg[2] = arg2;
-			visca_arg[3] = arg3;
-			visca_arg[4] = arg4;
-			pthread_mutex_unlock(&visca_mutex);
-			sem_post(&semaphore);
-		}
-	}
-	else
-	{
-		pthread_mutex_lock(&visca_mutex);
-		ptz_window_index = index;
 		visca_command = command;
+		ptz_window_index = index;
 		visca_arg_cnt = arg_cnt;
 		visca_arg[0] = arg0;
 		visca_arg[1] = arg1;
@@ -61538,6 +64177,10 @@ int	aa, ab, ac;
 	{
 		local_ptz_window = new PTZ_Window(this, ptz_alias[in_instance], in_instance, (w() - 310) - (in_instance * 300), h() - 330, 300, 330);
 	}
+	int nn = ptz_initial_camera[in_instance];
+	local_ptz_window->ptz_camera_select_button[nn]->value(1);
+	ptz_select_camera_cb(local_ptz_window->ptz_camera_select_button[nn], local_ptz_window);
+
 	local_ptz_window->prefer_ndi = ptz_prefer_ndi[in_instance];
 	local_ptz_window->prefer_v4l = ptz_prefer_v4l[in_instance];
 	local_ptz_window->accelerate = ptz_accelerate[in_instance];
@@ -61666,7 +64309,7 @@ void	MyWin::ResetCommandKeys()
 	command_key[MY_KEY_LITTLE_MOTION_OTHER_8] = 'x';
 	command_key[MY_KEY_LOCAL_ZOOM_IN] = '='; // NOTE: SHIFTED TO PRODUCE '+'
 	command_key[MY_KEY_LOCAL_ZOOM_OUT] = '-';
-	command_key[MY_KEY_REVIEW] = '.';
+	command_key[MY_KEY_REVIEW] = 'r';
 	command_key[MY_KEY_TOGGLE_FROZEN] = FL_Pause;
 	command_key[MY_KEY_SNAPSHOT] = FL_Print;
 	command_key[MY_KEY_SNAPSHOT_OTHER] = 'p';
@@ -61693,6 +64336,11 @@ void	MyWin::ResetCommandKeys()
 	command_key[MY_KEY_VOLUME_DOWN] = FL_Left;
 	command_key[MY_KEY_CYCLE_UP_CROSSHAIR] = 'm';
 	command_key[MY_KEY_CYCLE_DOWN_CROSSHAIR] = 'n';
+	command_key[MY_KEY_REPEAT_LAST_BUTTON] = '.';
+	if(hide_menu == 1)
+	{
+		command_key[MY_KEY_EXIT] = '[';
+	}
 }
 
 int	MyWin::CheckCommandTitle(char *name)
@@ -61759,6 +64407,7 @@ int	MyWin::CheckCommandTitle(char *name)
 	if(strcasecmp("OPEN PTZ", name) == 0) nn = MY_KEY_OPEN_PTZ;
 	if(strcasecmp("CYCLE UP CROSSHAIR", name) == 0) nn = MY_KEY_CYCLE_UP_CROSSHAIR;
 	if(strcasecmp("CYCLE DOWN CROSSHAIR", name) == 0) nn = MY_KEY_CYCLE_DOWN_CROSSHAIR;
+	if(strcasecmp("REPEAT LAST BUTTON", name) == 0) nn = MY_KEY_REPEAT_LAST_BUTTON;
 	return(nn);
 }
 
@@ -61861,6 +64510,7 @@ void	MyWin::SaveCommandKeyDefinitions(char *filename)
 		fprintf(fp, "OPEN CAMERAS\t%s\n", CommandKeyName(command_key[MY_KEY_OPEN_CAMERAS]));
 		fprintf(fp, "OPEN AUDIO\t%s\n", CommandKeyName(command_key[MY_KEY_OPEN_AUDIO]));
 		fprintf(fp, "OPEN PTZ\t%s\n", CommandKeyName(command_key[MY_KEY_OPEN_PTZ]));
+		fprintf(fp, "REPEAT LAST BUTTON\t%s\n", CommandKeyName(command_key[MY_KEY_REPEAT_LAST_BUTTON]));
 		fclose(fp);
 	}
 }
@@ -62293,7 +64943,7 @@ int	loop;
 	button_panel_sz = 200;
 
 	button_group = new MainMenu(this, 0, 0, button_panel_sz, h());
-	if(transparent_interface == 0)
+	if((transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		button_group->box(FL_FLAT_BOX);
 	}
@@ -62303,7 +64953,7 @@ int	loop;
 	}
 	button_group->color(DARK_GRAY);
 
-	search_input = new MyInput(40, y_pos, 140, button_height, "Search");
+	search_input = new MyInput(this, 40, y_pos, 140, button_height, "Search");
 	search_input->textsize(8);
 	search_input->labelsize(8);
 	search_input->box(FL_FRAME_BOX);
@@ -62313,20 +64963,20 @@ int	loop;
 	search_input->callback(command_menu_search_cb, this);
 	search_input->hide();
 
-	button_group_scroll = new SimpleScroll(this, 0, y_pos, button_panel_sz, h() - y_pos);
+	button_group_scroll = new SimpleScroll(this, NULL, 0, y_pos, button_panel_sz, h() - y_pos);
 	button_group_scroll->color(DARK_GRAY);
 	button_group_scroll->hscrollbar.hide();
 	button_group_scroll->scrollbar.hide();
 	button_group_scroll->scrollbar_size(1);
 	button_group_scroll->scrollbar.color(DARK_GRAY);
 	button_group_scroll->scrollbar.labelcolor(DARK_GRAY);
-	if(transparent_interface == 1)
+	if((transparent_interface & TRANSPARENT_PANELS) == TRANSPARENT_PANELS)
 	{
 		button_group_scroll->box(FL_NO_BOX);
 	}
 	button_group_pack = new Fl_Pack(8, y_pos, button_panel_sz, h() - y_pos);
 	button_group_pack->spacing(2);
-	if(transparent_interface == 1)
+	if((transparent_interface & TRANSPARENT_PANELS) == TRANSPARENT_PANELS)
 	{
 		button_group_pack->box(FL_NO_BOX);
 	}
@@ -62472,7 +65122,7 @@ int	loop;
 
 	fltk_plugin_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "FLTK Plugin");
 	fltk_plugin_button->priority = 2;
-	fltk_plugin_button->copy_tooltip("Apply a FLTK program to the GUI. The primary FLTK class is passed to the plugin. This allows the plugin to alter the primary GUI classes attached to the passed entry point.\n");
+	fltk_plugin_button->copy_tooltip("Apply a FLTK program to the GUI. The primary FLTK class is passed to the plugin. This allows the plugin to alter the primary UI classes attached to the passed entry point.\n");
 	fltk_plugin_button->callback(fltk_plugin_button_cb, this);
 	y_pos += y_inc;
 
@@ -62480,6 +65130,12 @@ int	loop;
 	toggle_camera_effects_button->priority = 1;
 	toggle_camera_effects_button->copy_tooltip("Toggle the effects that have been applied to the currently displayed camera.");
 	toggle_camera_effects_button->callback(toggle_camera_effects_button_cb, this);
+	y_pos += y_inc;
+
+	order_effects_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Order Effects");
+	order_effects_button->priority = 1;
+	order_effects_button->copy_tooltip("Order and apply effects to the currently displayed camera.");
+	order_effects_button->callback(order_effects_button_cb, this);
 	y_pos += y_inc;
 
 	save_camera_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Save Camera");
@@ -62825,10 +65481,10 @@ int	loop;
 	keyboard_settings_button->callback(keyboard_settings_button_cb, this);
 	y_pos += y_inc;
 
-	gui_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "GUI Settings");
-	gui_settings_button->priority = 0;
-	gui_settings_button->copy_tooltip("Change user interface settings.");
-	gui_settings_button->callback(gui_settings_button_cb, this);
+	ui_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "UI Settings");
+	ui_settings_button->priority = 0;
+	ui_settings_button->copy_tooltip("Change user interface settings.");
+	ui_settings_button->callback(ui_settings_button_cb, this);
 	y_pos += y_inc;
 
 	codecs_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Codecs");
@@ -62902,7 +65558,7 @@ int	loop;
 	{
 		HoverMenu *hover_win = new HoverMenu(this, 80, 120);
 		hover_win->color(WHITE);
-		if(transparent_interface == 0)
+		if((transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 		{
 			hover_win->box(FL_FLAT_BOX);
 		}
@@ -62951,16 +65607,21 @@ int	loop;
 	ShowButtons();
 }
 
-void	MyWin::FilterCommandButtons()
+void	recursively_matches(Fl_Group *start, char *command_filter)
 {
 int	loop;
 
-	if(strlen(command_filter) > 0)
+	for(loop = 0;loop < start->children();loop++)
 	{
-		for(loop = 0;loop < button_group_pack->children();loop++)
+		Fl_Widget *child = start->child(loop);
+		if(child != NULL)
 		{
-			Fl_Widget *child = button_group_pack->child(loop);
-			if(child != NULL)
+			Fl_Group *grp = child->as_group();
+			if(grp != NULL)
+			{
+				recursively_matches(grp, command_filter);
+			}
+			else
 			{
 				if(child->align() != FL_ALIGN_CENTER)
 				{
@@ -62973,12 +65634,18 @@ int	loop;
 						}
 					}
 				}
-				else
-				{
-				}
-				child->redraw();
 			}
 		}
+	}
+}
+
+void	MyWin::FilterCommandButtons()
+{
+int	loop;
+
+	if(strlen(command_filter) > 0)
+	{
+		recursively_matches(button_group_pack, command_filter);
 		button_group_pack->redraw();
 	}
 	else
@@ -63701,7 +66368,7 @@ SlidingElement::SlidingElement(MyWin *in_win, int in_direction, int xx, int yy, 
 	my_window = in_win;
 	direction = in_direction;
 	behavior = OPENING;
-	if(my_window->transparent_interface == 1)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) == TRANSPARENT_PANELS)
 	{
 		box(FL_FRAME);
 	}
@@ -63867,7 +66534,7 @@ void	hide_window_cb(Fl_Widget *w, void *v);
 	box3->box(FL_FLAT_BOX);
 	y_pos += 22;
 
-	scroll = new SimpleScroll(my_window, 2, y_pos, ww - 4, hh - 160);
+	scroll = new SimpleScroll(my_window, this, 2, y_pos, ww - 4, hh - 160);
 	scroll->box(FL_FLAT_BOX);
 	scroll->color(BLACK);
 	scroll->hscrollbar.hide();
@@ -64251,7 +66918,7 @@ char	*sorted_list[1024];
 	}
 	object_page = 0;
 	qsort(sorted_list, my_window->recognize_class_cnt, sizeof(char *), cmpstringp);
-	for(loop = 0;loop < 80;loop++)
+	for(loop = 0;loop < OBJECTS_PER_PAGE;loop++)
 	{
 		object_name_button[loop] = new MyButton(my_window, nxx, nyy, 200, 16);
 		object_name_button[loop]->box(FL_NO_BOX);
@@ -64368,7 +67035,7 @@ void	MyWin::ReadGUISettings()
 {
 int			loop;
 
-	char *buf = ReadWholeFile("GUI_settings.json");
+	char *buf = ReadWholeFile("UI_settings.json");
 	if(buf != NULL)
 	{
 		cJSON *json = cJSON_Parse(buf);
@@ -64377,7 +67044,7 @@ int			loop;
 			const char *error_ptr = cJSON_GetErrorPtr();
 			if(error_ptr != NULL)
 			{
-				fprintf(stderr, "Error: JSON Error in GUI_settings.json before: %s\n", error_ptr);
+				fprintf(stderr, "Error: JSON Error in UI_settings.json before: %s\n", error_ptr);
 			}
 		}
 		else
@@ -64391,6 +67058,8 @@ int			loop;
 			success = json_parse_int(json, "lock ptz mouse move", lock_ptz_mouse_move);
 			success = json_parse_int(json, "button group side", button_group_side);
 			success = json_parse_int(json, "transparent interface", transparent_interface);
+			Transparent(transparent_interface);
+
 			success = json_parse_int(json, "animate panels", animate_panels);
 			success = json_parse_int(json, "exclude directories", file_selector_exclude_directories);
 			success = json_parse_int(json, "use tooltips", use_tooltips);
@@ -64520,6 +67189,7 @@ ImDefault::ImDefault()
 	su_cnt = 0;
 	drag_point = -1;
 	pt_type = NULL;
+	rounding_radius = 0.1;
 	strcpy(font_name, "Sans");
 	strcpy(image_file_path, "");
 	strcpy(freehand_filename, "");
@@ -65914,13 +68584,30 @@ QuickText::QuickText(Camera *in_cam, char *init_text, int xx, int yy, int ww, in
 	my_camera = in_cam;
 	textcolor(WHITE);
 	textsize(32);
-	value(init_text);
-	focused = 0;
+	strcpy(use_font, "sans");
 	alpha = 255;
 	bold = 0;
 	italic = 0;
 	outline = 0;
-	strcpy(use_font, "sans");
+
+	ImmediateDrawingWindow *idw = my_camera->my_window->immediate_drawing_window;
+	if(idw != NULL)
+	{
+		italic = idw->text_italic_button->value();
+		bold = idw->text_bold_button->value();
+		outline = idw->text_outline_button->value();
+		strcpy(use_font, idw->selected_font);
+		int sz = idw->font_size_slider->value();
+		int red = idw->font_red_slider->value();
+		int green = idw->font_green_slider->value();
+		int blue = idw->font_blue_slider->value();
+		alpha = idw->font_alpha_slider->value();
+		Fl_Color clr = fl_rgb_color(red, green, blue);
+		textcolor(clr);
+		textsize(sz);
+	}
+	value(init_text);
+	focused = 0;
 }
 
 QuickText::~QuickText()
@@ -65976,6 +68663,10 @@ void	QuickText::draw()
 int		 loop;
 char	*line[4096];
 
+	ImmediateDrawingWindow *idw = my_camera->my_window->immediate_drawing_window;
+	if(idw != NULL)
+	{
+	}
 	char *str = (char *)value();
 	int pos = insert_position();
 
@@ -66393,7 +69084,7 @@ AnimTimeline::AnimTimeline(MyWin *in_win, int xx, int yy, int ww, int hh) : Fl_W
 	range = 1000;
 	start = 1;
 	current_frame = 1;
-	input = new MyInput(2, 24, 30, 12, "");
+	input = new MyInput(my_window, 2, 24, 30, 12, "");
 	input->textsize(8);
 	input->box(FL_FRAME_BOX);
 	input->color(YELLOW);
@@ -67087,11 +69778,11 @@ int	inner;
 	fprintf(fp, "\t\t\t\"use as mask\": %d,\n", use_as_mask);
 	if(use_default == text)
 	{
-		fprintf(fp, "\t\t\t\"text value\": \"%s\",\n", text->value());
-		fprintf(fp, "\t\t\t\"text font name\": \"%s\",\n", text->font_name);
+		fprintf(fp, "\t\t\t\"text value\": \"%s\",\n", DQ((char *)text->value()));
+		fprintf(fp, "\t\t\t\"text font name\": \"%s\",\n", DQ(text->font_name));
 	}
-	fprintf(fp, "\t\t\t\"image file path\": \"%s\",\n", use_default->image_file_path);
-	fprintf(fp, "\t\t\t\"freehand filename\": \"%s\",\n", use_default->freehand_filename);
+	fprintf(fp, "\t\t\t\"image file path\": \"%s\",\n", DQ(use_default->image_file_path));
+	fprintf(fp, "\t\t\t\"freehand filename\": \"%s\",\n", DQ(use_default->freehand_filename));
 	fprintf(fp, "\t\t\t\"width\": %d,\n", use_default->width);
 	fprintf(fp, "\t\t\t\"red\": %d,\n", use_default->red);
 	fprintf(fp, "\t\t\t\"green\": %d,\n", use_default->green);
@@ -71563,6 +74254,7 @@ VideoThumbnailGroup::VideoThumbnailGroup(MyWin *in_win, int xx, int yy, int ww, 
 	my_window = in_win;
 	hovering = 0;
 	start_thumbgroup = 0;
+	resizable(NULL);
 }
 
 VideoThumbnailGroup::~VideoThumbnailGroup()
@@ -71601,6 +74293,18 @@ int	VideoThumbnailGroup::handle(int event)
 		flag = SlidingElement::handle(event);
 	}
 	return(flag);
+}
+
+void	VideoThumbnailGroup::AdjustHeight(int items)
+{
+int		loop;
+
+	int hh = items * 112;;
+	int limit = DISPLAYED_THUMB_CNT * 112;
+	if(hh < limit)
+	{
+		resize(x(), y(), w(), hh);
+	}
 }
 
 void	VideoThumbnailGroup::CameraMoveUp(Camera *cam)
@@ -71740,7 +74444,8 @@ void	VideoThumbnailGroup::ScrollToDisplayed()
 
 void	thumb_remove_button_cb(Fl_Widget *w, void *v)
 {
-int	loop;
+int		loop;
+int		inner;
 
 	MyWin *win = (MyWin *)v;
 	ThumbGroup *tg = (ThumbGroup *)w->parent();
@@ -71748,9 +74453,30 @@ int	loop;
 	{
 		if(tg == win->thumbnail[loop])
 		{
-			tg->hide();
 			ThumbButton *tb = tg->thumb_button;
 			Camera *cam = tb->camera;
+			if(cam != NULL)
+			{
+				int took_one = 0;
+				for(inner = 0;inner < win->ptz_device_cnt;inner++)
+				{
+					PTZ_Window *ptz = win->ptz_window[inner];
+					if(ptz != NULL)
+					{
+						if(ptz->bound_camera == cam)
+						{
+							ptz->showing = 0;
+							ptz->hide();
+							took_one = 1;
+						}
+					}
+				}
+				if(took_one == 1)
+				{
+					win->RestackPTZWindows();
+				}
+			}
+			tg->hide();
 			if(cam != NULL)
 			{
 				win->RemoveCamera(cam);
@@ -72051,7 +74777,7 @@ int	loop;
 	char *str = (char *)tg->alias_input->value();
 	tg->alias_input->hide();
 	tg->alias_button->show();
-	Camera *cam = tg->my_win->camera[tg->index];
+	Camera *cam = tg->my_window->camera[tg->index];
 	if(cam != NULL)
 	{
 		MyWin *my_win = cam->my_window;
@@ -72075,7 +74801,7 @@ int	loop;
 
 ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl_Group(xx, yy, ww, hh)
 {
-	my_win = win;
+	my_window = win;
 	index = idx;
 	Camera *cam = NULL;
 	popup = NULL;
@@ -72089,7 +74815,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	labelcolor(YELLOW);
 	labelsize(16);
 	color(BLACK);
-	if(my_win->transparent_interface == 0)
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) != TRANSPARENT_PANELS)
 	{
 		box(FL_FLAT_BOX);
 	}
@@ -72097,7 +74823,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	{
 		box(FL_NO_BOX);
 	}
-	thumb_button = new ThumbButton(my_win, idx, 2, 2, 153, 86);
+	thumb_button = new ThumbButton(my_window, idx, 2, 2, 153, 86);
 	thumb_button->box(FL_NO_BOX);
 	thumb_button->copy_tooltip("Select to view this camera");
 	thumb_button->callback(thumbnail_cb, win);
@@ -72107,7 +74833,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	{
 		str = cam->alias;
 	}
-	alias_button = new MyButton(my_win, 2, 90, 153, 20);
+	alias_button = new MyButton(my_window, 2, 90, 153, 20);
 	alias_button->box(FL_NO_BOX);
 	alias_button->color(BLACK);
 	alias_button->labelcolor(YELLOW);
@@ -72129,7 +74855,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	alias_input->callback(thumbgroup_edit_alias_cb, this);
 	alias_input->hide();
 
-	remove = new MyButton(my_win, 4, 4, 16, 16, "X");
+	remove = new MyButton(my_window, 4, 4, 16, 16, "X");
 	remove->box(FL_BORDER_FRAME);
 	remove->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
 	remove->color(YELLOW);
@@ -72137,8 +74863,11 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	remove->labelsize(8);
 	remove->copy_tooltip("Remove the camera");
 	remove->callback(thumb_remove_button_cb, win);
-
-	place = new MyButton(my_win, 20, 4, 16, 16);
+	if(my_window->hide_menu == 1)
+	{
+		remove->hide();
+	}
+	place = new MyButton(my_window, 20, 4, 16, 16);
 	place->box(FL_BORDER_FRAME);
 	place->color(YELLOW);
 	place->align(FL_ALIGN_RIGHT);
@@ -72149,7 +74878,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	place->callback(thumb_place_button_cb, win);
 
 	int cy = 2;
-	record = new MyButton(my_win, 157, cy, 16, 16, "Recording");
+	record = new MyButton(my_window, 157, cy, 16, 16, "Recording");
 	record->box(FL_BORDER_FRAME);
 	record->color(YELLOW);
 	record->align(FL_ALIGN_RIGHT);
@@ -72159,7 +74888,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	record->callback(thumb_record_button_cb, win);
 	cy += 18;
 
-	detect_motion = new MyButton(my_win, 157, 20, 16, 16, "Detecting Motion");
+	detect_motion = new MyButton(my_window, 157, 20, 16, 16, "Detecting Motion");
 	detect_motion->box(FL_BORDER_FRAME);
 	detect_motion->color(YELLOW);
 	detect_motion->align(FL_ALIGN_RIGHT);
@@ -72169,7 +74898,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	detect_motion->callback(thumb_motion_button_cb, win);
 	detect_motion->hide();
 	
-	detect_object = new MyButton(my_win, 157, 38, 16, 16, "Detecting Objects");
+	detect_object = new MyButton(my_window, 157, 38, 16, 16, "Detecting Objects");
 	detect_object->box(FL_BORDER_FRAME);
 	detect_object->color(YELLOW);
 	detect_object->align(FL_ALIGN_RIGHT);
@@ -72179,7 +74908,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	detect_object->callback(thumb_object_button_cb, win);
 	detect_object->hide();
 
-	instrument = new MyButton(my_win, 157, 20, 16, 16, "Instrument");
+	instrument = new MyButton(my_window, 157, 20, 16, 16, "Instrument");
 	instrument->box(FL_BORDER_FRAME);
 	instrument->color(YELLOW);
 	instrument->align(FL_ALIGN_RIGHT);
@@ -72189,7 +74918,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	instrument->callback(thumb_instrument_button_cb, win);
 	instrument->hide();
 	
-	set_color = new MyButton(my_win, 157, 20, 16, 16, "Background");
+	set_color = new MyButton(my_window, 157, 20, 16, 16, "Background");
 	set_color->box(FL_FRAME_BOX);
 	set_color->color(YELLOW);
 	set_color->align(FL_ALIGN_RIGHT);
@@ -72199,7 +74928,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	set_color->callback(thumb_background_button_cb, win);
 	set_color->hide();
 	
-	set_text_color = new MyButton(my_win, 157, 38, 16, 16, "Text");
+	set_text_color = new MyButton(my_window, 157, 38, 16, 16, "Text");
 	set_text_color->box(FL_FRAME_BOX);
 	set_text_color->color(YELLOW);
 	set_text_color->align(FL_ALIGN_RIGHT);
@@ -72209,7 +74938,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	set_text_color->callback(thumb_text_color_button_cb, win);
 	set_text_color->hide();
 
-	pause_av = new MyButton(my_win, 157, 20, 16, 16, "Pause");
+	pause_av = new MyButton(my_window, 157, 20, 16, 16, "Pause");
 	pause_av->box(FL_FRAME_BOX);
 	pause_av->color(YELLOW);
 	pause_av->align(FL_ALIGN_RIGHT);
@@ -72219,7 +74948,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	pause_av->callback(thumb_pause_av_button_cb, win);
 	pause_av->hide();
 
-	mute_av = new MyButton(my_win, 157, 38, 16, 16, "Mute");
+	mute_av = new MyButton(my_window, 157, 38, 16, 16, "Mute");
 	mute_av->box(FL_FRAME_BOX);
 	mute_av->color(YELLOW);
 	mute_av->align(FL_ALIGN_RIGHT);
@@ -72233,51 +74962,51 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	V4L_Window->box(FL_NO_BOX);
 		int cx = 2 + 157;
 		cy = 2 + 56;
-		up_left = new V4L_Button(my_win, this, cx, cy, 10, 10, "");
+		up_left = new V4L_Button(my_window, this, cx, cy, 10, 10, "");
 		up_left->box(FL_BORDER_FRAME);
 		up_left->color(YELLOW);
 		up_left->copy_tooltip("Move up and left using v4l controls");
 		cx += 11;
-		up = new V4L_Button(my_win, this, cx, cy, 10, 10, "");
+		up = new V4L_Button(my_window, this, cx, cy, 10, 10, "");
 		up->box(FL_BORDER_FRAME);
 		up->color(YELLOW);
 		up->copy_tooltip("Move up using v4l controls");
 		cx += 11;
-		up_right = new V4L_Button(my_win, this, cx, cy, 10, 10, "");
+		up_right = new V4L_Button(my_window, this, cx, cy, 10, 10, "");
 		up_right->box(FL_BORDER_FRAME);
 		up_right->color(YELLOW);
 		up_right->copy_tooltip("Move up and right using v4l controls");
 		cx = 2 + 157;
 		cy += 11;
-		left = new V4L_Button(my_win, this, cx, cy, 10, 10, "");
+		left = new V4L_Button(my_window, this, cx, cy, 10, 10, "");
 		left->box(FL_BORDER_FRAME);
 		left->color(YELLOW);
 		left->copy_tooltip("Move left using v4l controls");
 		cx += 22;
-		right = new V4L_Button(my_win, this, cx, cy, 10, 10, "");
+		right = new V4L_Button(my_window, this, cx, cy, 10, 10, "");
 		right->box(FL_BORDER_FRAME);
 		right->color(YELLOW);
 		right->copy_tooltip("Move right using v4l controls");
 		cx = 2 + 157;
 		cy += 11;
-		down_left = new V4L_Button(my_win, this, cx, cy, 10, 10, "");
+		down_left = new V4L_Button(my_window, this, cx, cy, 10, 10, "");
 		down_left->box(FL_BORDER_FRAME);
 		down_left->color(YELLOW);
 		down_left->copy_tooltip("Move down and left using v4l controls");
 		cx += 11;
-		down = new V4L_Button(my_win, this, cx, cy, 10, 10, "");
+		down = new V4L_Button(my_window, this, cx, cy, 10, 10, "");
 		down->box(FL_BORDER_FRAME);
 		down->color(YELLOW);
 		down->copy_tooltip("Move down using v4l controls");
 		cx += 11;
-		down_right = new V4L_Button(my_win, this, cx, cy, 10, 10, "");
+		down_right = new V4L_Button(my_window, this, cx, cy, 10, 10, "");
 		down_right->box(FL_BORDER_FRAME);
 		down_right->color(YELLOW);
 		down_right->copy_tooltip("Move down and right using v4l controls");
 
 		cx = 42 + 157;
 		cy = 12 + 56;
-		zoom_in = new V4L_Button(my_win, this, cx, cy, 11, 11, "Zoom");
+		zoom_in = new V4L_Button(my_window, this, cx, cy, 11, 11, "Zoom");
 		zoom_in->box(FL_BORDER_FRAME);
 		zoom_in->color(YELLOW);
 		zoom_in->align(FL_ALIGN_TOP | FL_ALIGN_CENTER);
@@ -72285,14 +75014,14 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 		zoom_in->labelsize(5);
 		zoom_in->copy_tooltip("Zoom in using v4l controls");
 		cy += 12;
-		zoom_out = new V4L_Button(my_win, this, cx, cy, 11, 11, "");
+		zoom_out = new V4L_Button(my_window, this, cx, cy, 11, 11, "");
 		zoom_out->box(FL_BORDER_FRAME);
 		zoom_out->color(YELLOW);
 		zoom_out->copy_tooltip("Zoom out using v4l controls");
 
 		cx = 60 + 157;
 		cy = 12 + 56;
-		focus_far = new V4L_Button(my_win, this, cx, cy, 11, 11, "Focus");
+		focus_far = new V4L_Button(my_window, this, cx, cy, 11, 11, "Focus");
 		focus_far->box(FL_BORDER_FRAME);
 		focus_far->color(YELLOW);
 		focus_far->align(FL_ALIGN_TOP | FL_ALIGN_CENTER);
@@ -72300,7 +75029,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 		focus_far->labelsize(5);
 		focus_far->copy_tooltip("Focus far using v4l controls");
 		cy += 12;
-		focus_near = new V4L_Button(my_win, this, cx, cy, 11, 11, "");
+		focus_near = new V4L_Button(my_window, this, cx, cy, 11, 11, "");
 		focus_near->box(FL_BORDER_FRAME);
 		focus_near->color(YELLOW);
 		focus_near->copy_tooltip("Focus near using v4l controls");
@@ -72331,35 +75060,35 @@ int	loop;
 		{
 			iw->popup->hide();
 		}
-		Camera *cam = iw->my_win->DisplayedCamera();
+		Camera *cam = iw->my_window->DisplayedCamera();
 		if(cam != NULL)
 		{
 			Fl_Hold_Browser *browser = (Fl_Hold_Browser *)w;
 			char *str = (char *)browser->text(browser->value());
 			if(str != NULL)
 			{
-				if(strcmp(str, "Toggle View") == 0)
+				if((strcmp(str, "View") == 0) || (strcmp(str, "Cease Viewing") == 0))
 				{
-					if(iw->my_win->alt_displayed_source != iw->index)
+					if(iw->my_window->alt_displayed_source != iw->index)
 					{
-						iw->my_win->AltDisplayCamera(iw->index);
+						iw->my_window->AltDisplayCamera(iw->index);
 					}
 					else
 					{
-						iw->my_win->alt_displayed_source = -1;
+						iw->my_window->alt_displayed_source = -1;
 					}
 				}
 				else if(strcmp(str, "Show All") == 0)
 				{
-					iw->my_win->ShowAllThumbs();
+					iw->my_window->ShowAllThumbs();
 				}
 				else if(strcmp(str, "Hide") == 0)
 				{
-					int	nn = iw->my_win->CountVisibleThumbs();
+					int	nn = iw->my_window->CountVisibleThumbs();
 					if(nn > 1)
 					{
 						iw->hidden = 1;
-						iw->my_win->ReorderThumbs();
+						iw->my_window->ReorderThumbs();
 					}
 				}
 				else if(strcmp(str, "Blend") == 0)
@@ -72370,14 +75099,14 @@ int	loop;
 					char new_alias[32768];
 					sprintf(use_path, "blend://%s:%s:0.5", one->alias, two->alias);
 					sprintf(new_alias, "Blend %s/%s", one->alias, two->alias);
-					int cam_num = iw->my_win->SetupCamera(use_path, new_alias, one->width, one->height, 32);
+					int cam_num = iw->my_window->SetupCamera(use_path, new_alias, one->width, one->height, 32);
 					if(cam_num == -1)
 					{
-						iw->my_win->SetErrorMessage("Cannot Open Camera");
+						iw->my_window->SetErrorMessage("Cannot Open Camera");
 					}
 					else
 					{
-						iw->my_win->DisplayCamera(cam_num);
+						iw->my_window->DisplayCamera(cam_num);
 					}
 				}
 				else if(strcmp(str, "View Standalone") == 0)
@@ -72416,7 +75145,7 @@ int	loop;
 						camera->show_alias = 1;
 					}
 				}
-				else if(strcmp(str, "Toggle Display") == 0)
+				else if((strcmp(str, "Display") == 0) || (strcmp(str, "Cease Displaying") == 0))
 				{
 					Camera *camera = iw->thumb_button->camera;
 					if(camera != NULL)
@@ -72446,9 +75175,9 @@ int	loop;
 					Camera *camera = NULL;
 					for(loop = 0;loop < 128;loop++)
 					{
-						if(iw->thumb_button == iw->my_win->thumbnail[loop]->thumb_button)
+						if(iw->thumb_button == iw->my_window->thumbnail[loop]->thumb_button)
 						{
-							camera = iw->my_win->camera[loop];
+							camera = iw->my_window->camera[loop];
 						}
 					}
 					if(camera != NULL)
@@ -72458,26 +75187,26 @@ int	loop;
 				}
 				else if(strcmp(str, "Remove") == 0)
 				{
-					thumb_remove_button_cb(iw->remove, iw->my_win);
+					thumb_remove_button_cb(iw->remove, iw->my_window);
 				}
 				else if(strcmp(str, "Move Up") == 0)
 				{
-					MyWin *win = iw->my_win;
+					MyWin *win = iw->my_window;
 					win->video_thumbnail_group->CameraMoveUp(iw->thumb_button->camera);
 				}
 				else if(strcmp(str, "Move Down") == 0)
 				{
-					MyWin *win = iw->my_win;
+					MyWin *win = iw->my_window;
 					win->video_thumbnail_group->CameraMoveDown(iw->thumb_button->camera);
 				}
 				else if(strcmp(str, "Hide Camera Group") == 0)
 				{
-					MyWin *win = iw->my_win;
+					MyWin *win = iw->my_window;
 					win->retain_cameras = 0;
 				}
 				else if(strcmp(str, "Lock Camera Group") == 0)
 				{
-					MyWin *win = iw->my_win;
+					MyWin *win = iw->my_window;
 					win->retain_cameras = 1;
 				}
 			}
@@ -72499,12 +75228,12 @@ int	ThumbGroup::handle(int event)
 		{
 			if(Fl::event_button() == FL_RIGHT_MOUSE)
 			{
-				Camera *cam = my_win->DisplayedCamera();
+				Camera *cam = thumb_button->camera;
 				if(cam != NULL)
 				{
 					if(popup == NULL)
 					{
-						popup = new PopupMenu(my_win, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
+						popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
 						popup->browser->callback(thumbgroup_popup_cb, this);
 					}
 					else
@@ -72514,22 +75243,42 @@ int	ThumbGroup::handle(int event)
 					if(popup != NULL)
 					{
 						popup->browser->clear();
-						popup->browser->add("Toggle View");
+						if(my_window->alt_displayed_source != index)
+						{
+							if(my_window->displayed_source != index)
+							{
+								popup->browser->add("View");
+							}
+						}
+						else
+						{
+							popup->browser->add("Cease Viewing");
+						}
 						popup->browser->add("View Standalone");
-						popup->browser->add("Blend");
-						int	nn = my_win->CountVisibleThumbs();
+						if(my_window->displayed_source != index)
+						{
+							popup->browser->add("Blend");
+						}
+						int	nn = my_window->CountVisibleThumbs();
 						if(nn > 1)
 						{
 							popup->browser->add("Hide");
 						}
-						nn = my_win->CountHiddenThumbs();
+						nn = my_window->CountHiddenThumbs();
 						if(nn > 0)
 						{
 							popup->browser->add("Show All");
 						}
 						popup->browser->add("Snapshot");
-						popup->browser->add("Toggle Display");
-						if(my_win->multipip > 0)
+						if(cam->do_not_display == 1)
+						{
+							popup->browser->add("Display");
+						}
+						else
+						{
+							popup->browser->add("Cease Displaying");
+						}
+						if(my_window->multipip > 0)
 						{
 							popup->browser->add("Toggle PIP");
 						}
@@ -72544,29 +75293,25 @@ int	ThumbGroup::handle(int event)
 								popup->browser->add("Unlock PIP");
 							}
 						}
-						Camera *use_cam = thumb_button->camera;
-						if(use_cam != NULL)
+						if(cam->show_alias == 0)
 						{
-							if(use_cam->show_alias == 0)
-							{
-								popup->browser->add("Show Alias");
-							}
-							else
-							{
-								popup->browser->add("Hide Alias");
-							}
-							popup->browser->add("Camera Info");
-							if(use_cam->id > 0)
-							{
-								popup->browser->add("Move Up");
-							}
-							if(use_cam->id < (my_win->source_cnt - 1))
-							{
-								popup->browser->add("Move Down");
-							}
+							popup->browser->add("Show Alias");
+						}
+						else
+						{
+							popup->browser->add("Hide Alias");
+						}
+						popup->browser->add("Camera Info");
+						if(cam->id > 0)
+						{
+							popup->browser->add("Move Up");
+						}
+						if(cam->id < (my_window->source_cnt - 1))
+						{
+							popup->browser->add("Move Down");
 						}
 						popup->browser->add("Remove");
-						if(my_win->retain_cameras == 1)
+						if(my_window->retain_cameras == 1)
 						{
 							popup->browser->add("Hide Camera Group");
 						}
@@ -72602,7 +75347,7 @@ void	ThumbGroup::draw()
 		}
 		else
 		{
-			if(my_win->alt_displayed_source == index)
+			if(my_window->alt_displayed_source == index)
 			{
 				fl_color(BLUE);
 				fl_rect(x(), y(), w(), h() - 19);
@@ -72992,6 +75737,7 @@ StandaloneDisplay::StandaloneDisplay(MyWin *in_win, Camera *in_cam, int ww, int 
 	my_window = in_win;
 	cam = in_cam;
 	cam->priority++;
+	frozen = 0;
 	popup = NULL;
 	resizable(this);
 	ratio_w = (double)ww / (double)hh;
@@ -72999,6 +75745,10 @@ StandaloneDisplay::StandaloneDisplay(MyWin *in_win, Camera *in_cam, int ww, int 
 	set_non_modal();
 	border(1);
 	show();
+
+	// This allows the window to remain up even if the main window minimizes
+	XDeleteProperty(fl_display, fl_xid(this), XA_WM_TRANSIENT_FOR);
+
 	Fl::add_timeout(0.1, update_standalone_cb, this);
 }
 
@@ -73030,7 +75780,7 @@ void	StandaloneDisplay::draw()
 	{
 		if(frozen == 0)
 		{
-			use_mat = cam->mat.clone();
+			use_mat = cam->reserve_mat.clone();
 		}
 		if(!use_mat.empty()) 
 		{
@@ -74538,7 +77288,7 @@ void	MyWin::SaveVideoSettings()
 		fprintf(fp, "\t\"crop output x\": %d,\n", crop_output_x);
 		fprintf(fp, "\t\"crop output y\": %d,\n", crop_output_y);
 		fprintf(fp, "\t\"timestamp\": %d,\n", timestamp);
-		fprintf(fp, "\t\"timestamp format\": \"%s\",\n", timestamp_format);
+		fprintf(fp, "\t\"timestamp format\": \"%s\",\n", DQ(timestamp_format));
 		fprintf(fp, "\t\"timestamp rr\": %d,\n", timestamp_rr);
 		fprintf(fp, "\t\"timestamp gg\": %d,\n", timestamp_gg);
 		fprintf(fp, "\t\"timestamp bb\": %d,\n", timestamp_bb);
@@ -74796,7 +77546,6 @@ void	follow_mode_cb(Fl_Widget *w, void *v)
 	}
 }
 
-
 void	out_function(char *ptr)
 {
 static int	cnt = 0;
@@ -74828,9 +77577,6 @@ char		buf[8192];
 		{
 			color_nn = 255;
 		}
-		const int col_widths[2] = {250, 0};
-		browser->column_char('\t');
-		browser->column_widths(col_widths);
 		sprintf(buf, "@B%d%s\t %s", color_nn, out1, out2);
 		browser->add(buf);
 		int num = browser->size();
@@ -74845,24 +77591,77 @@ char		buf[8192];
 	}
 }
 
-void	revive_global_log_window_cb(void *v)
+LogWindow::LogWindow(MyWin *win, int split, int in_count) : Fl_Double_Window(1200, 800, "Log")
 {
 void	terminate_global_log_window_cb(Fl_Widget *w, void *v);
 
-	MyWin *win = (MyWin *)v;
-	global_log_window = new Fl_Window(1200, 800, "Log");
-		Fl_Browser *browser = new Fl_Browser(0, 0, 1200, 800);
-		browser->color(BLACK);
-		browser->textcolor(WHITE);
-		browser->textfont(FL_COURIER);
-		browser->column_char('\t');
-		const int col_widths[2] = {250, 0};
-		browser->column_widths(col_widths);
-	global_log_window->end();
-	global_log_window->hide();
-	global_log_window->callback(terminate_global_log_window_cb, win);
+	my_window = win;
+	count = in_count;
+	start_time = 0;
+	progress = 0;
+	Fl_Browser *browser = new Fl_Browser(0, 0, 1200, 800);
+	browser->color(BLACK);
+	browser->textcolor(WHITE);
+	browser->textfont(FL_COURIER);
+	browser->column_char('\t');
+	col_width[0] = split;
+	col_width[1] = 0;
+	browser->column_widths(col_width);
+	end();
+	hide();
+	callback(terminate_global_log_window_cb, win);
+	my_window->mux_test_sudden_stop = 0;
+}
 
-	win->mux_test_sudden_stop = 0;
+void	LogWindow::draw()
+{
+char	buf[256];
+
+	Fl_Double_Window::draw();
+	if((count > 0) && (start_time > 0))
+	{
+		fl_color(BLACK);
+		fl_rectf(10, 10, w() - 20, 20);
+		fl_color(WHITE);
+		fl_rect(10, 10, w() - 20, 20);
+		int dist = (w() - 20) - 4;
+		double use = (double)((double)dist / (double)count) * (double)progress;
+		fl_color(BLUE);
+		fl_rectf(12, 12, (int)use, 16);
+		fl_color(WHITE);
+		time_t now = time(0);
+		time_t elapsed = time(0) - start_time;
+		int hours = elapsed / 3600;
+		int minutes = (elapsed % 3600) / 60;
+		int seconds = elapsed % 60;
+		sprintf(buf, "%d of %d - %02d:%02d:%02d", progress, count, hours, minutes, seconds);
+		fl_font(FL_HELVETICA, 9);
+		fl_draw(buf, 10, 11, w() - 10, 20, FL_ALIGN_CENTER);
+	}
+}
+
+void	LogWindow::SetColumnWidth(int width)
+{
+	col_width[0] = width;
+}
+
+void	LogWindow::SetCount(int in_count)
+{
+	count = in_count;
+	progress = 0;
+	start_time = 0;
+}
+
+void	LogWindow::SetStartTime()
+{
+	start_time = time(0);
+}
+
+void	revive_global_log_window_cb(void *v)
+{
+	MyWin *win = (MyWin *)v;
+	global_log_window = new LogWindow(win, 450, 0);
+	global_log_window->hide();
 }
 
 void	terminate_global_log_window_cb(Fl_Widget *w, void *v)
@@ -74891,6 +77690,11 @@ int		loop;
 			MyFormat *mf = global_my_format[loop];
 			delete mf;
 			global_my_format[loop] = NULL;
+		}
+		win->mux_test_sudden_stop = 0;
+		if(global_log_window != NULL)
+		{
+			global_log_window->SetColumnWidth(450);
 		}
 		global_my_format_cnt = 0;
 		if(global_my_format_cnt == 0)
@@ -75466,7 +78270,7 @@ char	buf[256];
 
 	yp += 25;
 	minimum_fps_slider = new MySlider(my_window, 200, yp, 500, 25, "Minimum FPS");
-	minimum_fps_slider->range(0.01, 60.0);
+	minimum_fps_slider->range(0.01, 120.0);
 	minimum_fps_slider->value(24.0);
 	minimum_fps_slider->step(1.0);
 	minimum_fps_slider->initial_value = 24.0;
@@ -75976,6 +78780,161 @@ int	MiscVideoSettingsWindow::handle(int event)
 }
 
 // SECTION ************************************** CAMERA SETTINGS WINDOW *******************************************************
+
+void	camera_notes_cb(Fl_Widget *w, void *v)
+{
+int loop;
+
+	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
+	MyWin *win = sw->my_window;
+	if(win != NULL)
+	{
+		char *str = (char *)sw->notes->value();
+		if(str != NULL)
+		{
+			if(sw->apply_to_all_button->value())
+			{
+				for(loop = 0;loop < win->source_cnt;loop++)
+				{
+					Camera *cam = win->camera[loop];
+					if(cam != NULL)
+					{
+						if(cam->note != NULL)
+						{
+							free(cam->note);
+							cam->note = NULL;
+						}
+						cam->note = strdup(str);
+					}
+				}
+			}
+			else
+			{
+				Camera *cam = win->DisplayedCamera();
+				if(cam != NULL)
+				{
+					if(cam->note != NULL)
+					{
+						free(cam->note);
+						cam->note = NULL;
+					}
+					cam->note = strdup(str);
+				}
+			}
+		}
+	}
+}
+void	notes_font_size_cb(Fl_Widget *w, void *v)
+{
+int loop;
+
+	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
+	MyWin *win = sw->my_window;
+	if(win != NULL)
+	{
+		if(sw->apply_to_all_button->value())
+		{
+			for(loop = 0;loop < win->source_cnt;loop++)
+			{
+				Camera *cam = win->camera[loop];
+				if(cam != NULL)
+				{
+					char *str = (char *)sw->notes_font_size->value();
+					if(str != NULL)
+					{
+						int nn = atoi(str);
+						if((nn > 3) && (nn < 65))
+						{
+							cam->note_font_size = nn;
+						}
+					}
+				}
+			}
+		}
+		else
+		{
+			Camera *cam = win->DisplayedCamera();
+			if(cam != NULL)
+			{
+				char *str = (char *)sw->notes_font_size->value();
+				if(str != NULL)
+				{
+					int nn = atoi(str);
+					if((nn > 3) && (nn < 65))
+					{
+						cam->note_font_size = nn;
+					}
+				}
+			}
+		}
+	}
+}
+
+void	camera_note_placement_cb(Fl_Widget *w, void *v)
+{
+int loop;
+
+	MyToggleButton *b = (MyToggleButton *)w;
+	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
+	MyWin *win = sw->my_window;
+	if(win != NULL)
+	{
+		if(sw->apply_to_all_button->value())
+		{
+			for(loop = 0;loop < win->source_cnt;loop++)
+			{
+				Camera *cam = win->camera[loop];
+				if(cam != NULL)
+				{
+					if(b->value())
+					{
+						if(b == sw->top_left) cam->note_placement = CAMERA_NOTE_PLACEMENT_TOP_LEFT;
+						else if(b == sw->top_right) cam->note_placement = CAMERA_NOTE_PLACEMENT_TOP_RIGHT;
+						else if(b == sw->bottom_left) cam->note_placement = CAMERA_NOTE_PLACEMENT_BOTTOM_LEFT;
+						else if(b == sw->bottom_right) cam->note_placement = CAMERA_NOTE_PLACEMENT_BOTTOM_RIGHT;
+						else if(b == sw->top_center) cam->note_placement = CAMERA_NOTE_PLACEMENT_TOP_CENTER;
+						else if(b == sw->bottom_center) cam->note_placement = CAMERA_NOTE_PLACEMENT_BOTTOM_CENTER;
+					}
+					else
+					{
+						cam->note_placement = 0;
+					}
+				}
+			}
+		}
+		else
+		{
+			Camera *cam = win->DisplayedCamera();
+			if(cam != NULL)
+			{
+				if(b->value())
+				{
+					if(b == sw->top_left) cam->note_placement = CAMERA_NOTE_PLACEMENT_TOP_LEFT;
+					else if(b == sw->top_right) cam->note_placement = CAMERA_NOTE_PLACEMENT_TOP_RIGHT;
+					else if(b == sw->bottom_left) cam->note_placement = CAMERA_NOTE_PLACEMENT_BOTTOM_LEFT;
+					else if(b == sw->bottom_right) cam->note_placement = CAMERA_NOTE_PLACEMENT_BOTTOM_RIGHT;
+					else if(b == sw->top_center) cam->note_placement = CAMERA_NOTE_PLACEMENT_TOP_CENTER;
+					else if(b == sw->bottom_center) cam->note_placement = CAMERA_NOTE_PLACEMENT_BOTTOM_CENTER;
+				}
+				else
+				{
+					cam->note_placement = 0;
+				}
+			}
+		}
+		for(loop = 0;loop < b->parent()->children();loop++)
+		{
+			MyToggleButton *other = (MyToggleButton *)b->parent()->child(loop);
+			if(other != NULL)
+			{
+				if(other != b)
+				{
+					other->clear();
+				}
+			}
+		}
+	}
+}
 
 void	capture_interval_cb(Fl_Widget *w, void *v)
 {
@@ -76903,7 +79862,74 @@ char	buf[256];
 	retrieve_interval_slider->labelcolor(YELLOW);
 	retrieve_interval_slider->copy_tooltip("How often this camera is sampled at all.");
 	retrieve_interval_slider->callback(retrieve_interval_cb, this);
-	yp += 25;
+	yp += 45;
+
+	notes = new Fl_Multiline_Input(200, yp, 350, 100, "Notes");
+	notes->type(FL_MULTILINE_INPUT);
+	notes->align(FL_ALIGN_LEFT_TOP);
+	notes->wrap(1);
+	notes->box(FL_FRAME_BOX);
+	notes->color(BLACK);
+	notes->labelsize(font_sz + 1);
+	notes->labelcolor(WHITE);
+	notes->textsize(font_sz + 1);
+	notes->textcolor(WHITE);
+	notes->cursor_color(WHITE);
+	notes->tooltip("Text that will appear when this camera is viewed.\nThis text will not record.");
+	if(cam != NULL)
+	{
+		if(cam->note != NULL)
+		{
+			notes->value(cam->note);
+		}
+	}
+	notes->callback(camera_notes_cb, this);
+
+	Fl_Group *note_placement_group = new Fl_Group(560, yp, 140, 100, "Placement");
+	note_placement_group->box(FL_FRAME_BOX);
+	note_placement_group->color(BLACK);
+	note_placement_group->labelcolor(WHITE);
+	note_placement_group->labelsize(font_sz + 1);
+	note_placement_group->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
+	top_left = new MyToggleButton(my_window, 562, yp + 2, 20, 20);
+	top_left->box(FL_FRAME_BOX);
+	top_left->color(BLACK);
+	top_left->value(1);
+	top_left->callback(camera_note_placement_cb, this);
+	top_right = new MyToggleButton(my_window, 700 - 22, yp + 2, 20, 20);
+	top_right->box(FL_FRAME_BOX);
+	top_right->color(BLACK);
+	top_right->callback(camera_note_placement_cb, this);
+	bottom_left = new MyToggleButton(my_window, 562, yp + (100 - 22), 20, 20);
+	bottom_left->box(FL_FRAME_BOX);
+	bottom_left->color(BLACK);
+	bottom_left->callback(camera_note_placement_cb, this);
+	bottom_right = new MyToggleButton(my_window, 700 - 22, yp + (100 - 22), 20, 20);
+	bottom_right->box(FL_FRAME_BOX);
+	bottom_right->color(BLACK);
+	bottom_right->callback(camera_note_placement_cb, this);
+	top_center = new MyToggleButton(my_window, 560 + 60, yp + 2, 20, 20);
+	top_center->box(FL_FRAME_BOX);
+	top_center->color(BLACK);
+	top_center->callback(camera_note_placement_cb, this);
+	bottom_center = new MyToggleButton(my_window, 560 + 60, yp + (100 - 22), 20, 20);
+	bottom_center->box(FL_FRAME_BOX);
+	bottom_center->color(BLACK);
+	bottom_center->callback(camera_note_placement_cb, this);
+	note_placement_group->end();
+	note_placement_group->tooltip("Select where you want the note to appear on the screen");
+	yp += 100;
+	notes_font_size = new Fl_Int_Input(200, yp, 60, 20, "Note Font Size");
+	notes_font_size->box(FL_FRAME_BOX);
+	notes_font_size->color(BLACK);
+	notes_font_size->textcolor(WHITE);
+	notes_font_size->labelsize(font_sz + 1);
+	notes_font_size->textsize(font_sz);
+	notes_font_size->cursor_color(WHITE);
+	notes_font_size->labelcolor(YELLOW);
+	notes_font_size->copy_tooltip("The font size of the note appearing on the screen.");
+	notes_font_size->value("11");
+	notes_font_size->callback(notes_font_size_cb, this);
 
 	yp += 44;
 	apply_to_all_button = new MyToggleButton(my_window, 70, yp, 100, 22, "Apply to All");
@@ -77032,6 +80058,22 @@ char	buf[256];
 			recognition_interval_slider->value(cam->recognize_interval);
 			capture_interval_slider->value(cam->capture_interval);
 			retrieve_interval_slider->value(cam->hot_delay);
+			if(cam->note != NULL)
+			{
+				notes->value(cam->note);
+			}
+			top_left->value(0);
+			top_right->value(0);
+			bottom_left->value(0);
+			bottom_right->value(0);
+			top_center->value(0);
+			bottom_center->value(0);
+			if(cam->note_placement == CAMERA_NOTE_PLACEMENT_TOP_LEFT) top_left->value(1);
+			else if(cam->note_placement == CAMERA_NOTE_PLACEMENT_TOP_RIGHT) top_right->value(1);
+			else if(cam->note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_LEFT) bottom_left->value(1);
+			else if(cam->note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_RIGHT) bottom_right->value(1);
+			else if(cam->note_placement == CAMERA_NOTE_PLACEMENT_TOP_CENTER) top_center->value(1);
+			else if(cam->note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_CENTER) bottom_center->value(1);
 		}
 	}
 }
@@ -77509,14 +80551,14 @@ void	SnapshotSettingWindow::Update()
 	}
 }
 
-// SECTION ************************************** GUI SETTINGS WINDOW *******************************************************
+// SECTION ************************************** UI SETTINGS WINDOW *******************************************************
 
-void	gui_settings_cb(Fl_Widget *w, void *v)
+void	ui_settings_cb(Fl_Widget *w, void *v)
 {
 int		loop;
 char	buf[256];
 
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	gsw->my_window->full_screen = gsw->fullscreen_button->value();
 	gsw->my_window->hide_status = gsw->hide_status_button->value();
 	gsw->my_window->retain_commands = gsw->retain_commands_button->value();
@@ -77582,15 +80624,32 @@ char	buf[256];
 	Fl::set_color(DARK_BLUE, gsw->dark_blue_color_r, gsw->dark_blue_color_g, gsw->dark_blue_color_b, gsw->dark_blue_color_a);
 	Fl::set_color(CYAN, gsw->cyan_color_r, gsw->cyan_color_g, gsw->cyan_color_b, gsw->cyan_color_a);
 
-	char *font_name = "sans";
+	MyWin *win = gsw->my_window;
+	char *font_name = "Sans";
 	Fl_Hold_Browser *hold = (Fl_Hold_Browser *)gsw->font_browser;
 	char *str = (char *)hold->text(hold->value());
 	if(str != NULL)
 	{
+		Fl::set_font(FL_HELVETICA, strdup(str));
 		font_name = str;
-		Fl::set_font(FL_HELVETICA, font_name);
+
+		char tmp_font_name[256];
+		sprintf(tmp_font_name, "%s Bold", str);
+		int bold_num = win->FontIndexByName(tmp_font_name);
+		if(bold_num > 1)
+		{
+			Fl::set_font(FL_HELVETICA | FL_BOLD, strdup(tmp_font_name));
+		}
+		else
+		{
+			Fl::set_font(FL_HELVETICA | FL_BOLD, "Sans Bold");
+		}
 	}
-	MyWin *win = gsw->my_window;
+	else
+	{
+		Fl::set_font(FL_HELVETICA, "Sans");
+		Fl::set_font(FL_HELVETICA | FL_BOLD, "Sans Bold");
+	}
 	win->redraw();
 	for(loop = 0;loop < win->children();loop++)
 	{
@@ -77615,7 +80674,7 @@ char	buf[256];
 		}
 	}
 	gsw->my_window->PlaceButtonGroup(gsw->my_window->button_group_side);
-	FILE *fp = fopen("GUI_settings.json", "w");
+	FILE *fp = fopen("UI_settings.json", "w");
 	if(fp != NULL)
 	{
 		MyWin *win = gsw->my_window;
@@ -77649,21 +80708,15 @@ char	buf[256];
 		{
 			if(gsw->my_window->ptz_window[loop] != NULL)
 			{
-				int xx = gsw->my_window->ptz_window[loop]->x();
-				int yy = 0;
-				if(gsw->my_window->ptz_window[loop]->contracted == 1)
-				{
-					yy = gsw->my_window->ptz_window[loop]->y() - 330;
-				}
-				else
-				{
-					yy = gsw->my_window->ptz_window[loop]->y();
-				}
-				fprintf(fp, "%d,%d", xx, yy);
-				if(loop != nn)
-				{
-					fprintf(fp, ",");
-				}
+				fprintf(fp, "%d,%d", gsw->my_window->ptz_window[loop]->initial_left, gsw->my_window->ptz_window[loop]->initial_bottom);
+			}
+			else
+			{
+				fprintf(fp, "-1,-1");
+			}
+			if(loop < PTZ_WINDOW_LIMIT - 1)
+			{
+				fprintf(fp, ",");
 			}
 		}
 		fprintf(fp, "],\n");
@@ -77691,17 +80744,17 @@ char	buf[256];
 		fprintf(fp, "\t\"color dark blue\": [%d,%d,%d],\n", red, green, blue);
 		Fl::get_color(CYAN, red, green, blue);
 		fprintf(fp, "\t\"color cyan\": [%d,%d,%d],\n", red, green, blue);
-		fprintf(fp, "\t\"font\": \"%s\"\n", font_name);
+		fprintf(fp, "\t\"font\": \"%s\"\n", DQ(font_name));
 		fprintf(fp, "}\n");
 		fclose(fp);
 	}
 	gsw->hide();
 }
 
-void	gui_setting_status_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_status_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = win->status_color_r;
@@ -77719,10 +80772,10 @@ void	gui_setting_status_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_background_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_background_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->background_color_r;
@@ -77740,10 +80793,10 @@ void	gui_setting_background_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_text_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_text_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->text_color_r;
@@ -77761,10 +80814,10 @@ void	gui_setting_text_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_highlight_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_highlight_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->highlight_color_r;
@@ -77782,10 +80835,10 @@ void	gui_setting_highlight_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_gray_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_gray_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->gray_color_r;
@@ -77803,10 +80856,10 @@ void	gui_setting_gray_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_dark_gray_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_dark_gray_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->dark_gray_color_r;
@@ -77824,10 +80877,10 @@ void	gui_setting_dark_gray_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_red_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_red_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->red_color_r;
@@ -77845,10 +80898,10 @@ void	gui_setting_red_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_dark_red_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_dark_red_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->dark_red_color_r;
@@ -77866,10 +80919,10 @@ void	gui_setting_dark_red_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_blue_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_blue_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->blue_color_r;
@@ -77887,10 +80940,10 @@ void	gui_setting_blue_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_dark_blue_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_dark_blue_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->dark_blue_color_r;
@@ -77908,10 +80961,10 @@ void	gui_setting_dark_blue_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	gui_setting_cyan_color_cb(Fl_Widget *w, void *v)
+void	ui_setting_cyan_color_cb(Fl_Widget *w, void *v)
 {
 	MyButton *b = (MyButton *)w;
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	MyWin *win = gsw->my_window;
 
 	int red = gsw->cyan_color_r;
@@ -77935,7 +80988,7 @@ void	generic_cancel_cb(Fl_Widget *w, void *v)
 	win->hide();
 }
 
-void	transparent_interface_cb(Fl_Widget *w, void *v)
+void	transparent_panels_cb(Fl_Widget *w, void *v)
 {
 int	loop;
 
@@ -77943,11 +80996,27 @@ int	loop;
 	MyToggleButton *b = (MyToggleButton *)w;
 	if(b->value() == 1)
 	{
-		win->Transparent(1);
+		win->Transparent(TRANSPARENT_PANELS);
 	}
 	else
 	{
-		win->Transparent(0);
+		win->Opaque(TRANSPARENT_PANELS);
+	}
+}
+
+void	transparent_dialogs_cb(Fl_Widget *w, void *v)
+{
+int	loop;
+
+	MyWin *win = (MyWin *)v;
+	MyToggleButton *b = (MyToggleButton *)w;
+	if(b->value() == 1)
+	{
+		win->Transparent(TRANSPARENT_DIALOGS);
+	}
+	else
+	{
+		win->Opaque(TRANSPARENT_DIALOGS);
 	}
 }
 
@@ -77973,16 +81042,16 @@ int	loop;
 	}
 }
 
-void	GUI_font_sample_cb(Fl_Widget *w, void *v)
+void	UI_font_sample_cb(Fl_Widget *w, void *v)
 {
-	GUI_SettingsWindow *gsw = (GUI_SettingsWindow *)v;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
 	int font = gsw->font_browser->value();
 	font--;
 	gsw->sample->textfont(font);
 	gsw->sample->redraw();
 }
 
-GUI_SettingsWindow::GUI_SettingsWindow(MyWin *in_win) : Dialog(in_win, 400, 100, 320, 905, "GUI Settings")
+UI_SettingsWindow::UI_SettingsWindow(MyWin *in_win) : Dialog(in_win, 400, 100, 320, 905, "UI Settings")
 {
 int	loop;
 
@@ -78092,14 +81161,29 @@ int	loop;
 	use_tooltips_button->align(FL_ALIGN_CENTER);
 	use_tooltips_button->value(my_window->use_tooltips);
 	yp += 26;
-	transparent_interface_button = new MyLightButton(my_window, 10, yp, 160, 20, "Transparent Interface");
-	transparent_interface_button->box(FL_FRAME_BOX);
-	transparent_interface_button->color(BLACK);
-	transparent_interface_button->labelcolor(YELLOW);
-	transparent_interface_button->labelsize(9);
-	transparent_interface_button->align(FL_ALIGN_CENTER);
-	transparent_interface_button->callback(transparent_interface_cb, my_window);
-	transparent_interface_button->value(my_window->transparent_interface);
+	transparent_panels_button = new MyLightButton(my_window, 10, yp, 160, 20, "Transparent Panels");
+	transparent_panels_button->box(FL_FRAME_BOX);
+	transparent_panels_button->color(BLACK);
+	transparent_panels_button->labelcolor(YELLOW);
+	transparent_panels_button->labelsize(9);
+	transparent_panels_button->align(FL_ALIGN_CENTER);
+	transparent_panels_button->callback(transparent_panels_cb, my_window);
+	if((my_window->transparent_interface & TRANSPARENT_PANELS) == TRANSPARENT_PANELS)
+	{
+		transparent_panels_button->value(1);
+	}
+	yp += 26;
+	transparent_dialogs_button = new MyLightButton(my_window, 10, yp, 160, 20, "Transparent Dialogs");
+	transparent_dialogs_button->box(FL_FRAME_BOX);
+	transparent_dialogs_button->color(BLACK);
+	transparent_dialogs_button->labelcolor(YELLOW);
+	transparent_dialogs_button->labelsize(9);
+	transparent_dialogs_button->align(FL_ALIGN_CENTER);
+	transparent_dialogs_button->callback(transparent_dialogs_cb, my_window);
+	if((my_window->transparent_interface & TRANSPARENT_DIALOGS) == TRANSPARENT_DIALOGS)
+	{
+		transparent_dialogs_button->value(1);
+	}
 	yp += 26;
 	reverse_panels_button = new MyLightButton(my_window, 10, yp, 160, 20, "Reverse Panels");
 	reverse_panels_button->box(FL_FRAME_BOX);
@@ -78110,129 +81194,129 @@ int	loop;
 	reverse_panels_button->value(my_window->button_group_side);
 	reverse_panels_button->callback(reverse_initial_panel_positions_cb, my_window);
 	yp += 26;
-	status_color_box = new Fl_Box(10, yp, 160, 20, "Status Color");
-	status_color_box->box(FL_FRAME_BOX);
+	status_color_box = new Fl_Box(10, yp, 135, 20, "Status Color");
+	status_color_box->box(FL_FLAT_BOX);
 	status_color_box->color(BLACK);
-	status_color_box->labelcolor(YELLOW);
+	status_color_box->labelcolor(WHITE);
 	status_color_box->labelsize(9);
-	status_color_box->align(FL_ALIGN_CENTER);
-	status_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	status_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	status_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	status_color_button->box(FL_FRAME_BOX);
 	status_color_button->color(fl_rgb_color(my_window->status_color_r, my_window->status_color_g, my_window->status_color_b));
-	status_color_button->callback(gui_setting_status_color_cb, this);
+	status_color_button->callback(ui_setting_status_color_cb, this);
 	yp += 22;
-	background_color_box = new Fl_Box(10, yp, 160, 20, "Background Color");
-	background_color_box->box(FL_FRAME_BOX);
+	background_color_box = new Fl_Box(10, yp, 135, 20, "Background Color");
+	background_color_box->box(FL_FLAT_BOX);
 	background_color_box->color(BLACK);
-	background_color_box->labelcolor(YELLOW);
+	background_color_box->labelcolor(WHITE);
 	background_color_box->labelsize(9);
-	background_color_box->align(FL_ALIGN_CENTER);
-	background_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	background_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	background_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	background_color_button->box(FL_FRAME_BOX);
 	background_color_button->color(fl_rgb_color(background_color_r, background_color_g, background_color_b));
-	background_color_button->callback(gui_setting_background_color_cb, this);
+	background_color_button->callback(ui_setting_background_color_cb, this);
 	yp += 22;
-	text_color_box = new Fl_Box(10, yp, 160, 20, "Text Color");
-	text_color_box->box(FL_FRAME_BOX);
+	text_color_box = new Fl_Box(10, yp, 135, 20, "Text Color");
+	text_color_box->box(FL_FLAT_BOX);
 	text_color_box->color(BLACK);
-	text_color_box->labelcolor(YELLOW);
+	text_color_box->labelcolor(WHITE);
 	text_color_box->labelsize(9);
-	text_color_box->align(FL_ALIGN_CENTER);
-	text_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	text_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	text_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	text_color_button->box(FL_FRAME_BOX);
 	text_color_button->color(fl_rgb_color(text_color_r, text_color_g, text_color_b));
-	text_color_button->callback(gui_setting_text_color_cb, this);
+	text_color_button->callback(ui_setting_text_color_cb, this);
 	yp += 22;
-	highlight_color_box = new Fl_Box(10, yp, 160, 20, "Highlight Color");
-	highlight_color_box->box(FL_FRAME_BOX);
+	highlight_color_box = new Fl_Box(10, yp, 135, 20, "Highlight Color");
+	highlight_color_box->box(FL_FLAT_BOX);
 	highlight_color_box->color(BLACK);
-	highlight_color_box->labelcolor(YELLOW);
+	highlight_color_box->labelcolor(WHITE);
 	highlight_color_box->labelsize(9);
-	highlight_color_box->align(FL_ALIGN_CENTER);
-	highlight_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	highlight_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	highlight_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	highlight_color_button->box(FL_FRAME_BOX);
 	highlight_color_button->color(fl_rgb_color(highlight_color_r, highlight_color_g, highlight_color_b));
-	highlight_color_button->callback(gui_setting_highlight_color_cb, this);
+	highlight_color_button->callback(ui_setting_highlight_color_cb, this);
 	yp += 22;
-	gray_color_box = new Fl_Box(10, yp, 160, 20, "Gray Color");
-	gray_color_box->box(FL_FRAME_BOX);
+	gray_color_box = new Fl_Box(10, yp, 135, 20, "Gray Color");
+	gray_color_box->box(FL_FLAT_BOX);
 	gray_color_box->color(BLACK);
-	gray_color_box->labelcolor(YELLOW);
+	gray_color_box->labelcolor(WHITE);
 	gray_color_box->labelsize(9);
-	gray_color_box->align(FL_ALIGN_CENTER);
-	gray_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	gray_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	gray_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	gray_color_button->box(FL_FRAME_BOX);
 	gray_color_button->color(fl_rgb_color(gray_color_r, gray_color_g, gray_color_b));
-	gray_color_button->callback(gui_setting_gray_color_cb, this);
+	gray_color_button->callback(ui_setting_gray_color_cb, this);
 	yp += 22;
-	dark_gray_color_box = new Fl_Box(10, yp, 160, 20, "Dark Gray Color");
-	dark_gray_color_box->box(FL_FRAME_BOX);
+	dark_gray_color_box = new Fl_Box(10, yp, 135, 20, "Dark Gray Color");
+	dark_gray_color_box->box(FL_FLAT_BOX);
 	dark_gray_color_box->color(BLACK);
-	dark_gray_color_box->labelcolor(YELLOW);
+	dark_gray_color_box->labelcolor(WHITE);
 	dark_gray_color_box->labelsize(9);
-	dark_gray_color_box->align(FL_ALIGN_CENTER);
-	dark_gray_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	dark_gray_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	dark_gray_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	dark_gray_color_button->box(FL_FRAME_BOX);
 	dark_gray_color_button->color(fl_rgb_color(dark_gray_color_r, dark_gray_color_g, dark_gray_color_b));
-	dark_gray_color_button->callback(gui_setting_dark_gray_color_cb, this);
+	dark_gray_color_button->callback(ui_setting_dark_gray_color_cb, this);
 	yp += 22;
-	red_color_box = new Fl_Box(10, yp, 160, 20, "Red Color");
-	red_color_box->box(FL_FRAME_BOX);
+	red_color_box = new Fl_Box(10, yp, 135, 20, "Red Color");
+	red_color_box->box(FL_FLAT_BOX);
 	red_color_box->color(BLACK);
-	red_color_box->labelcolor(YELLOW);
+	red_color_box->labelcolor(WHITE);
 	red_color_box->labelsize(9);
-	red_color_box->align(FL_ALIGN_CENTER);
-	red_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	red_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	red_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	red_color_button->box(FL_FRAME_BOX);
 	red_color_button->color(fl_rgb_color(red_color_r, red_color_g, red_color_b));
-	red_color_button->callback(gui_setting_red_color_cb, this);
+	red_color_button->callback(ui_setting_red_color_cb, this);
 	yp += 22;
-	dark_red_color_box = new Fl_Box(10, yp, 160, 20, "Dark Red Color");
-	dark_red_color_box->box(FL_FRAME_BOX);
+	dark_red_color_box = new Fl_Box(10, yp, 135, 20, "Dark Red Color");
+	dark_red_color_box->box(FL_FLAT_BOX);
 	dark_red_color_box->color(BLACK);
-	dark_red_color_box->labelcolor(YELLOW);
+	dark_red_color_box->labelcolor(WHITE);
 	dark_red_color_box->labelsize(9);
-	dark_red_color_box->align(FL_ALIGN_CENTER);
-	dark_red_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	dark_red_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	dark_red_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	dark_red_color_button->box(FL_FRAME_BOX);
 	dark_red_color_button->color(fl_rgb_color(dark_red_color_r, dark_red_color_g, dark_red_color_b));
-	dark_red_color_button->callback(gui_setting_dark_red_color_cb, this);
+	dark_red_color_button->callback(ui_setting_dark_red_color_cb, this);
 	yp += 22;
-	blue_color_box = new Fl_Box(10, yp, 160, 20, "Blue Color");
-	blue_color_box->box(FL_FRAME_BOX);
+	blue_color_box = new Fl_Box(10, yp, 135, 20, "Blue Color");
+	blue_color_box->box(FL_FLAT_BOX);
 	blue_color_box->color(BLACK);
-	blue_color_box->labelcolor(YELLOW);
+	blue_color_box->labelcolor(WHITE);
 	blue_color_box->labelsize(9);
-	blue_color_box->align(FL_ALIGN_CENTER);
-	blue_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	blue_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	blue_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	blue_color_button->box(FL_FRAME_BOX);
 	blue_color_button->color(fl_rgb_color(blue_color_r, blue_color_g, blue_color_b));
-	blue_color_button->callback(gui_setting_blue_color_cb, this);
+	blue_color_button->callback(ui_setting_blue_color_cb, this);
 	yp += 22;
-	dark_blue_color_box = new Fl_Box(10, yp, 160, 20, "Dark Blue Color");
-	dark_blue_color_box->box(FL_FRAME_BOX);
+	dark_blue_color_box = new Fl_Box(10, yp, 135, 20, "Dark Blue Color");
+	dark_blue_color_box->box(FL_FLAT_BOX);
 	dark_blue_color_box->color(BLACK);
-	dark_blue_color_box->labelcolor(YELLOW);
+	dark_blue_color_box->labelcolor(WHITE);
 	dark_blue_color_box->labelsize(9);
-	dark_blue_color_box->align(FL_ALIGN_CENTER);
-	dark_blue_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	dark_blue_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	dark_blue_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	dark_blue_color_button->box(FL_FRAME_BOX);
 	dark_blue_color_button->color(fl_rgb_color(dark_blue_color_r, dark_blue_color_g, dark_blue_color_b));
-	dark_blue_color_button->callback(gui_setting_dark_blue_color_cb, this);
+	dark_blue_color_button->callback(ui_setting_dark_blue_color_cb, this);
 	yp += 22;
-	cyan_color_box = new Fl_Box(10, yp, 160, 20, "Cyan Color");
-	cyan_color_box->box(FL_FRAME_BOX);
+	cyan_color_box = new Fl_Box(10, yp, 135, 20, "Cyan Color");
+	cyan_color_box->box(FL_FLAT_BOX);
 	cyan_color_box->color(BLACK);
-	cyan_color_box->labelcolor(YELLOW);
+	cyan_color_box->labelcolor(WHITE);
 	cyan_color_box->labelsize(9);
-	cyan_color_box->align(FL_ALIGN_CENTER);
-	cyan_color_button = new MyButton(my_window, 180, yp, 20, 20);
+	cyan_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	cyan_color_button = new MyButton(my_window, 150, yp, 20, 20);
 	cyan_color_button->box(FL_FRAME_BOX);
 	cyan_color_button->color(fl_rgb_color(cyan_color_r, cyan_color_g, cyan_color_b));
-	cyan_color_button->callback(gui_setting_cyan_color_cb, this);
+	cyan_color_button->callback(ui_setting_cyan_color_cb, this);
 	yp += 42;
 
-	sample = new MyInput(60, yp, 245, 20, "Sample");
+	sample = new MyInput(my_window, 60, yp, 245, 20, "Sample");
 	sample->textsize(11);
 	sample->labelsize(9);
 	sample->box(FL_FRAME_BOX);
@@ -78251,13 +81335,16 @@ int	loop;
 	font_browser->selection_color(YELLOW);
 	font_browser->scrollbar.color(BLACK);
 	font_browser->align(FL_ALIGN_TOP);
-	font_browser->callback(GUI_font_sample_cb, this);
+	font_browser->callback(UI_font_sample_cb, this);
 
 	int nn = my_window->number_of_fonts;
 	for(loop = 0;loop < nn;loop++)
 	{
 		char *str = (char *)Fl::get_font_name(loop);
-		font_browser->add(str);
+		if(str != NULL)
+		{
+			font_browser->add(str);
+		}
 	}
 	font_browser->select(1);
 	yp += 184;
@@ -78270,7 +81357,7 @@ int	loop;
 	accept->labelcolor(YELLOW);
 	accept->labelsize(9);
 	accept->align(FL_ALIGN_CENTER);
-	accept->callback(gui_settings_cb, this);
+	accept->callback(ui_settings_cb, this);
 	yp += 22;
 	MyButton *cancel = new MyButton(my_window, 180, yp, 60, 20, "Cancel");
 	cancel->box(FL_FRAME_BOX);
@@ -78284,7 +81371,7 @@ int	loop;
 	resize(x(), y(), w(), bottom);
 }
 
-GUI_SettingsWindow::~GUI_SettingsWindow()
+UI_SettingsWindow::~UI_SettingsWindow()
 {
 }
 
@@ -78367,7 +81454,7 @@ int	loop;
 	local_blue = in_fac->blue;
 	local_alpha = in_fac->alpha;
 
-	sample = new MyInput(60, yp, 245, 20, "Sample");
+	sample = new MyInput(my_window, 60, yp, 245, 20, "Sample");
 	sample->textsize(11);
 	sample->labelsize(9);
 	sample->box(FL_FRAME_BOX);
@@ -79579,7 +82666,7 @@ int	loop, inner;
 
 	int cnt = my_window->PopulateCameraCaps();
 
-	SimpleScroll *scroll = new SimpleScroll(my_window, 2, new_yp + 20, w() - 5, 180 - (new_yp + 20));
+	SimpleScroll *scroll = new SimpleScroll(my_window, this, 2, new_yp + 20, w() - 5, 180 - (new_yp + 20));
 	int y_cnt = new_yp + 25;
 	for(loop = 0;loop < cnt;loop++)
 	{
@@ -80198,7 +83285,7 @@ int	PythonButton::handle(int event)
 PythonButtonWindow::PythonButtonWindow(MyWin *in_win) : Dialog(in_win, 220, 400, "Python Buttons")
 {
 	my_window = in_win;
-	scroll = new SimpleScroll(my_window, 2, 20, w() - 5, h() - 20);
+	scroll = new SimpleScroll(my_window, this, 2, 20, w() - 5, h() - 20);
 	pack = new Fl_Pack(scroll->x(), scroll->y(), scroll->w(), 0);
 	pack->box(FL_NO_BOX);
 	pack->color(WHITE);
@@ -80317,7 +83404,7 @@ CreatePythonButtonWindow::CreatePythonButtonWindow(MyWin *in_win) : Dialog(in_wi
 	edit_button = NULL;
 
 	int yp = 30;
-	button_label = new MyInput(60, yp, 260, 20, "Label");
+	button_label = new MyInput(my_window, 60, yp, 260, 20, "Label");
 	button_label->textsize(11);
 	button_label->labelsize(9);
 	button_label->box(FL_FRAME_BOX);
@@ -80327,7 +83414,7 @@ CreatePythonButtonWindow::CreatePythonButtonWindow(MyWin *in_win) : Dialog(in_wi
 	button_label->copy_tooltip("Set the label for the new button");
 	yp += 22;
 
-	filename = new MyInput(60, yp, 260, 20, "File");
+	filename = new MyInput(my_window, 60, yp, 260, 20, "File");
 	filename->textsize(11);
 	filename->labelsize(9);
 	filename->box(FL_FRAME_BOX);
@@ -80345,7 +83432,7 @@ CreatePythonButtonWindow::CreatePythonButtonWindow(MyWin *in_win) : Dialog(in_wi
 	file_button->callback(python_button_file_cb, this);
 	yp += 22;
 
-	function_name = new MyInput(60, yp, 260, 20, "Entry");
+	function_name = new MyInput(my_window, 60, yp, 260, 20, "Entry");
 	function_name->textsize(11);
 	function_name->labelsize(9);
 	function_name->box(FL_FRAME_BOX);
@@ -80355,7 +83442,7 @@ CreatePythonButtonWindow::CreatePythonButtonWindow(MyWin *in_win) : Dialog(in_wi
 	function_name->copy_tooltip("Name of the entry function");
 	yp += 22;
 
-	frame_cnt = new MyInput(60, yp, 60, 20, "Frames");
+	frame_cnt = new MyInput(my_window, 60, yp, 60, 20, "Frames");
 	frame_cnt->textsize(11);
 	frame_cnt->labelsize(9);
 	frame_cnt->box(FL_FRAME_BOX);
@@ -82881,6 +85968,7 @@ int	inner;
 										{
 											cam->ptz_lock_interface = nn;
 											ptz_win->bound_camera = cam;
+											strcpy(ptz_win->bound_camera_alias, cam->alias);
 											ptz_win->ptz_bound_name_box->value(cam->alias);
 										}
 									}
@@ -82920,7 +86008,7 @@ NewPTZWindow::NewPTZWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, h
 {
 	my_window = in_win;
 	int yp = 30;
-	alias = new MyInput(60, yp, 245, 20, "Alias");
+	alias = new MyInput(my_window, 60, yp, 245, 20, "Alias");
 	alias->textsize(11);
 	alias->labelsize(9);
 	alias->box(FL_FRAME_BOX);
@@ -82929,7 +86017,7 @@ NewPTZWindow::NewPTZWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, h
 	alias->value("");
 	alias->copy_tooltip("Set the alias for this PTZ window");
 	yp += 22;
-	path = new MyInput(60, yp, 245, 20, "Path");
+	path = new MyInput(my_window, 60, yp, 245, 20, "Path");
 	path->textsize(11);
 	path->labelsize(9);
 	path->box(FL_FRAME_BOX);
@@ -83158,7 +86246,7 @@ int	loop;
 	vertical_offset = new_yp;
 	box(FL_FLAT_BOX);
 
-	scroll = new SimpleScroll(my_window, 5, new_yp, w() - 10, h() - 40);
+	scroll = new SimpleScroll(my_window, this, 5, new_yp, w() - 10, h() - 40);
 	scroll->box(FL_FLAT_BOX);
 	scroll->color(BLACK);
 	scroll->end();
@@ -83228,7 +86316,7 @@ int	loop;
 		name_input[loop] = NULL;
 		path_button[loop] = NULL;
 	}
-	scroll = new SimpleScroll(my_window, 10, 10 + new_yp, w() - 20, 450);
+	scroll = new SimpleScroll(my_window, this, 10, 10 + new_yp, w() - 20, 450);
 	scroll->box(FL_FRAME_BOX);
 	scroll->color(DARK_GRAY);
 	scroll->end();
@@ -83426,8 +86514,8 @@ int	loop;
 			{
 				if((strlen(name[loop]) > 0) && (strlen(filename[loop]) > 0))
 				{
-					fprintf(fp, "\"%s\",", name[loop]);
-					fprintf(fp, "\"%s\"", filename[loop]);
+					fprintf(fp, "\"%s\",", DQ(name[loop]));
+					fprintf(fp, "\"%s\"", DQ(filename[loop]));
 					if(loop != nn)
 					{
 						fprintf(fp, ",\n");
@@ -83450,46 +86538,49 @@ int	loop;
 
 	int yp = 0;
 	int nn = number_of_entries;
-	if(my_window->audio_library_list_button != NULL)
+	if(nn > 0)
 	{
-		HoverMenu *hover_win = NULL;
-		if(my_window->audio_library_list_button->hover_menu != NULL)
+		if(my_window->audio_library_list_button != NULL)
 		{
-			my_window->audio_library_list_button->hover_menu->clear();
-			hover_win = my_window->audio_library_list_button->hover_menu;
-		}
-		else
-		{
-			hover_win = new HoverMenu(my_window, 80, 120);
-			hover_win->color(WHITE);
-			hover_win->box(FL_FLAT_BOX);
-			hover_win->end();
-			hover_win->hide();
-			my_window->audio_library_list_button->AttachHoverMenu(hover_win);
-			my_window->add(hover_win);
-		}
-		for(loop = 0;loop < nn;loop++)
-		{
-			char *str = (char *)name[loop];
-			if(str != NULL)
+			HoverMenu *hover_win = NULL;
+			if(my_window->audio_library_list_button->hover_menu != NULL)
 			{
-				if(strlen(str) > 0)
+				my_window->audio_library_list_button->hover_menu->clear();
+				hover_win = my_window->audio_library_list_button->hover_menu;
+			}
+			else
+			{
+				hover_win = new HoverMenu(my_window, 80, 120);
+				hover_win->color(WHITE);
+				hover_win->box(FL_FLAT_BOX);
+				hover_win->end();
+				hover_win->hide();
+				my_window->audio_library_list_button->AttachHoverMenu(hover_win);
+				my_window->add(hover_win);
+			}
+			for(loop = 0;loop < nn;loop++)
+			{
+				char *str = (char *)name[loop];
+				if(str != NULL)
 				{
-					PlayAudioButton *b = new PlayAudioButton(my_window, 0, yp, hover_win->w(), 20, str);
-					b->color(DARK_GRAY);
-					b->box(FL_FLAT_BOX);
-					b->labelcolor(YELLOW);
-					b->labelsize(9);
-					b->align(FL_ALIGN_INSIDE | FL_ALIGN_LEFT);
-					b->copy_tooltip("Play this audio file from the library.");
-					b->path = filename[loop];
-					b->callback(audio_library_list_play_cb, this);
-					hover_win->add(b);
-					yp += 20;
+					if(strlen(str) > 0)
+					{
+						PlayAudioButton *b = new PlayAudioButton(my_window, 0, yp, hover_win->w(), 20, str);
+						b->color(DARK_GRAY);
+						b->box(FL_FLAT_BOX);
+						b->labelcolor(YELLOW);
+						b->labelsize(9);
+						b->align(FL_ALIGN_INSIDE | FL_ALIGN_LEFT);
+						b->copy_tooltip("Play this audio file from the library.");
+						b->path = filename[loop];
+						b->callback(audio_library_list_play_cb, this);
+						hover_win->add(b);
+						yp += 20;
+					}
 				}
 			}
+			hover_win->resize(hover_win->x(), hover_win->y(), hover_win->w(), yp);
 		}
-		hover_win->resize(hover_win->x(), hover_win->y(), hover_win->w(), yp);
 	}
 }
 
@@ -83660,7 +86751,10 @@ void	show_help()
 	printf("# [adjust_recognition_threshold=0.5]\n");
 	printf("# [adjust_recognition_interval=10.0]\n");
 	printf("# [adjust_capture_interval=0.1]\n");
-	printf("# [adjust_retrieve_interval=10000.0]\n\n");
+	printf("# [adjust_retrieve_interval=10000.0]\n");
+	printf("# [note=\"This is a note that appears but does not record\"]\n");
+	printf("# [note_placement=2] ; from 1 to 6, clockwise from the top left corner\n"); 
+	printf("# [note_font_size=16] ; from 4 to 64\n\n");
 	printf("# Specify an audio input device\n");
 	printf("dvptz --audio_source=alsa_input.usb-audio-technica____AT2020_USB-00.analog-stereo\n\n");
 	printf("# Use an IP camera at a RTSP URL with login and password\n");
@@ -83732,9 +86826,35 @@ void	show_help()
 	printf("# Blend automatically between cuts when editing with the previewer.\n");
 	printf("# Also fades in and out from black at the beginning and end.\n");
 	printf("dvptz --transition=blend\n\n");
-	printf("# Allows for PTZ camera control using VISCA over the specified serial port. A colon following the path\n");
-	printf("# followed by a 1, indicates that this interface does not reply.\n");
-	printf("dvptz --ptz=/dev/ttyUSB0:1\n\n");
+	printf("# Allows for PTZ camera control using VISCA over the specified serial port.\n");
+	printf("dvptz --ptz=/dev/ttyUSB0\n\n");
+	printf("# Allows for PTZ camera control using VISCA at a TCP/IP address.\n");
+	printf("dvptz --ptz=tcp://192.168.0.146:1259\n\n");
+	printf("# Allows for PTZ camera control using VISCA at an UDP/IP address.\n");
+	printf("dvptz --ptz=udp://192.168.0.100:5238\n\n");
+	printf("# Allows for PTZ camera control using VISCA at a TCP/IP address, prefering NDI control\n");
+	printf("# over visca, aliasing the ptz window as \"BZBGear\", and locking and binding this PTZ\n");
+	printf("# instance to camera also aliased as \"BZBGear. This command also turns on auto-exposure.\n");
+	printf("# and click to navigate.\n");
+	printf("dvptz --ptz=tcp://192.168.0.146:1259[alias=\"BZBGear\"][lock=\"BZBGear\"][bind=\"BZBGear\"][auto_exposure][click_pt]\n\n");
+	printf("# There are a few options that can follow a --ptz= command:\n");
+	printf("# --ptz=udp://<ip> | tcp://<ip> | /path/to/serial_device\n");
+	printf("# [lock <camera #>][lock=camera_alias]\t// Locks this PTZ window to a specific camera by number or camera alias\n");
+	printf("# [bind=camera_alias]\t// By camera alias, binds a camera to this PTZ window\n");
+	printf("# [alias=ptz_alias]\t// Sets the alias for this PTZ Window\n");
+	printf("# [position=<position #>]\t// Set the position of the is PTZ window on the screen\n");
+	printf("# [camera_number=<visca_camera_number>]\t// Sets which VISCA number camera this PTZ window is controlling\n");
+	printf("# [ndi] | [v4l]\t// Tells dvptz to prefer NDI or V4L over VISCA for this PTZ instance\n");
+	printf("# [auto_focus]\t// Turns on auto-focus\n");
+	printf("# [auto_exposure]\t// Turns on auto-exposure\n");
+	printf("# [accel]\t// Turns on acceleration and deceleration while panning and tilting\n");
+	printf("# [click_pt]\t// Turns on click on display to aim panning and tilting\n");
+	printf("# [digital_zoom]\t// Turns on digital zooming\n");
+	printf("# [soft_memory]\t// Use the computer's memory for preset camera positions\n");
+	printf("# [backlight]\t// Turns on backlight compensation\n");
+	printf("# [follow]\t// Turns on following mode\n");
+	printf("# [reverse_h]\t// Reverse tilting (for cameras hung upside down)\n");
+	printf("# [reverse_v]\t// Reverse panning (for cameras hung upside down)\n\n");
 	printf("# Reset PTZ cameras to home position on launch.\n");
 	printf("dvptz --ptz_home.\n\n");
 	printf("# Initialize object detection. Without this object detection is not offered.\n");
@@ -83788,7 +86908,7 @@ void	show_help()
 	printf("# Disregard settings when starting, using defaults and command line arguments instead.\n");
 	printf("dvptz --disregard_settings\n\n");
 	printf("# Disregard user interface settings when starting, using defaults and command line arguments instead.\n");
-	printf("dvptz --disregard_gui_settings\n\n");
+	printf("dvptz --disregard_ui_settings\n\n");
 	printf("# Cause the primary interface elements to have a transparent background.\n");
 	printf("dvptz --transparent_interface\n\n");
 	printf("# When scaling input images to output, keep aspect ratio and border excess.\n");
@@ -83807,14 +86927,14 @@ void	show_help()
 	printf("dvptz --filter_plugin=filter_name\n\n");
 	printf("# Add a screen capture plugin library file to be searched.\n");
 	printf("dvptz --capture_plugin_file=filename.so\n\n");
-	printf("# Force GUI elements to persist on the screen rather than appearing when the mouse approaches.\n");
+	printf("# Force UI elements to persist on the screen rather than appearing when the mouse approaches.\n");
 	printf("dvptz --retain_commands\n");
 	printf("dvptz --retain_cameras\n");
 	printf("dvptz --retain_audio\n");
 	printf("dvptz --retain_ptz\n\n");
-	printf("# Force all GUI elements to persist on the screen rather than appearing when the mouse approaches.\n");
+	printf("# Force all UI elements to persist on the screen rather than appearing when the mouse approaches.\n");
 	printf("dvptz --lock_panels\n\n");
-	printf("# Animate (slide) the GUI elements when the mouse approaches.\n");
+	printf("# Animate (slide) the UI elements when the mouse approaches.\n");
 	printf("dvptz --animate_panels\n\n");
 	printf("# Do not allow the user to change directories in the file selection dialog.\n");
 	printf("dvptz --exclude_directories\n\n");
@@ -83829,12 +86949,16 @@ void	show_help()
 	printf("# Do not load the last saved setup when starting.\n");
 	printf("dvptz --no_load_state\n\n");
 	printf("# Force the loading of a encoding summary file.\n");
-	printf("dvptz --encode_summary_file=./EncodeSummaries/resolve.json\n\n");
+	printf("dvptz --encode_summary_file=EncodeSummaries/resolve.json\n\n");
 	printf("# Print initialization messages to stderr.\n");
 	printf("dvptz --use_stderr\n\n");
+	printf("# Enter kiosk mode (Warning: This will make it difficult to leave the program).\n");
+	printf("dvptz --kiosk\n\n");
+	printf("# Use a USB joystick for PTZ control.\n");
+	printf("dvptz --joystick\n\n");
 }
 
-void	parse_ptz_source_string(char *in_path, char *path, char *alias, char *lock_alias, char *bind_alias, int& lock_number, int& prefer_ndi_ptz, int& prefer_v4l, int& auto_focus, int& auto_exposure, int& accelerate, int& click_pt, int& digital_zoom, int& soft_memory, int& backlight, int& follow, int& reverse_h, int& reverse_v, int& start_position)
+void	parse_ptz_source_string(char *in_path, char *path, char *alias, char *lock_alias, char *bind_alias, int& lock_number, int& prefer_ndi_ptz, int& prefer_v4l, int& auto_focus, int& auto_exposure, int& accelerate, int& click_pt, int& digital_zoom, int& soft_memory, int& backlight, int& follow, int& reverse_h, int& reverse_v, int& start_position, int& initial_camera)
 {
 char tmp[4092];
 
@@ -83853,6 +86977,7 @@ char tmp[4092];
 	reverse_v = 0;
 	lock_number = 0;
 	start_position = -1;
+	initial_camera = 0;
 	strcpy(lock_alias, "");
 	strcpy(bind_alias, "");
 	strcpy(alias, "");
@@ -83944,6 +87069,22 @@ char tmp[4092];
 				*cp = '\0';
 			}
 			start_position = atoi(cp2);
+			cp++;
+		}
+		else if(strncmp(cp, "[camera_number=", strlen("[camera_number=")) == 0)
+		{
+			*cp = '\0';
+			cp += strlen("[camera_number=");
+			char *cp2 = cp;
+			while((*cp != '\0') && (*cp != ']'))
+			{
+				cp++;
+			}
+			if(*cp == ']')
+			{
+				*cp = '\0';
+			}
+			initial_camera = atoi(cp2);
 			cp++;
 		}
 		else if(strncmp(cp, "[ndi]", strlen("[ndi]")) == 0)
@@ -84086,6 +87227,7 @@ char		local_buf[32768];
 	int	use_ptz_reverse_h[NUMBER_OF_INTERFACES];
 	int	use_ptz_reverse_v[NUMBER_OF_INTERFACES];
 	int	use_ptz_start_position[NUMBER_OF_INTERFACES];
+	int	use_ptz_initial_camera[NUMBER_OF_INTERFACES];
 	char *use_jpeg_streaming = NULL;
 	int use_streaming = 0;
 	char *use_stream_url = NULL;
@@ -84114,6 +87256,7 @@ char		local_buf[32768];
 		use_ptz_reverse_h[loop] = 0;
 		use_ptz_reverse_v[loop] = 0;
 		use_ptz_start_position[loop] = -1;
+		use_ptz_initial_camera[loop] = 0;
 	}
 	int use_ptz_device_path_cnt = 0;
 	char new_mux_format[256];
@@ -84171,6 +87314,7 @@ char		local_buf[32768];
 	int use_fast_start_record = 0;
 	int use_threaded_object_recognition = 0;
 	int use_tiled_object_recognition = 0;
+	int use_hide_menu = 0;
 	strcpy(use_encode_summary_file, "");
 	start_win->Update("Parsing Command Line Arguments...");
 	if(argc > 1)
@@ -84214,13 +87358,11 @@ char		local_buf[32768];
 				{
 					new_width = atoi(argv[loop] + strlen("--width="));
 					new_output_width = new_width;
-					new_display_width = new_width;
 				}
 				else if(strncmp(argv[loop], "--height=", strlen("--height=")) == 0)
 				{
 					new_height = atoi(argv[loop] + strlen("--height="));
 					new_output_height = new_height;
-					new_display_height = new_height;
 				}
 				else if(strncmp(argv[loop], "--output_width=", strlen("--output_width=")) == 0)
 				{
@@ -84426,6 +87568,7 @@ char		local_buf[32768];
 						int reverse_h = 0;
 						int reverse_v = 0;
 						int start_position = -1;
+						int initial_camera = 0;
 						parse_ptz_source_string(argv[loop]
 							, resulting_path
 							, alias, lock_alias
@@ -84443,7 +87586,8 @@ char		local_buf[32768];
 							, follow
 							, reverse_h
 							, reverse_v
-							, start_position);
+							, start_position
+							, initial_camera);
 						sprintf(local_buf, "Testing PTZ %s", resulting_path);
 						start_win->Update(local_buf);
 						int rr = TestPTZPort(resulting_path);
@@ -84466,6 +87610,7 @@ char		local_buf[32768];
 							use_ptz_reverse_h[use_ptz_device_path_cnt] = reverse_h;
 							use_ptz_reverse_v[use_ptz_device_path_cnt] = reverse_v;
 							use_ptz_start_position[use_ptz_device_path_cnt] = start_position;
+							use_ptz_initial_camera[use_ptz_device_path_cnt] = initial_camera;
 							use_ptz_device_path_cnt++;
 							sprintf(local_buf, "PTZ Found at %s", resulting_path);
 							start_win->Update(local_buf);
@@ -84632,7 +87777,7 @@ char		local_buf[32768];
 				{
 					use_disregard_settings |= 1;
 				}
-				else if(strncmp(argv[loop], "--disregard_gui_settings", strlen("--disregard_gui_settings")) == 0)
+				else if(strncmp(argv[loop], "--disregard_ui_settings", strlen("--disregard_ui_settings")) == 0)
 				{
 					use_disregard_settings |= 2;
 				}
@@ -84775,6 +87920,11 @@ char		local_buf[32768];
 					char *cp = argv[loop] + strlen("--encode_summary_file=");
 					strcpy(use_encode_summary_file, cp);
 				}
+				else if(strncmp(argv[loop], "--kiosk", strlen("--kiosk")) == 0)
+				{
+					use_hide_menu = 1;
+					use_borderless = 1;
+				}
 				else if(strncmp(argv[loop], "--message_delay=", strlen("--message_delay=")) == 0)
 				{
 				}
@@ -84901,6 +88051,7 @@ char		local_buf[32768];
 				use_ptz_reverse_h[use_ptz_device_path_cnt] = 0;
 				use_ptz_reverse_v[use_ptz_device_path_cnt] = 0;
 				use_ptz_start_position[use_ptz_device_path_cnt] = -1;
+				use_ptz_initial_camera[use_ptz_device_path_cnt] = 0;
 				use_ptz_device_path_cnt++;
 				free(final[loop]);
 			}
@@ -85013,6 +88164,7 @@ char		local_buf[32768];
 		, use_ptz_reverse_h
 		, use_ptz_reverse_v
 		, use_ptz_start_position
+		, use_ptz_initial_camera
 		, use_ptz_alias
 		, use_ptz_home_on_launch
 		, use_yolo_onnx
@@ -85054,6 +88206,7 @@ char		local_buf[32768];
 		, use_fast_start
 		, use_threaded_object_recognition
 		, use_tiled_object_recognition
+		, use_hide_menu
 		, "DVPTZ");
 	win->color(WHITE);
 	win->end();
@@ -85063,8 +88216,14 @@ char		local_buf[32768];
 		win->full_screen = 1;
 	}
 	win->hide();
-	win->callback(quit_cb, win);
-
+	if(win->hide_menu == 0)
+	{
+		win->callback(quit_cb, win);
+	}
+	else
+	{
+		win->callback(no_quit_cb, win);
+	}
 	if(strlen(use_encode_summary_file) > 0)
 	{
 		sprintf(local_buf, "Loading encoder summary %s", use_encode_summary_file);
@@ -85086,6 +88245,9 @@ char		local_buf[32768];
 	win->color_it_window = new ColorItWindow(win);
 	win->color_it_window->hide();
 
+	win->effect_order_window = new EffectOrderWindow(win);
+	win->effect_order_window->hide();
+
 	start_win->Update("Open Pulse Audio Filter Window");
 	win->pulse_audio_filter_window = new PulseAudioFilterWindow(win);
 	win->pulse_audio_filter_window->hide();
@@ -85094,14 +88256,8 @@ char		local_buf[32768];
 	win->record_on_start_alias = record_on_start_alias;
 
 	start_win->Update("Open Log Window");
-	global_log_window = new Fl_Window(1200, 800, "Log");
-		Fl_Browser *browser = new Fl_Browser(0, 0, 1200, 800);
-		browser->color(BLACK);
-		browser->textcolor(WHITE);
-		browser->textfont(FL_COURIER);
-	global_log_window->end();
+	global_log_window = new LogWindow(win, 450, 0);
 	global_log_window->hide();
-	global_log_window->callback(terminate_global_log_window_cb, win);
 
 	start_win->Update("Open CUDA DNN Infer Library...");
 	void *test_handle = dlopen("libcudnn_ops_infer.so", RTLD_NOW);
@@ -85115,7 +88271,7 @@ char		local_buf[32768];
 	{
 		start_win->Update("Unable to use CUDA DNN");
 		win->use_dnn_cuda = 0;
-		fprintf(stderr, "Error: CUDA library libcudnn_adv_infer.so.8 not found.\n");
+		fprintf(stderr, "Error: CUDA library libcudnn_adv_infer.so not found.\n");
 		fprintf(stderr, "\tTo use DNN object detection add the appropriate\n");
 		fprintf(stderr, "\tpath to LD_LIBRARY_PATH.\n");
 	}
@@ -85239,9 +88395,9 @@ char		local_buf[32768];
 	start_win->Update("Building set output window");
 	win->BuildEditOutputWindow();
 
-	start_win->Update("Building GUI settings window");
-	win->gui_settings_window = new GUI_SettingsWindow(win);
-	win->gui_settings_window->hide();
+	start_win->Update("Building UI settings window");
+	win->ui_settings_window = new UI_SettingsWindow(win);
+	win->ui_settings_window->hide();
 
 	start_win->Update("Building NDI Source window");
 	win->ndi_source_window = new NDISourceListWindow(win);
@@ -85281,6 +88437,7 @@ char		local_buf[32768];
 	{
 		usleep(start_win->message_delay);
 	}
+	win->Transparent(win->transparent_interface);
 	Fl::add_timeout(0.1, my_window_cb, win);
 	start_win->Update("Creating onggoing threads and timeouts...");
 	if(win->record_all == 1)
@@ -85531,7 +88688,11 @@ struct tm	*tm;
 	}
 	if(global_html == 1)
 	{
-		global_cef_handle = dlopen("libhtml_window.so", RTLD_NOW);
+		char current_path[PATH_MAX];
+		char use_path[PATH_MAX];
+		where_am_i(current_path);
+		sprintf(use_path, "%s/libhtml_window.so", current_path);
+		global_cef_handle = dlopen(use_path, RTLD_NOW);
 		if(global_cef_handle != NULL)
 		{
 			void_initialize_cef = (void *)dlsym(global_cef_handle, "initialize_cef");
@@ -85546,8 +88707,8 @@ struct tm	*tm;
 				init_cef = (void (*)(int, int, char **))void_initialize_cef;
 
 				Dl_info info;
-				char full_path[4096];
-				char dir_path[4096];
+				char full_path[PATH_MAX];
+				char dir_path[PATH_MAX];
 				strcpy(full_path, "");
 				strcpy(dir_path, "");
 
@@ -85556,6 +88717,7 @@ struct tm	*tm;
 				const char *file_start = fl_filename_name(full_path);
 				size_t len = file_start - full_path;
 				strncpy(dir_path, full_path, len);
+				dir_path[len] = '\0';
 
 				char test_path[8192];
 				int no_go = 0;
@@ -85607,7 +88769,11 @@ struct tm	*tm;
 	}
 	if(fast_start == 0)
 	{
-		global_osg_handle = dlopen("libosg_camera.so", RTLD_NOW);
+		char current_path[PATH_MAX];
+		char use_path[PATH_MAX];
+		where_am_i(current_path);
+		sprintf(use_path, "%s/libosg_camera.so", current_path);
+		global_osg_handle = dlopen(use_path, RTLD_NOW);
 		if(global_osg_handle != NULL)
 		{
 			void_OSG_get_scene_data = (void *)dlsym(global_osg_handle, "OSG_get_scene_data");
@@ -85710,23 +88876,20 @@ struct tm	*tm;
 		{
 			global_folder_mat = Mat(folder_WIDTH, folder_HEIGHT, CV_8UC4, folder_bytes);
 		}
-		if(fast_start == 0)
+		if(access("color_palette.json", F_OK) == 0)
 		{
-			if(access("color_palette.json", F_OK) == 0)
+			load_global_palette_as_JSON();
+		}
+		else
+		{
+			for(loop = 0;loop < 32;loop++)
 			{
-				load_global_palette_as_JSON();
+				global_palette_red[loop] = (int)(drand48() * 255.0);
+				global_palette_green[loop] = (int)(drand48() * 255.0);
+				global_palette_blue[loop] = (int)(drand48() * 255.0);
+				global_palette_alpha[loop] = 255;
 			}
-			else
-			{
-				for(loop = 0;loop < 32;loop++)
-				{
-					global_palette_red[loop] = (int)(drand48() * 255.0);
-					global_palette_green[loop] = (int)(drand48() * 255.0);
-					global_palette_blue[loop] = (int)(drand48() * 255.0);
-					global_palette_alpha[loop] = 255;
-				}
-				save_global_palette_as_JSON();
-			}
+			save_global_palette_as_JSON();
 		}
 		start_win = new StartWindow(message_delay, use_stderr, 0, 0, ww, hh, global_argc + 1, "Starting");
 		start_win->box(FL_FLAT_BOX);
@@ -85735,7 +88898,11 @@ struct tm	*tm;
 		{
 			int	pipe_in = -1;
 			int	pipe_out = -1;
-			int pipe_pid = popen2("intro", &pipe_in, &pipe_out);
+			char current_path[PATH_MAX];
+			char use_path[PATH_MAX];
+			where_am_i(current_path);
+			sprintf(use_path, "%s/intro", current_path);
+			int pipe_pid = popen2(use_path, &pipe_in, &pipe_out);
 			if(pipe_pid != -1)
 			{
 				start_win->intro_pipe_fp = fdopen(pipe_in, "w");
