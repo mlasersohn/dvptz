@@ -8,6 +8,9 @@ be accessed through NDI or V4L functions. Output to various video file formats i
 Realtime streaming to streaming sites, such as Twitch and Youtube is also provided. There are too many features to list here. See below 
 for a cursory rundown. For those vaguely interested, DVPTZ stands for Digital Video Pan Tilt Zoom, intending to place emphasis on the program's support for Visca, NDI, and V4L PTZ capabilities. I discourage people from referring to it as "div-putz", but also recoginize that this is inevitable.
 
+#AppImage
+There is now a downloadable appimage of <A href="https://github.com/mlasersohn/dvptz/releases/download/v0.001.004/dvptz-x86_64.AppImage">dvptz</A>.
+
 # Building
 The Makefile defaults to mostly using the clang C++ compiler. Switching it over to only using g++ and gcc is a simple matter of editing
 the lines, selecting which pair you mean to use:
