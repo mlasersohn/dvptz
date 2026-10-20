@@ -19,6 +19,7 @@
 
 #include <FL/filename.H>
 
+double	since();
 int		create_task(int (*funct)(int *), void *flag);
 int		pulse_record_all(int *flag);
 int		pulse_play_all(int *flag);
@@ -243,7 +244,6 @@ int				loop;
 		}
 	}
 }
-
 
 // Calculates and updates the alpha value based on cutoff and sample rate.
 void update_lpf_alpha(LPFState &state, float cutoff_hz, float sample_rate) 

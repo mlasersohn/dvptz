@@ -130,6 +130,7 @@ int initialize_cef(int html, int argc, char *argv[])
 		CefSettings settings;
 		settings.windowless_rendering_enabled = true;
 		settings.log_severity = LOGSEVERITY_FATAL;
+		// settings.log_severity = LOGSEVERITY_VERBOSE;
 
 		if(!CefInitialize(args, settings, app.get(), nullptr))
 		{

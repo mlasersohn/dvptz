@@ -506,6 +506,7 @@ int		loop;
 	direction = 0;
 	last_moved = time(0);
 	volume = 0.5;
+	paused = 0;
 	Fl::add_timeout(0.033, tracking_timer_cb, ctx);
 	Fl::add_timeout(0.1, hide_controls_cb, this);
 	callback(window_close_callback, ctx);
@@ -607,6 +608,34 @@ int		loop;
 		py = yy;
 		flag = 1;
 	}
+	else if((event == FL_FOCUS)
+	|| (event == FL_UNFOCUS))
+	{
+		flag = 1;
+	}
+	else if((event == FL_KEYBOARD)
+	|| (event == FL_SHORTCUT))
+	{
+		int c = Fl::event_key();
+		if(c == ' ')
+		{
+			if(paused == 1)
+			{
+				Play();
+			}
+			else
+			{
+				Pause();
+			}
+			flag = 1;
+		}
+		else if(c == FL_Escape)
+		{
+			Pause();
+			hide();
+			flag = 1;
+		}
+	}
 	else if(event == FL_PUSH)
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
@@ -689,16 +718,19 @@ void	VideoWindow::ShowControls()
 void	VideoWindow::Play()
 {
 	libvlc_media_player_play(ctx->mp);
+	paused = 0;
 }
 
 void	VideoWindow::Stop()
 {
 	libvlc_media_player_stop(ctx->mp);
+	paused = 1;
 }
 
 void	VideoWindow::Pause()
 {
 	libvlc_media_player_pause(ctx->mp);
+	paused = 1;
 }
 
 void	VideoWindow::NewVideo(char *in_filename)

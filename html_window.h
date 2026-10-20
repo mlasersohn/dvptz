@@ -223,6 +223,10 @@ public:
 
 		CefString disable_dcheck = "disable-dcheck";
 		command_line->AppendSwitch(disable_dcheck);
+
+        command_line->AppendSwitch("disable-gpu");
+        command_line->AppendSwitch("disable-gpu-compositing");
+        command_line->AppendSwitch("disable-software-rasterizer");
 	}
 	IMPLEMENT_REFCOUNTING(MyApp);
 };

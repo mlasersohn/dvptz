@@ -104,6 +104,7 @@ extern "C"
 #include	<FL/Fl_Scroll.H>
 #include	<FL/Fl_Pack.H>
 #include	<FL/Fl_Flex.H>
+#include	<FL/Fl_Grid.H>
 #include	<FL/Fl_Menu_Button.H>
 #include	<FL/Fl_Light_Button.H>
 #include	<FL/Fl_Toggle_Button.H>
@@ -120,6 +121,7 @@ extern "C"
 #include	<FL/Fl_Multiline_Input.H>
 #include	<FL/Fl_Browser.H>
 #include	<FL/Fl_Hold_Browser.H>
+#include	<FL/Fl_Multi_Browser.H>
 #include	<FL/Fl_Select_Browser.H>
 #include	<FL/Fl_Image_Surface.H>
 #include	<FL/Fl_RGB_Image.H>
@@ -317,6 +319,7 @@ char	*legal_url[] = {
 	"html://",
 	"http://",
 	"https://",
+	"image://",
 	"irc://",
 	"ndi://",
 	"ndi_bgrx://",
@@ -348,8 +351,8 @@ char	*available_scheme[] = {
 	"all://",
 	"alternating://",
 	"alternating://",
-	"av://URL | filename",
-	"av://www.example.org/video_file.mp4\nav://local_file.flv",
+	"av://[repeat]URL | filename",
+	"av://[1]www.example.org/video_file.mp4\nav://local_file.flv",
 	"blank://rr#,gg#,bb#,aa#",
 	"blank://92,27,124,255",
 	"camera://path",
@@ -400,8 +403,8 @@ char	*available_scheme[] = {
 	"sff://my_local_frame_file.sff",
 	"slideshow://[directory | filename]",
 	"slideshow://MyPictures",
-	"sourced://[(fact#)]alias",
-	"sourced://(0.55)]MyCamera12",
+	"sourced://[(factor#)]alias",
+	"sourced://[(0.55)]MyCamera12",
 	"split://[width,height;source alias1,source alias2,...]",
 	"split://3,2;cam1,street cam,office cam,hallway,[blank],front door",
 	"text://text",
@@ -500,10 +503,17 @@ struct	NamedKeys named_key[] = {
 
 // SECTION *********************************** UTILITY FUNCTIONS *******************************************
 
+void	hms(time_t elapsed, int& hours, int& minutes, int& seconds)
+{
+	hours = elapsed / 3600;
+	minutes = (elapsed % 3600) / 60;
+	seconds = elapsed % 60;
+}
+
 int	closest_divisible_by_16(int n)
 {
-    // Add 8 to round to the nearest multiple, then clear the lower 4 bits
-    return((n + 8) & ~15);
+	// Add 8 to round to the nearest multiple, then clear the lower 4 bits
+	return((n + 8) & ~15);
 }
 
 bool	enable_x11_alpha()
@@ -529,6 +539,12 @@ bool	enable_x11_alpha()
 		rr = true;
 	}
 	return(rr);
+}
+
+void	generic_cancel_cb(Fl_Widget *w, void *v)
+{
+	Fl_Window *win = (Fl_Window *)v;
+	win->hide();
 }
 
 void	where_am_i(char *returned_path)
@@ -777,6 +793,7 @@ void	crosshair_cross(int sx, int sy, int icx, int icy)
 	fl_line_style(FL_SOLID, 3);
 	fl_line(cx, cy - 8, cx, cy + 8);
 	fl_line(cx - 8, cy, cx + 8, cy);
+	fl_line_style(FL_SOLID, 1);
 }
 
 void	crosshair_grid(int sx, int sy, int ww, int hh, int idiv)
@@ -1440,66 +1457,6 @@ bool is_capture_device(const char *device_path)
 void force_crash() 
 {
 	raise(SIGTRAP);
-}
-
-void rgb_to_yuv422(const Mat& rgb_image, Mat& yuv422_image) 
-{
-	// Convert RGB to YUV 4:4:4
-	Mat yuv444_image;
-	cvtColor(rgb_image, yuv444_image, COLOR_RGB2YUV);
-
-	// Create YUV 4:2:2 image (2 bytes per pixel)
-	yuv422_image.create(rgb_image.rows, rgb_image.cols, CV_8UC2);
-
-	// Perform chroma subsampling to get YUV 4:2:2
-	for(int row = 0; row < rgb_image.rows; row++) 
-	{
-		for(int col = 0; col < rgb_image.cols; col += 2) 
-		{
-			Vec3b yuv444_p1 = yuv444_image.at<Vec3b>(row, col);
-			Vec3b yuv444_p2 = yuv444_image.at<Vec3b>(row, col + 1);
-
-			// YUV 4:2:2 stores Y values for each pixel but shares U and V values between two pixels
-			Vec2b yuv422_p1;
-			yuv422_p1[0] = yuv444_p1[0]; // Y1
-			yuv422_p1[1] = yuv444_p1[1]; // U (shared)
-
-			Vec2b yuv422_p2;
-			yuv422_p2[0] = yuv444_p2[0]; // Y2
-			yuv422_p2[1] = yuv444_p1[2]; // V (shared)
-
-			yuv422_image.at<Vec2b>(row, col) = yuv422_p1;
-			yuv422_image.at<Vec2b>(row, col + 1) = yuv422_p2;
-		}
-	}
-}
-
-static void parallel_cvtcolor_rgb2yuv422(cv::Mat& rgb, cv::Mat& yuv422)
-{
-	cv::Mat yuv444(rgb.rows, rgb.cols, CV_8UC3);
-	cv::cvtColor(rgb, yuv444, COLOR_BGR2YUV);
-
-	yuv422.create(rgb.rows, rgb.cols, CV_8UC2);
-
-	// chroma subsampling: yuv444 -> yuv422;
-	parallel_for_(Range(0, yuv444.rows), [&](const Range& range) {
-	for(int row = range.start;row < range.end;row++)
-	{
-		uchar* p_in  = yuv444.ptr(row, 0);
-		uchar* p_out = yuv422.ptr(row, 0);
-
-		for (int col = 0; col < yuv444.cols / 2; col++ )
-		{
-			p_out[0] = p_in[0];
-			p_out[1] = p_in[1];
-			p_out[2] = p_in[3];
-			p_out[3] = p_in[2];
-
-			p_in  += 6; // Y1,U1,V1,Y2,U2,V2
-			p_out += 4; // Y1,U1,Y2,V1
-		}
-	}
-	});
 }
 
 int	match_tokens(char *str, char token, char **match)
@@ -2234,43 +2191,6 @@ void	scale_mat_to_fit(Mat& input, Mat& output, int out_w, int out_h)
 	}
 }
 
-void rgb_to_yuv422_uyvy(const cv::Mat& rgb, cv::Mat& yuv) 
-{
-	assert(rgb.size() == yuv.size() &&
-		   rgb.depth() == CV_8U &&
-		   rgb.channels() == 3 &&
-		   yuv.depth() == CV_8U &&
-		   yuv.channels() == 2);
-	for(int ih = 0; ih < rgb.rows; ih++) 
-	{
-		const uint8_t* rgbRowPtr = rgb.ptr<uint8_t>(ih);
-		uint8_t* yuvRowPtr = yuv.ptr<uint8_t>(ih);
-
-		for(int iw = 0; iw < rgb.cols; iw = iw + 2) 
-		{
-			const int rgbColIdxBytes = iw * rgb.elemSize();
-			const int yuvColIdxBytes = iw * yuv.elemSize();
-
-			const uint8_t R1 = rgbRowPtr[rgbColIdxBytes + 0];
-			const uint8_t G1 = rgbRowPtr[rgbColIdxBytes + 1];
-			const uint8_t B1 = rgbRowPtr[rgbColIdxBytes + 2];
-			const uint8_t R2 = rgbRowPtr[rgbColIdxBytes + 3];
-			const uint8_t G2 = rgbRowPtr[rgbColIdxBytes + 4];
-			const uint8_t B2 = rgbRowPtr[rgbColIdxBytes + 5];
-
-			const int Y  =  (0.257f * R1) + (0.504f * G1) + (0.098f * B1) + 16.0f ;
-			const int U  = -(0.148f * R1) - (0.291f * G1) + (0.439f * B1) + 128.0f;
-			const int V  =  (0.439f * R1) - (0.368f * G1) - (0.071f * B1) + 128.0f;
-			const int Y2 =  (0.257f * R2) + (0.504f * G2) + (0.098f * B2) + 16.0f ;
-
-			yuvRowPtr[yuvColIdxBytes + 0] = cv::saturate_cast<uint8_t>(U );
-			yuvRowPtr[yuvColIdxBytes + 1] = cv::saturate_cast<uint8_t>(Y );
-			yuvRowPtr[yuvColIdxBytes + 2] = cv::saturate_cast<uint8_t>(V );
-			yuvRowPtr[yuvColIdxBytes + 3] = cv::saturate_cast<uint8_t>(Y2);
-		}
-	}
-}
-
 void	UYVY_BGR(Mat& out_mat, void *data, int ww, int hh)
 {
 	Mat frame = Mat(hh, ww, CV_8UC2, data);
@@ -2285,6 +2205,8 @@ void	I420_BGR(Mat& out_mat, void *data, int ww, int hh)
 
 void	*BGRA_UYVA(Mat in_mat, int ww, int hh)
 {
+void rgb_to_yuv422_uyvy(const cv::Mat& rgb, cv::Mat& yuv); 
+
 	Mat uyvy = Mat(hh, ww, CV_8UC2);
 	Mat rgb;
 	cvtColor(in_mat, rgb, COLOR_BGRA2BGR);
@@ -2299,68 +2221,13 @@ void	*BGRA_UYVA(Mat in_mat, int ww, int hh)
 
 void	BGRA_UYVY(Mat in_mat, Mat& out_mat, int ww, int hh)
 {
+void rgb_to_yuv422_uyvy(const cv::Mat& rgb, cv::Mat& yuv); 
+
 	Mat uyvy = Mat(hh, ww, CV_8UC2);
 	Mat rgb;
 	cvtColor(in_mat, rgb, COLOR_BGRA2BGR);
 	rgb_to_yuv422_uyvy(rgb, uyvy); 
 	uyvy.copyTo(out_mat);
-}
-
-void	P216_BGR(Mat& out_mat, void *data, int ww, int hh)
-{
-int	xx, yy;
-
-	Mat frame = cv::Mat(hh, ww, CV_8UC4, cv::Scalar(76, 89, 100, 255));
-	unsigned char *ptr = (unsigned char *)frame.ptr();
-
-	int16_t *p_y = (int16_t *)data; 
-	int stride = ww * sizeof(int16_t);
-	int offset = hh * stride; 
-	int16_t *p_uv = (int16_t *)((char *)data + offset); 
-	int16_t Y = 0;
-	int16_t U = 0;
-	int16_t V = 0;
-	int cnt = 0;
-	for(yy = 0;yy < hh;yy++)
-	{
-		for(xx = 0;xx < ww;xx++)
-		{
-			Y = *p_y++;
-			Y -= 32768;
-			if((cnt % 2) == 0)
-			{
-				U = *p_uv++;
-				U -= 32768;
-				V = *p_uv++;
-				V -= 32768;
-			}
-			int16_t R = Y + 1.370705f * V;
-			int16_t G = Y - (0.698001f * V) - (0.337633f * U);
-			int16_t B = Y + 1.732446f * U;
-
-			B /= 255;
-			G /= 255;
-			R /= 255;
-
-			B += 128;
-			G += 128;
-			R += 128;
-
-			if(B < 0) B = 0;
-			else if(B > 255) B = 255;
-			if(G < 0) G = 0;
-			else if(G > 255) G = 255;
-			if(R < 0) R = 0;
-			else if(R > 255) R = 255;
-
-			*ptr++ = (uchar)B;
-			*ptr++ = (uchar)G;
-			*ptr++ = (uchar)R;
-			*ptr++ = 255;
-			cnt++;
-		}
-	}
-	out_mat = frame.clone();
 }
 
 NDIlib_recv_instance_t OpenNDI(NDIlib_source_t source, int format)
@@ -2722,31 +2589,6 @@ Mat	crop_section(Mat source, Mat& cropped, int xx, int yy, int ww, int hh)
 	return(cropped);
 }
 
-void overlayImage(Mat *src, Mat *overlay, const Point& location)
-{
-	for(int y = max(location.y, 0); y < src->rows; ++y)
-	{
-		int fY = y - location.y;
-		if(fY >= overlay->rows)
-			break;
-
-		for(int x = max(location.x, 0); x < src->cols; ++x)
-		{
-			int fX = x - location.x;
-			if(fX >= overlay->cols)
-				break;
-
-			double opacity = ((double)overlay->data[fY * overlay->step + fX * overlay->channels() + 3]) / 255;
-			for(int c = 0; opacity > 0 && c < src->channels(); ++c)
-			{
-				unsigned char overlayPx = overlay->data[fY * overlay->step + fX * overlay->channels() + c];
-				unsigned char srcPx = src->data[y * src->step + x * src->channels() + c];
-				src->data[y * src->step + src->channels() * x + c] = srcPx * (1.0 - opacity) + overlayPx * opacity;
-			}
-		}
-	}
-}
-
 void	rotate_mat(double angle, Mat& src)
 {
 	// get rotation matrix for rotating the image around its center in pixel coordinates
@@ -2928,106 +2770,448 @@ int	loop;
 	cv::fillPoly(mat, corner_list, &num_points, num_polygons, cv::Scalar(0, 0, 0, 0), line_type);
 }
 
+// START OPTIMIZED NESTED LOOP ROUTINES
+static const int k_yuy2_map[] = {0, 0, 1, 1, 3, 2, 2, 3};   // Y0 U Y1 V
+static const int k_uyvy_map[] = {1, 0, 0, 1, 2, 2, 3, 3};   // U Y0 V Y1
+
+static void pack_yuv422(const Mat& yuv444, Mat& yuv422, const int *from_to)
+{
+Mat six;
+Mat dst4;
+
+	if(!yuv422.isContinuous())
+	{
+		yuv422.release();
+	}
+	six = yuv444.reshape(6);
+	yuv422.create(yuv444.rows, yuv444.cols, CV_8UC2);
+	dst4 = yuv422.reshape(4);
+	mixChannels(&six, 1, &dst4, 1, from_to, 4);
+}
+
+void rgb_to_yuv422(const Mat& rgb_image, Mat& yuv422_image)
+{
+Mat yuv444_image;
+
+	if((rgb_image.type() == CV_8UC3) && ((rgb_image.cols % 2) == 0))
+	{
+		cvtColor(rgb_image, yuv444_image, COLOR_RGB2YUV);
+		pack_yuv422(yuv444_image, yuv422_image, k_yuy2_map);
+	}
+}
+
+void rgb_to_yuv422_uyvy(const Mat& rgb, Mat& yuv)
+{
+Mat yuv444;
+Mat m;
+
+	if((rgb.type() == CV_8UC3) && ((rgb.cols % 2) == 0))
+	{
+		m = (Mat_<float>(3, 4) <<  0.257f,  0.504f,  0.098f,  16.0f,
+								  -0.148f, -0.291f,  0.439f, 128.0f,
+								   0.439f, -0.368f, -0.071f, 128.0f);
+		transform(rgb, yuv444, m);
+		pack_yuv422(yuv444, yuv, k_uyvy_map);
+	}
+}
+
+static void parallel_cvtcolor_rgb2yuv422(cv::Mat& rgb, cv::Mat& yuv422)
+{
+Mat yuv444;
+
+	if((rgb.type() == CV_8UC3) && ((rgb.cols % 2) == 0))
+	{
+		cvtColor(rgb, yuv444, COLOR_BGR2YUV);
+		pack_yuv422(yuv444, yuv422, k_yuy2_map);
+	}
+}
+
+void	P216_BGR(Mat& out_mat, void *data, int ww, int hh)
+{
+const int from_to[] = {0, 0, 1, 1, 2, 2};
+const double s = 1.0 / 255.0;
+const double shift = 32768.0;
+double off_b;
+double off_g;
+double off_r;
+Mat srcs[2];
+Mat y_plane;
+Mat uv_plane;
+Mat uv_full;
+Mat yuv16;
+Mat yuvf;
+Mat bgraf;
+Mat m;
+
+	if((data != NULL) && (ww > 0) && (hh > 0) && ((ww % 2) == 0))
+	{
+		y_plane = Mat(hh, ww, CV_16UC1, data);
+		uv_plane = Mat(hh, ww / 2, CV_16UC2,
+					   (uchar *)data + ((size_t)hh * ww * sizeof(uint16_t)));
+
+		// 4:2:2 -> 4:4:4: duplicate each UV pair horizontally
+		resize(uv_plane, uv_full, Size(ww, hh), 0, 0, INTER_NEAREST);
+
+		srcs[0] = y_plane;
+		srcs[1] = uv_full;
+		yuv16.create(hh, ww, CV_16UC3);
+		mixChannels(srcs, 2, &yuv16, 1, from_to, 3);
+		yuv16.convertTo(yuvf, CV_32F);
+
+		// fold the -32768 centering into the offset column
+		off_b = 128.0 - (shift * (1.0 + 1.732446) * s);
+		off_g = 128.0 - (shift * (1.0 - 0.337633 - 0.698001) * s);
+		off_r = 128.0 - (shift * (1.0 + 1.370705) * s);
+
+		// input channels Y, U, V; output channels B, G, R, A
+		m = (Mat_<float>(4, 4) <<
+			 s,  1.732446 * s,  0.0,			off_b,
+			 s, -0.337633 * s, -0.698001 * s,   off_g,
+			 s,  0.0,		   1.370705 * s,	off_r,
+			 0,  0,			 0,			   255);
+		transform(yuvf, bgraf, m);
+		bgraf.convertTo(out_mat, CV_8U);
+	}
+}
+
+static void alpha_blend_at(Mat& img, const Mat& ov, int start_x, int start_y)
+{
+int c;
+int cn;
+int color_map[8];
+int alpha_map[8];
+Rect overlap;
+Rect overlap_ov;
+Mat roi_img;
+Mat roi_ov;
+Mat color;
+Mat alpha;
+Mat inv_alpha;
+Mat part_img;
+Mat part_ov;
+
+	cn = img.channels();
+	if((img.depth() == CV_8U) && (ov.type() == CV_8UC4) && ((cn == 3) || (cn == 4)))
+	{
+		overlap = Rect(0, 0, img.cols, img.rows) & Rect(start_x, start_y, ov.cols, ov.rows);
+		if(!overlap.empty())
+		{
+			overlap_ov = Rect(overlap.x - start_x, overlap.y - start_y, overlap.width, overlap.height);
+			roi_img = img(overlap);
+			roi_ov = ov(overlap_ov);
+			color.create(overlap.size(), CV_8UC(cn));
+			alpha.create(overlap.size(), CV_8UC(cn));
+			for(c = 0;c < cn;c++)
+			{
+				color_map[(c * 2)] = c;
+				color_map[(c * 2) + 1] = c;
+				alpha_map[(c * 2)] = 3;
+				alpha_map[(c * 2) + 1] = c;
+			}
+			mixChannels(&roi_ov, 1, &color, 1, color_map, cn);
+			mixChannels(&roi_ov, 1, &alpha, 1, alpha_map, cn);
+
+			subtract(Scalar::all(255), alpha, inv_alpha);
+			multiply(roi_img, inv_alpha, part_img, 1.0 / 255.0);
+			multiply(color, alpha, part_ov, 1.0 / 255.0);
+			add(part_img, part_ov, roi_img);
+		}
+	}
+}
+
+void overlayImage(Mat *src, Mat *overlay, const Point& location)
+{
+	if((src != NULL) && (overlay != NULL))
+	{
+		alpha_blend_at(*src, *overlay, location.x, location.y);
+	}
+}
+
+void	overlay_with_alpha(Mat& img, Mat& ov, int start_x = 0, int start_y = 0)
+{
+	alpha_blend_at(img, ov, start_x, start_y);
+}
+
 void	combine_on_color(Mat one, Mat two, int rr, int gg, int bb)
 {
-int	row, col;
+int w;
+int h;
+Mat mask;
+Mat roi_one;
+Mat roi_two;
+Mat alpha;
+const int a_from[] = {3, 0};
+const int a_to[] = {0, 3};
 
-	for(row = 0;row < two.rows;row++)
+	if((one.type() == two.type()) && (one.depth() == CV_8U)
+	&& ((one.channels() == 3) || (one.channels() == 4)))
 	{
-		for(col = 0;col < two.cols;col++)
-		{
-			unsigned char *color1 = one.ptr(row, col);
-			if((color1[0] == rr)
-			&& (color1[1] == gg)
-			&& (color1[2] == bb))
-			{
-				unsigned char *color2 = two.ptr(row, col);
-				double r2 = (double)color2[0];
-				double g2 = (double)color2[1];
-				double b2 = (double)color2[2];
+		w = std::min(one.cols, two.cols);
+		h = std::min(one.rows, two.rows);
+		roi_one = one(Rect(0, 0, w, h));
+		roi_two = two(Rect(0, 0, w, h));
 
-				color1[0] = r2;
-				color1[1] = g2;
-				color1[2] = b2;
+		inRange(roi_one, Scalar(rr, gg, bb, 0), Scalar(rr, gg, bb, 255), mask);
+		if(one.channels() == 4)
+		{
+			alpha.create(roi_one.size(), CV_8UC1);
+			mixChannels(&roi_one, 1, &alpha, 1, a_from, 1);
+			roi_two.copyTo(roi_one, mask);
+			mixChannels(&alpha, 1, &roi_one, 1, a_to, 1);
+		}
+		else
+		{
+			roi_two.copyTo(roi_one, mask);
+		}
+	}
+}
+
+void	change_alpha(Mat rgba, int direction)
+{
+	if(rgba.type() == CV_8UC4)
+	{
+		if(direction > 0)
+		{
+			add(rgba, Scalar(0, 0, 0, 1), rgba);
+		}
+		else
+		{
+			subtract(rgba, Scalar(0, 0, 0, 1), rgba);
+		}
+	}
+}
+
+void	invert_mat(Mat one)
+{
+	if((one.depth() == CV_8U) && (one.channels() >= 3))
+	{
+		bitwise_xor(one, Scalar(255, 255, 255, 0), one);
+	}
+}
+
+static void scale_hsv_channel(Mat& hsv, int channel, double amount)
+{
+int v;
+int ch;
+
+	Mat lut(1, 256, CV_8UC3);
+	for(v = 0;v < 256;v++)
+	{
+		Vec3b& entry = lut.at<Vec3b>(0, v);
+		for(ch = 0;ch < 3;ch++)
+		{
+			if(ch == channel)
+			{
+				entry[ch] = saturate_cast<uchar>(v * amount);
+			}
+			else
+			{
+				entry[ch] = (uchar)v;
 			}
 		}
 	}
+	LUT(hsv, lut, hsv);
+}
+
+Mat change_saturation(Mat& frame, double amount)
+{
+	Mat hsv;
+	cvtColor(frame, hsv, COLOR_RGB2HSV);
+	scale_hsv_channel(hsv, 1, amount);
+	cvtColor(hsv, frame, COLOR_HSV2RGB);
+	cvtColor(frame, frame, COLOR_RGB2RGBA);
+	return(frame);
+}
+
+Mat change_hue(Mat frame, double amount)
+{
+	Mat hsv;
+	cvtColor(frame, hsv, COLOR_RGB2HSV);
+	scale_hsv_channel(hsv, 0, amount);
+	cvtColor(hsv, frame, COLOR_HSV2RGB);
+	cvtColor(frame, frame, COLOR_RGB2RGBA);
+	return(frame);
+}
+
+Mat change_intensity(Mat frame, double amount)
+{
+	Mat hsv;
+	cvtColor(frame, hsv, COLOR_RGB2HSV);
+	scale_hsv_channel(hsv, 2, amount);
+	cvtColor(hsv, frame, COLOR_HSV2RGB);
+	cvtColor(frame, frame, COLOR_RGB2RGBA);
+	return(frame);
+}
+
+void	Camera::ColorIt()
+{
+int loop;
+
+	if(color_it_cnt > 0)
+	{
+		std::vector<Mat> masks(color_it_cnt);
+		for(loop = 0;loop < color_it_cnt;loop++)
+		{
+			Scalar lo(color_it_r[loop] - color_it_tolerance_r[loop] + 1,
+					  color_it_g[loop] - color_it_tolerance_g[loop] + 1,
+					  color_it_b[loop] - color_it_tolerance_b[loop] + 1,
+					  0);
+			Scalar hi(color_it_r[loop] + color_it_tolerance_r[loop] - 1,
+					  color_it_g[loop] + color_it_tolerance_g[loop] - 1,
+					  color_it_b[loop] + color_it_tolerance_b[loop] - 1,
+					  255);
+			inRange(mat, lo, hi, masks[loop]);
+		}
+		for(loop = 0;loop < color_it_cnt;loop++)
+		{
+			mat.setTo(Scalar(color_it_replace_r[loop],
+							 color_it_replace_g[loop],
+							 color_it_replace_b[loop],
+							 color_it_replace_a[loop]), masks[loop]);
+		}
+	}
+}
+
+static void blend_line_lut(Mat line, double beta, double c0, double c1, double c2)
+{
+int v;
+int ch;
+int cn = line.channels();
+double c[3];
+
+	c[0] = c0;
+	c[1] = c1;
+	c[2] = c2;
+	Mat lut(1, 256, CV_8UC(cn));
+	uchar *p = lut.ptr<uchar>(0);
+	for(v = 0;v < 256;v++)
+	{
+		for(ch = 0;ch < cn;ch++)
+		{
+			if(ch < 3)
+			{
+				p[(v * cn) + ch] = saturate_cast<uchar>((v * beta) + c[ch]);
+			}
+			else
+			{
+				p[(v * cn) + ch] = (uchar)v;
+			}
+		}
+	}
+	LUT(line, lut, line);
 }
 
 void	color_gradient(Mat& mat, int direction, Scalar start_color, Scalar end_color)
 {
-int	loop;
-int	inner;
+int loop;
+int row;
+int ch;
+int cn = mat.channels();
 
-	if(direction == GRADIENT_DIRECTION_VERTICAL)
+	if((mat.depth() == CV_8U) && (cn >= 3))
 	{
-		double red_inc = (end_color[0] - start_color[0]) / mat.rows;
-		double green_inc = (end_color[1] - start_color[1]) / mat.rows;
-		double blue_inc = (end_color[2] - start_color[2]) / mat.rows;
-		double alpha_inc = (end_color[3] - start_color[3]) / mat.rows;
-		for(loop = 0;loop < mat.rows;loop++)
+		if(direction == GRADIENT_DIRECTION_VERTICAL)
 		{
-			double alpha = start_color[3] / 255.0;
-			double beta = 1.0 - alpha;
-
-			double sr2 = start_color[0];
-			double sg2 = start_color[1];
-			double sb2 = start_color[2];
-			double r2 = sr2 * alpha;
-			double g2 = sg2 * alpha;
-			double b2 = sb2 * alpha;
-			for(inner = 0;inner < mat.cols;inner++)
+			double red_inc = (end_color[0] - start_color[0]) / mat.rows;
+			double green_inc = (end_color[1] - start_color[1]) / mat.rows;
+			double blue_inc = (end_color[2] - start_color[2]) / mat.rows;
+			double alpha_inc = (end_color[3] - start_color[3]) / mat.rows;
+			for(loop = 0;loop < mat.rows;loop++)
 			{
-				unsigned char *color1 = mat.ptr(loop, inner);
-				double r1 = (double)color1[0] * beta;
-				double g1 = (double)color1[1] * beta;
-				double b1 = (double)color1[2] * beta;
-
-				color1[0] = r1 + r2;
-				color1[1] = g1 + g2;
-				color1[2] = b1 + b2;
+				double alpha = (start_color[3] + (alpha_inc * loop)) / 255.0;
+				blend_line_lut(mat.row(loop), 1.0 - alpha,
+							   (start_color[0] + (red_inc * loop)) * alpha,
+							   (start_color[1] + (green_inc * loop)) * alpha,
+							   (start_color[2] + (blue_inc * loop)) * alpha);
 			}
-			start_color[0] += red_inc;
-			start_color[1] += green_inc;
-			start_color[2] += blue_inc;
-			start_color[3] += alpha_inc;
 		}
-	}
-	else if(direction == GRADIENT_DIRECTION_HORIZONTAL)
-	{
-		double red_inc = (end_color[0] - start_color[0]) / mat.cols;
-		double green_inc = (end_color[1] - start_color[1]) / mat.cols;
-		double blue_inc = (end_color[2] - start_color[2]) / mat.cols;
-		double alpha_inc = (end_color[3] - start_color[3]) / mat.cols;
-		for(loop = 0;loop < mat.cols;loop++)
+		else if(direction == GRADIENT_DIRECTION_HORIZONTAL)
 		{
-			double alpha = start_color[3] / 255.0;
-			double beta = 1.0 - alpha;
+			double red_inc = (end_color[0] - start_color[0]) / mat.cols;
+			double green_inc = (end_color[1] - start_color[1]) / mat.cols;
+			double blue_inc = (end_color[2] - start_color[2]) / mat.cols;
+			double alpha_inc = (end_color[3] - start_color[3]) / mat.cols;
 
-			double sr2 = start_color[0];
-			double sg2 = start_color[1];
-			double sb2 = start_color[2];
-			double r2 = sr2 * alpha;
-			double g2 = sg2 * alpha;
-			double b2 = sb2 * alpha;
-			for(inner = 0;inner < mat.rows;inner++)
+			Mat beta_v(1, mat.cols, CV_32FC(cn));
+			Mat off_v(1, mat.cols, CV_32FC(cn));
+			Mat tmp;
+			float *pb = beta_v.ptr<float>(0);
+			float *po = off_v.ptr<float>(0);
+
+			for(loop = 0;loop < mat.cols;loop++)
 			{
-				unsigned char *color1 = mat.ptr(inner, loop);
-				double r1 = (double)color1[0] * beta;
-				double g1 = (double)color1[1] * beta;
-				double b1 = (double)color1[2] * beta;
-
-				color1[0] = r1 + r2;
-				color1[1] = g1 + g2;
-				color1[2] = b1 + b2;
+				double alpha = (start_color[3] + (alpha_inc * loop)) / 255.0;
+				double c[3];
+				c[0] = (start_color[0] + (red_inc * loop)) * alpha;
+				c[1] = (start_color[1] + (green_inc * loop)) * alpha;
+				c[2] = (start_color[2] + (blue_inc * loop)) * alpha;
+				for(ch = 0;ch < cn;ch++)
+				{
+					if(ch < 3)
+					{
+						pb[(loop * cn) + ch] = (float)(1.0 - alpha);
+						po[(loop * cn) + ch] = (float)c[ch];
+					}
+					else
+					{
+						pb[(loop * cn) + ch] = 1.0f;
+						po[(loop * cn) + ch] = 0.0f;
+					}
+				}
 			}
-			start_color[0] += red_inc;
-			start_color[1] += green_inc;
-			start_color[2] += blue_inc;
-			start_color[3] += alpha_inc;
+			for(row = 0;row < mat.rows;row++)
+			{
+				Mat line = mat.row(row);
+				line.convertTo(tmp, CV_32F);
+				multiply(tmp, beta_v, tmp);
+				add(tmp, off_v, tmp);
+				tmp.convertTo(line, CV_8U);
+			}
 		}
 	}
 }
+
+void	Camera::ColorIntensity(Mat frame, double red, double green, double blue, double alpha)
+{
+int v;
+int n;
+int channels;
+double factor[4];
+
+	if((!frame.empty()) && (frame.depth() == CV_8U))
+	{
+		channels = frame.channels();
+		factor[0] = red;
+		factor[1] = green;
+		factor[2] = blue;
+		factor[3] = alpha;
+
+		Mat lut(1, 256, CV_8UC(channels));
+		uchar *p = lut.ptr<uchar>(0);
+		for(v = 0;v < 256;v++)
+		{
+			for(n = 0;n < channels;n++)
+			{
+				int val = v;
+				if(n < 4)
+				{
+					val = (int)((double)v * factor[n]);
+					if(val < 0)
+					{
+						val = 0;
+					}
+					if(val > 255)
+					{
+						val = 255;
+					}
+				}
+				p[(v * channels) + n] = (uchar)val;
+			}
+		}
+		LUT(frame, lut, frame);
+	}
+}
+// END OPTIMIZED NESTED LOOP ROUTINES
 
 void rounded_rectangle(Mat& src, Point topLeft, Point bottomRight, const Scalar lineColor, int thickness, const int lineType , const int cornerRadius)
 {
@@ -3122,72 +3306,6 @@ void	clahe_mat(Mat& mat, double contrast)
 	cv::Mat image_clahe;
 	cv::cvtColor(lab_image, mat, COLOR_Lab2BGR);
 	cv::cvtColor(mat, mat, COLOR_BGR2BGRA);
-}
-
-Mat	change_saturation(Mat& frame, double amount)
-{
-int	i, j;
-
-	Mat hsv;
-	cvtColor(frame, hsv, COLOR_RGB2HSV);
-	const unsigned char hue_shift = 20;
-	for(j = 0; j < frame.rows; j++)
-	{
-		for(i = 0; i < frame.cols; i++)
-		{
-			unsigned char h = hsv.at<Vec3b>(j, i)[1];
-			double nn = h;
-			nn *= amount;
-			hsv.at<Vec3b>(j, i)[1] = (unsigned char)nn;
-		}
-	}
-	cvtColor(hsv, frame, COLOR_HSV2RGB);
-	cvtColor(frame, frame, COLOR_RGB2RGBA);
-	return(frame);
-}
-
-Mat	change_hue(Mat frame, double amount)
-{
-int	i, j;
-
-	Mat hsv;
-	cvtColor(frame, hsv, COLOR_RGB2HSV);
-	const unsigned char hue_shift = 20;
-	for(j = 0; j < frame.rows; j++)
-	{
-		for(i = 0; i < frame.cols; i++)
-		{
-			unsigned char h = hsv.at<Vec3b>(j, i)[0];
-			double nn = h;
-			nn *= amount;
-			hsv.at<Vec3b>(j, i)[0] = (unsigned char)nn;
-		}
-	}
-	cvtColor(hsv, frame, COLOR_HSV2RGB);
-	cvtColor(frame, frame, COLOR_RGB2RGBA);
-	return(frame);
-}
-
-Mat	change_intensity(Mat frame, double amount)
-{
-int	i, j;
-
-	Mat hsv;
-	cvtColor(frame, hsv, COLOR_RGB2HSV);
-	const unsigned char hue_shift = 20;
-	for(j = 0; j < frame.rows; j++)
-	{
-		for(i = 0; i < frame.cols; i++)
-		{
-			unsigned char h = hsv.at<Vec3b>(j, i)[2];
-			double nn = h;
-			nn *= amount;
-			hsv.at<Vec3b>(j, i)[2] = (unsigned char)nn;
-		}
-	}
-	cvtColor(hsv, frame, COLOR_HSV2RGB);
-	cvtColor(frame, frame, COLOR_RGB2RGBA);
-	return(frame);
 }
 
 void sharpen2D(double amt, const cv::Mat &image, cv::Mat &result)
@@ -3710,6 +3828,7 @@ static int last_x = 0;
 		fl_color(YELLOW);
 		fl_line_style(FL_SOLID, 2);
 		fl_line(nx, ny, nx, ny - baseline);
+		fl_line_style(FL_SOLID, 1);
 	}
 }
 
@@ -4120,32 +4239,6 @@ void	char_replace(char *in, char one, char two)
 			*cp = two;
 		}
 		cp++;
-	}
-}
-
-void	change_alpha(Mat rgba, int direction)
-{
-	for(int y = 0; y < rgba.rows; ++y)
-	{
-		for(int x = 0; x < rgba.cols; ++x)
-		{
-			cv::Vec4b & pixel = rgba.at<cv::Vec4b>(y, x);
-			int val = pixel[3];
-			if(direction > 0)
-			{
-				if(val < 255)
-				{
-					pixel[3]++;
-				}
-			}
-			else
-			{
-				if(val > 0)
-				{
-					pixel[3]--;
-				}
-			}
-		}
 	}
 }
 
@@ -6202,69 +6295,22 @@ int	loop;
 	return(total);
 }
 
-
-void	overlay_with_alpha(Mat& img, Mat& ov, int start_x = 0, int start_y = 0)
+void blend_two(cv::Mat one, cv::Mat two, int xx, int yy, double alpha)
 {
-	for(int yy = 0;yy < ov.rows;yy++)
-	{
-		for(int xx = 0;xx < ov.cols;xx++)
-		{
-			int x = start_x + xx;
-			int y = start_y + yy;
-			if((x < img.cols) && (y < img.rows))
-			{
-				int alpha = ov.at<Vec4b>(yy, xx)[3];
-				double d_alpha = (double)((1.0 / 255.0) * (double)alpha);
-				double d_beta = 1.0 - d_alpha;
-
-				double r1 = (double)img.at<Vec3b>(y, x)[0];
-				double g1 = (double)img.at<Vec3b>(y, x)[1];
-				double b1 = (double)img.at<Vec3b>(y, x)[2];
-
-				double r2 = (double)ov.at<Vec4b>(yy, xx)[0];
-				double g2 = (double)ov.at<Vec4b>(yy, xx)[1];
-				double b2 = (double)ov.at<Vec4b>(yy, xx)[2];
-
-				img.at<Vec3b>(y, x)[0] = (uchar)((r1 * d_beta) + (r2 * d_alpha));
-				img.at<Vec3b>(y, x)[1] = (uchar)((g1 * d_beta) + (g2 * d_alpha));
-				img.at<Vec3b>(y, x)[2] = (uchar)((b1 * d_beta) + (b2 * d_alpha));
-			}
-		}
-	}
-}
-
-
-void	blend_two(Mat one, Mat two, int xx, int yy, double alpha)
-{
-int	row, col;
-
 	if(alpha < 1.0)
 	{
-		double beta = (1.0 - alpha);
-		for(row = 0;row < two.rows;row++)
+		// Overlap of 'two' (placed at xx,yy) with 'one', in one's coordinates
+		cv::Rect overlap = cv::Rect(0, 0, one.cols, one.rows) & cv::Rect(xx, yy, two.cols, two.rows);
+		if(!overlap.empty())
 		{
-			for(col = 0;col < two.cols;col++)
-			{
-				int nx = col + xx;
-				int ny = row + yy;
-				if((nx < one.cols) && (ny < one.rows))
-				{
-					unsigned char *color1 = one.ptr(row + yy, col + xx);
-					unsigned char *color2 = two.ptr(row, col);
-
-					double r1 = (double)color1[0] * beta;
-					double g1 = (double)color1[1] * beta;
-					double b1 = (double)color1[2] * beta;
-
-					double r2 = (double)color2[0] * alpha;
-					double g2 = (double)color2[1] * alpha;
-					double b2 = (double)color2[2] * alpha;
-
-					color2[0] = r1 + r2;
-					color2[1] = g1 + g2;
-					color2[2] = b1 + b2;
-				}
-			}
+			// Same region expressed in two's coordinates
+			cv::Rect overlapTwo(overlap.x - xx, overlap.y - yy, overlap.width, overlap.height);
+	
+			cv::Mat roiOne = one(overlap);
+			cv::Mat roiTwo = two(overlapTwo);
+	
+			// roiTwo = roiOne*(1-alpha) + roiTwo*alpha   (in place, result lands in 'two')
+			cv::addWeighted(roiOne, 1.0 - alpha, roiTwo, alpha, 0.0, roiTwo);
 		}
 	}
 }
@@ -6629,27 +6675,6 @@ long			*extents;
 	return(hh);
 }
 
-void	invert_mat(Mat one)
-{
-int	row, col;
-
-	for(row = 0;row < one.rows;row++)
-	{
-		for(col = 0;col < one.cols;col++)
-		{
-			unsigned char *color1 = one.ptr(row, col);
-
-			unsigned char r1 = (double)color1[0];
-			unsigned char g1 = (double)color1[1];
-			unsigned char b1 = (double)color1[2];
-
-			color1[0] = 255 - r1;
-			color1[1] = 255 - g1;
-			color1[2] = 255 - b1;
-		}
-	}
-}
-
 void	chromakey2(Mat& src, Mat& img, Mat& result, double a1, double a2)
 {
 	Size S = Size((int)src.cols, (int)src.rows);
@@ -6718,6 +6743,90 @@ void	chromakey(Mat& src, Mat& result, int use_color, double a1, double a2)
 	res.convertTo(res, CV_8UC4, 255);
 
 	result = res.clone();
+}
+
+// SECTION *********************************** NUMERIC INPUT *******************************************
+
+IntInput::IntInput(int xx, int yy, int ww, int hh, char *lbl = NULL) : Fl_Int_Input(xx, yy, ww, hh, lbl)
+{
+	box(FL_FLAT_BOX);
+	color(WHITE);
+	textcolor(BLACK);
+	labelcolor(WHITE);
+	textsize(11);
+	labelsize(11);
+}
+
+IntInput::~IntInput()
+{
+}
+
+int	IntInput::handle(int event)
+{
+	int flag = 0;
+	if(flag == 0)
+	{
+		flag = Fl_Int_Input::handle(event);
+	}
+	return(flag);
+}
+
+void	IntInput::draw()
+{
+	Fl_Int_Input::draw();
+	if(Fl::focus() != this)
+	{
+		int inner_x = x() + Fl::box_dx(box());
+		int inner_y = y() + Fl::box_dy(box());
+		int inner_w = w() - Fl::box_dw(box());
+		int inner_h = h() - Fl::box_dh(box());
+
+		fl_color(color());
+		fl_rectf(inner_x, inner_y, inner_w, inner_h);
+		fl_color(textcolor());
+		fl_draw(value(), inner_x, inner_y, inner_w, inner_h, FL_ALIGN_RIGHT);
+	}
+}
+
+FloatInput::FloatInput(int xx, int yy, int ww, int hh, char *lbl = NULL) : Fl_Float_Input(xx, yy, ww, hh, lbl)
+{
+	box(FL_FLAT_BOX);
+	color(WHITE);
+	textcolor(BLACK);
+	labelcolor(WHITE);
+	textsize(9);
+	labelsize(9);
+}
+
+FloatInput::~FloatInput()
+{
+}
+
+int	FloatInput::handle(int event)
+{
+	int flag = 0;
+	if(flag == 0)
+	{
+		flag = Fl_Float_Input::handle(event);
+	}
+	return(flag);
+}
+
+void	FloatInput::draw()
+{
+	Fl_Float_Input::draw();
+	if(Fl::focus() != this)
+	{
+		int inner_x = x() + Fl::box_dx(box());
+		int inner_y = y() + Fl::box_dy(box());
+		int inner_w = w() - Fl::box_dw(box());
+		int inner_h = h() - Fl::box_dh(box());
+
+		fl_color(color());
+		fl_rectf(inner_x, inner_y, inner_w, inner_h);
+		fl_color(textcolor());
+		fl_draw(value(), inner_x, inner_y, inner_w, inner_h, FL_ALIGN_RIGHT);
+	}
 }
 
 // SECTION *********************************** NAV BROWSER *******************************************
@@ -7226,9 +7335,11 @@ SimpleScroll::SimpleScroll(MyWin *in_my_window, ShapedDialog *in_shaped_dialog, 
 	type(VERTICAL);
 	hscrollbar.hide();
 	scrollbar.hide();
-	scrollbar_size(1);
-	scrollbar.color(DARK_GRAY);
-	scrollbar.labelcolor(DARK_GRAY);
+	scrollbar_size(4);
+	scrollbar.color(BLACK);
+	scrollbar.labelcolor(BLACK);
+	scrollbar.selection_color(fl_lighter(GRAY));
+	scrollbar.slider(FL_FLAT_BOX);
 }
 
 SimpleScroll::~SimpleScroll()
@@ -7523,470 +7634,708 @@ void	ResizeFrame::Scale(double old_w, double old_h, double new_w, double new_h)
 	}
 }
 
-int		ResizeFrame::handle(int event)
+int		ResizeFrame::OnPush()
 {
 	int flag = 0;
-	if(event == FL_PUSH)
+	if(Fl::event_button() == FL_LEFT_MOUSE)
 	{
-		if(Fl::event_button() == FL_LEFT_MOUSE)
-		{
-			if(use != NULL)
-			{
-				int xx = Fl::event_x();
-				int yy = Fl::event_y();
-				if((xx >= use->x() + 10) && (yy >= use->y() + 13)
-				&& (xx <= use->x() + 20) && (yy <= use->y() + 23)
-				&& (operation == FRAME_OPERATION_DELETE))
-				{
-					if(object_type == FRAME_OBJECT_TYPE_IMAGE_WINDOW)
-					{
-						ImageWindow *im = (ImageWindow *)use;
-						use = NULL;
-						im->Delete();
-					}
-					else if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
-					{
-						Immediate *im = (Immediate *)use;
-						use = NULL;
-						Camera *cam = my_window->DisplayedCamera();
-						my_window->immediate_drawing_window->ClearSelectedWidget();
-						my_window->use_mousewheel = 1;
-						cam->RemoveImmediate(im);
-						Fl::delete_widget(im);
-					}
-					hide();
-					flag = 1;
-				}
-				else if((xx > use->x() + 25) && (yy > use->y() + 12)
-				&& (xx < use->x() + 115) && (yy < use->y() + 26))
-				{
-					if(Fl::event_state(FL_BUTTON1) == FL_BUTTON1)
-					{
-						operation++;
-						if(operation > FRAME_OPERATION_DELETE)
-						{
-							operation = FRAME_OPERATION_PROPORTIONAL_RESIZE;
-						}
-						flag = 1;
-						ignore_release = 1;
-					}
-				}
-				else if(((xx > x()) && (xx < x() + 20))
-				&& ((yy > y()) && (yy < y() + 20)))
-				{
-					if(operation != FRAME_OPERATION_DELETE)
-					{
-						mode = DRAG_MODE_LEFT_TOP;
-						drag_start_x = xx;
-						drag_start_y = yy;
-						flag = 1;
-					}
-				}
-				else if(((xx > x()) && (xx < x() + 20))
-				&& ((yy < y() + h()) && (yy > y() + h() - 20)))
-				{
-					if(operation != FRAME_OPERATION_DELETE)
-					{
-						mode = DRAG_MODE_LEFT_BOTTOM;
-						drag_start_x = xx;
-						drag_start_y = yy;
-						flag = 1;
-					}
-				}
-				else if(((xx < x() + w()) && (xx > x() + w() - 20))
-				&& ((yy < y() + h()) && (yy > y() + h() - 20)))
-				{
-					if(operation != FRAME_OPERATION_DELETE)
-					{
-						mode = DRAG_MODE_RIGHT_BOTTOM;
-						drag_start_x = xx;
-						drag_start_y = yy;
-						flag = 1;
-					}
-				}
-				else if(((xx < x() + w()) && (xx > x() + w() - 20))
-				&& ((yy > y()) && (yy < y() + 20)))
-				{
-					if(operation != FRAME_OPERATION_DELETE)
-					{
-						mode = DRAG_MODE_RIGHT_TOP;
-						drag_start_x = xx;
-						drag_start_y = yy;
-						flag = 1;
-					}
-				}
-				else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
-				&& ((yy > y()) && (yy < y() + 16)))
-				{
-					if(operation != FRAME_OPERATION_DELETE)
-					{
-						mode = DRAG_MODE_TOP;
-						drag_start_x = xx;
-						drag_start_y = yy;
-						flag = 1;
-					}
-				}
-				else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
-				&& ((yy > y() + h() - 16) && (yy < y() + h())))
-				{
-					if(operation != FRAME_OPERATION_DELETE)
-					{
-						mode = DRAG_MODE_BOTTOM;
-						drag_start_x = xx;
-						drag_start_y = yy;
-						flag = 1;
-					}
-				}
-				else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
-				&& ((xx > x()) && (xx < x() + 16)))
-				{
-					if(operation != FRAME_OPERATION_DELETE)
-					{
-						mode = DRAG_MODE_LEFT;
-						drag_start_x = xx;
-						drag_start_y = yy;
-						flag = 1;
-					}
-				}
-				else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
-				&& ((xx > x() + w() - 16) && (xx < x() + w())))
-				{
-					if(operation != FRAME_OPERATION_DELETE)
-					{
-						mode = DRAG_MODE_RIGHT;
-						drag_start_x = xx;
-						drag_start_y = yy;
-						flag = 1;
-					}
-				}
-			}
-		}
-		else if(Fl::event_button() == FL_MIDDLE_MOUSE)
+		if(use != NULL)
 		{
 			int xx = Fl::event_x();
 			int yy = Fl::event_y();
-			if((xx > x() + 25) && (yy > y() + 12)
-			&& (xx < x() + 115) && (yy < y() + 26))
+			if((xx >= use->x() + 10) && (yy >= use->y() + 13)
+			&& (xx <= use->x() + 20) && (yy <= use->y() + 23)
+			&& (operation == FRAME_OPERATION_DELETE))
+			{
+				if(object_type == FRAME_OBJECT_TYPE_IMAGE_WINDOW)
+				{
+					ImageWindow *im = (ImageWindow *)use;
+					use = NULL;
+					im->Delete();
+				}
+				else if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
+				{
+					Immediate *im = (Immediate *)use;
+					use = NULL;
+					Camera *cam = my_window->DisplayedCamera();
+					my_window->immediate_drawing_window->ClearSelectedWidget();
+					my_window->use_mousewheel = 1;
+					cam->RemoveImmediate(im);
+					Fl::delete_widget(im);
+				}
+				hide();
+				flag = 1;
+			}
+			else if((xx > use->x() + 25) && (yy > use->y() + 12)
+			&& (xx < use->x() + 115) && (yy < use->y() + 26))
+			{
+				if(Fl::event_state(FL_BUTTON1) == FL_BUTTON1)
+				{
+					operation++;
+					if(operation > FRAME_OPERATION_DELETE)
+					{
+						operation = FRAME_OPERATION_PROPORTIONAL_RESIZE;
+					}
+					flag = 1;
+					ignore_release = 1;
+				}
+			}
+			else if(((xx > x()) && (xx < x() + 20))
+			&& ((yy > y()) && (yy < y() + 20)))
+			{
+				if(operation != FRAME_OPERATION_DELETE)
+				{
+					mode = DRAG_MODE_LEFT_TOP;
+					drag_start_x = xx;
+					drag_start_y = yy;
+					flag = 1;
+				}
+			}
+			else if(((xx > x()) && (xx < x() + 20))
+			&& ((yy < y() + h()) && (yy > y() + h() - 20)))
+			{
+				if(operation != FRAME_OPERATION_DELETE)
+				{
+					mode = DRAG_MODE_LEFT_BOTTOM;
+					drag_start_x = xx;
+					drag_start_y = yy;
+					flag = 1;
+				}
+			}
+			else if(((xx < x() + w()) && (xx > x() + w() - 20))
+			&& ((yy < y() + h()) && (yy > y() + h() - 20)))
+			{
+				if(operation != FRAME_OPERATION_DELETE)
+				{
+					mode = DRAG_MODE_RIGHT_BOTTOM;
+					drag_start_x = xx;
+					drag_start_y = yy;
+					flag = 1;
+				}
+			}
+			else if(((xx < x() + w()) && (xx > x() + w() - 20))
+			&& ((yy > y()) && (yy < y() + 20)))
+			{
+				if(operation != FRAME_OPERATION_DELETE)
+				{
+					mode = DRAG_MODE_RIGHT_TOP;
+					drag_start_x = xx;
+					drag_start_y = yy;
+					flag = 1;
+				}
+			}
+			else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
+			&& ((yy > y()) && (yy < y() + 16)))
+			{
+				if(operation != FRAME_OPERATION_DELETE)
+				{
+					mode = DRAG_MODE_TOP;
+					drag_start_x = xx;
+					drag_start_y = yy;
+					flag = 1;
+				}
+			}
+			else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
+			&& ((yy > y() + h() - 16) && (yy < y() + h())))
+			{
+				if(operation != FRAME_OPERATION_DELETE)
+				{
+					mode = DRAG_MODE_BOTTOM;
+					drag_start_x = xx;
+					drag_start_y = yy;
+					flag = 1;
+				}
+			}
+			else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
+			&& ((xx > x()) && (xx < x() + 16)))
+			{
+				if(operation != FRAME_OPERATION_DELETE)
+				{
+					mode = DRAG_MODE_LEFT;
+					drag_start_x = xx;
+					drag_start_y = yy;
+					flag = 1;
+				}
+			}
+			else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
+			&& ((xx > x() + w() - 16) && (xx < x() + w())))
+			{
+				if(operation != FRAME_OPERATION_DELETE)
+				{
+					mode = DRAG_MODE_RIGHT;
+					drag_start_x = xx;
+					drag_start_y = yy;
+					flag = 1;
+				}
+			}
+		}
+	}
+	else if(Fl::event_button() == FL_MIDDLE_MOUSE)
+	{
+		int xx = Fl::event_x();
+		int yy = Fl::event_y();
+		if((xx > x() + 25) && (yy > y() + 12)
+		&& (xx < x() + 115) && (yy < y() + 26))
+		{
+			operation--;
+			if(operation < FRAME_OPERATION_PROPORTIONAL_RESIZE)
+			{
+				operation = FRAME_OPERATION_DELETE;
+			}
+			flag = 1;
+			ignore_release = 1;
+		}
+	}
+	return(flag);
+}
+
+int		ResizeFrame::OnDrag()
+{
+	int flag = 0;
+	if(Fl::event_button() == FL_LEFT_MOUSE)
+	{
+		if(use != NULL)
+		{
+			if((operation != FRAME_OPERATION_DELETE)
+			&& (operation != FRAME_OPERATION_ROTATE))
+			{
+				if(mode == DRAG_MODE_LEFT_TOP)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					int dx = drag_start_x - xx;
+					int dy = drag_start_y - yy;
+					if((w() + dx > 20) && (h() + dy > 20))
+					{
+						resize(x() - dx, y() - dy, w() + dx, h() + dy);
+						AdjustImmediateLinePosition(dx, dy);
+						drag_start_x = xx;
+						drag_start_y = yy;
+					}
+					flag = 1;
+				}
+				else if(mode == DRAG_MODE_LEFT_BOTTOM)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					int dx = drag_start_x - xx;
+					int dy = drag_start_y - yy;
+					if((w() + dx > 20) && (h() - dy > 20))
+					{
+						resize(x() - dx, y(), w() + dx, h() - dy);
+						AdjustImmediateLinePosition(dx, 0);
+						drag_start_x = xx;
+						drag_start_y = yy;
+					}
+					flag = 1;
+				}
+				else if(mode == DRAG_MODE_RIGHT_TOP)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					int dx = drag_start_x - xx;
+					int dy = drag_start_y - yy;
+					if((w() - dx > 20) && (h() + dy > 20))
+					{
+						resize(x(), y() - dy, w() - dx, h() + dy);
+						AdjustImmediateLinePosition(0, dy);
+						drag_start_x = xx;
+						drag_start_y = yy;
+					}
+					flag = 1;
+				}
+				else if(mode == DRAG_MODE_RIGHT_BOTTOM)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					int dx = drag_start_x - xx;
+					int dy = drag_start_y - yy;
+					if((w() - dx > 20) && (h() - dy > 20))
+					{
+						resize(x(), y(), w() - dx, h() - dy);
+						drag_start_x = xx;
+						drag_start_y = yy;
+					}
+					flag = 1;
+				}
+				else if(mode == DRAG_MODE_TOP)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					int dx = drag_start_x - xx;
+					int dy = drag_start_y - yy;
+					if(h() + dy > 20)
+					{
+						resize(x(), y() - dy, w(), h() + dy);
+						AdjustImmediateLinePosition(0, dy);
+						drag_start_x = xx;
+						drag_start_y = yy;
+					}
+					flag = 1;
+				}
+				else if(mode == DRAG_MODE_BOTTOM)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					int dx = drag_start_x - xx;
+					int dy = drag_start_y - yy;
+					if(h() - dy > 20)
+					{
+						resize(x(), y(), w(), h() - dy);
+						drag_start_x = xx;
+						drag_start_y = yy;
+					}
+					flag = 1;
+				}
+				else if(mode == DRAG_MODE_LEFT)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					int dx = drag_start_x - xx;
+					int dy = drag_start_y - yy;
+					if(w() + dx > 20)
+					{
+						resize(x() - dx, y(), w() + dx, h());
+						AdjustImmediateLinePosition(dx, 0);
+						drag_start_x = xx;
+						drag_start_y = yy;
+					}
+					flag = 1;
+				}
+				else if(mode == DRAG_MODE_RIGHT)
+				{
+					int xx = Fl::event_x();
+					int yy = Fl::event_y();
+					int dx = drag_start_x - xx;
+					int dy = drag_start_y - yy;
+					if(w() - dx > 20)
+					{
+						resize(x(), y(), w() - dx, h());
+						drag_start_x = xx;
+						drag_start_y = yy;
+					}
+					flag = 1;
+				}
+				if(mode > 0)
+				{
+					if((operation == FRAME_OPERATION_FREE_RESIZE)
+					|| (operation == FRAME_OPERATION_RESIZE_FRAME))
+					{
+						if(operation == FRAME_OPERATION_RESIZE_FRAME)
+						{
+							resize_frame_only = 1;
+							use->user_data((void *)1);
+						}
+						else
+						{
+							resize_frame_only = 0;
+							use->user_data((void *)0);
+						}
+						Camera *cam = my_window->DisplayedCamera();
+						int use_x = x() + 6;
+						int use_y = y() + 6;
+						int use_w = w() - 12;
+						int use_h = h() - (12 * proportion);
+						int ux = use_x - cam->image_sx;
+						int uy = use_y - cam->image_sy;
+						my_window->SnapToGrid(ux, uy, use_w, use_h);
+						use_x = ux + cam->image_sx;
+						use_y = uy + cam->image_sy;
+						if(resize_frame_only == 0)
+						{
+							int old_w = use->w();
+							int old_h = use->h();
+							use->resize(use_x, use_y, use_w, use_h);
+							Scale(old_w, old_h, use_w, use_h);
+						}
+					}
+					else if(operation == FRAME_OPERATION_PROPORTIONAL_RESIZE)
+					{
+						resize_frame_only = 0;
+						use->user_data((void *)0);
+						double ddh = proportion * (double)w();
+						int old_w = use->w();
+						int old_h = use->h();
+						resize(x(), y(), w(), ddh);
+						use->resize(x() + 6, y() + 6, w() - 12, h() - (12.0 * proportion));
+						Scale(old_w, old_h, use->w(), use->h());
+					}
+					else if(operation == FRAME_OPERATION_CROP)
+					{
+					}
+				}
+			}
+			else if(operation == FRAME_OPERATION_ROTATE)
+			{
+				int xx = Fl::event_x();
+				int yy = Fl::event_y();
+				int dy = drag_start_y - yy;
+				if(xx > x() + (w() / 2))
+				{
+					if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
+					{
+						Immediate *im = (Immediate *)use;
+						if(dy > 0)
+						{
+							im->angle -= M_PI / 100.0;
+							drag_start_y = yy;
+							im->redraw();
+						}
+						else if(dy < 0)
+						{
+							im->angle += M_PI / 100.0;
+							drag_start_y = yy;
+							im->redraw();
+						}
+					}
+					else
+					{
+						ImageWindow *iw = (ImageWindow *)use;
+						if(dy > 0)
+						{
+							iw->angle -= M_PI / 100.0;
+							drag_start_y = yy;
+							iw->redraw();
+						}
+						else if(dy < 0)
+						{
+							iw->angle += M_PI / 100.0;
+							drag_start_y = yy;
+							iw->redraw();
+						}
+					}
+				}
+				else
+				{
+					if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
+					{
+						Immediate *im = (Immediate *)use;
+						if(dy < 0)
+						{
+							im->angle -= M_PI / 100.0;
+							drag_start_y = yy;
+							im->redraw();
+						}
+						else if(dy > 0)
+						{
+							im->angle += M_PI / 100.0;
+							drag_start_y = yy;
+							im->redraw();
+						}
+					}
+					else
+					{
+						ImageWindow *iw = (ImageWindow *)use;
+						if(dy < 0)
+						{
+							iw->angle -= M_PI / 100.0;
+							drag_start_y = yy;
+							iw->redraw();
+						}
+						else if(dy > 0)
+						{
+							iw->angle += M_PI / 100.0;
+							drag_start_y = yy;
+							iw->redraw();
+						}
+					}
+				}
+				flag = 1;
+			}
+		}
+	}
+	return(flag);
+}
+
+int		ResizeFrame::OnRelease()
+{
+	int flag = 0;
+	if((mode > 0) && (ignore_release == 0))
+	{
+		if(Fl::event_button() == FL_LEFT_MOUSE)
+		{
+			if(operation == FRAME_OPERATION_PROPORTIONAL_RESIZE)
+			{
+				double ddh = proportion * (double)w();
+				resize(x(), y(), w(), ddh);
+				use->size(w() - 12, h() - (12.0 * proportion));
+			}
+			else if(operation == FRAME_OPERATION_CROP)
+			{
+				if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
+				{
+					Immediate *im = (Immediate *)use;
+					int xx = x() - im->x();
+					int yy = y() - im->y();
+					int ww = w();
+					int hh = h();
+					im->crop_x = xx;
+					im->crop_y = yy;
+					im->crop_w = ww;
+					im->crop_h = hh;
+				}
+				else
+				{
+					ImageWindow *im = (ImageWindow *)use;
+					int xx = x() - im->x();
+					if(xx < 0) xx = 0;
+					int yy = y() - im->y();
+					if(yy < 0) yy = 0;
+					int ww = w();
+					if(ww > im->w() - 1) ww = im->w() - 1;
+					int hh = h();
+					if(hh > im->h() - 1) hh = im->h() - 1;
+					im->crop_x = xx;
+					im->crop_y = yy;
+					im->crop_w = ww;
+					im->crop_h = hh;
+				}
+			}
+			mode = 0;
+			drag_start_x = -1;
+			drag_start_y = -1;
+			if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
+			{
+				AdjustForImmediateLine();
+			}
+			flag = 1;
+		}
+	}
+	ignore_release = 0;
+	return(flag);
+}
+
+int		ResizeFrame::OnMousewheel()
+{
+	int flag = 0;
+	if(use != NULL)
+	{
+		int xx = Fl::event_x();
+		int yy = Fl::event_y();
+		if((xx > x() + 25) && (yy > y() + 12)
+		&& (xx < x() + 115) && (yy < y() + 26))
+		{
+			int ry = Fl::event_dy();
+			if(ry < 0)
 			{
 				operation--;
 				if(operation < FRAME_OPERATION_PROPORTIONAL_RESIZE)
 				{
 					operation = FRAME_OPERATION_DELETE;
 				}
-				flag = 1;
+				ignore_release = 1;
+			}
+			else if(ry > 0)
+			{
+				operation++;
+				if(operation > FRAME_OPERATION_DELETE)
+				{
+					operation = FRAME_OPERATION_PROPORTIONAL_RESIZE;
+				}
 				ignore_release = 1;
 			}
 		}
-	}
-	else if(event == FL_DRAG)
-	{
-		if(Fl::event_button() == FL_LEFT_MOUSE)
+		else
 		{
-			if(use != NULL)
+			if(operation == FRAME_OPERATION_ROTATE)
 			{
-				if((operation != FRAME_OPERATION_DELETE)
-				&& (operation != FRAME_OPERATION_ROTATE))
+				if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
 				{
-					if(mode == DRAG_MODE_LEFT_TOP)
+					Immediate *im = (Immediate *)use;
+					int nn = Fl::event_dy();
+					if(nn < 0)
 					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						int dx = drag_start_x - xx;
-						int dy = drag_start_y - yy;
-						if((w() + dx > 20) && (h() + dy > 20))
-						{
-							resize(x() - dx, y() - dy, w() + dx, h() + dy);
-							AdjustImmediateLinePosition(dx, dy);
-							drag_start_x = xx;
-							drag_start_y = yy;
-						}
-						flag = 1;
+						im->angle -= M_PI / 1000.0;
+						im->redraw();
 					}
-					else if(mode == DRAG_MODE_LEFT_BOTTOM)
+					else if(nn > 0)
 					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						int dx = drag_start_x - xx;
-						int dy = drag_start_y - yy;
-						if((w() + dx > 20) && (h() - dy > 20))
-						{
-							resize(x() - dx, y(), w() + dx, h() - dy);
-							AdjustImmediateLinePosition(dx, 0);
-							drag_start_x = xx;
-							drag_start_y = yy;
-						}
-						flag = 1;
-					}
-					else if(mode == DRAG_MODE_RIGHT_TOP)
-					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						int dx = drag_start_x - xx;
-						int dy = drag_start_y - yy;
-						if((w() - dx > 20) && (h() + dy > 20))
-						{
-							resize(x(), y() - dy, w() - dx, h() + dy);
-							AdjustImmediateLinePosition(0, dy);
-							drag_start_x = xx;
-							drag_start_y = yy;
-						}
-						flag = 1;
-					}
-					else if(mode == DRAG_MODE_RIGHT_BOTTOM)
-					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						int dx = drag_start_x - xx;
-						int dy = drag_start_y - yy;
-						if((w() - dx > 20) && (h() - dy > 20))
-						{
-							resize(x(), y(), w() - dx, h() - dy);
-							drag_start_x = xx;
-							drag_start_y = yy;
-						}
-						flag = 1;
-					}
-					else if(mode == DRAG_MODE_TOP)
-					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						int dx = drag_start_x - xx;
-						int dy = drag_start_y - yy;
-						if(h() + dy > 20)
-						{
-							resize(x(), y() - dy, w(), h() + dy);
-							AdjustImmediateLinePosition(0, dy);
-							drag_start_x = xx;
-							drag_start_y = yy;
-						}
-						flag = 1;
-					}
-					else if(mode == DRAG_MODE_BOTTOM)
-					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						int dx = drag_start_x - xx;
-						int dy = drag_start_y - yy;
-						if(h() - dy > 20)
-						{
-							resize(x(), y(), w(), h() - dy);
-							drag_start_x = xx;
-							drag_start_y = yy;
-						}
-						flag = 1;
-					}
-					else if(mode == DRAG_MODE_LEFT)
-					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						int dx = drag_start_x - xx;
-						int dy = drag_start_y - yy;
-						if(w() + dx > 20)
-						{
-							resize(x() - dx, y(), w() + dx, h());
-							AdjustImmediateLinePosition(dx, 0);
-							drag_start_x = xx;
-							drag_start_y = yy;
-						}
-						flag = 1;
-					}
-					else if(mode == DRAG_MODE_RIGHT)
-					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						int dx = drag_start_x - xx;
-						int dy = drag_start_y - yy;
-						if(w() - dx > 20)
-						{
-							resize(x(), y(), w() - dx, h());
-							drag_start_x = xx;
-							drag_start_y = yy;
-						}
-						flag = 1;
-					}
-					if(mode > 0)
-					{
-						if((operation == FRAME_OPERATION_FREE_RESIZE)
-						|| (operation == FRAME_OPERATION_RESIZE_FRAME))
-						{
-							if(operation == FRAME_OPERATION_RESIZE_FRAME)
-							{
-								resize_frame_only = 1;
-								use->user_data((void *)1);
-							}
-							else
-							{
-								resize_frame_only = 0;
-								use->user_data((void *)0);
-							}
-							Camera *cam = my_window->DisplayedCamera();
-							int use_x = x() + 6;
-							int use_y = y() + 6;
-							int use_w = w() - 12;
-							int use_h = h() - (12 * proportion);
-							int ux = use_x - cam->image_sx;
-							int uy = use_y - cam->image_sy;
-							my_window->SnapToGrid(ux, uy, use_w, use_h);
-							use_x = ux + cam->image_sx;
-							use_y = uy + cam->image_sy;
-							if(resize_frame_only == 0)
-							{
-								int old_w = use->w();
-								int old_h = use->h();
-								use->resize(use_x, use_y, use_w, use_h);
-								Scale(old_w, old_h, use_w, use_h);
-							}
-						}
-						else if(operation == FRAME_OPERATION_PROPORTIONAL_RESIZE)
-						{
-							resize_frame_only = 0;
-							use->user_data((void *)0);
-							double ddh = proportion * (double)w();
-							int old_w = use->w();
-							int old_h = use->h();
-							resize(x(), y(), w(), ddh);
-							use->resize(x() + 6, y() + 6, w() - 12, h() - (12.0 * proportion));
-							Scale(old_w, old_h, use->w(), use->h());
-						}
-						else if(operation == FRAME_OPERATION_CROP)
-						{
-						}
+						im->angle += M_PI / 1000.0;
+						im->redraw();
 					}
 				}
-				else if(operation == FRAME_OPERATION_ROTATE)
+				else
 				{
-					int xx = Fl::event_x();
-					int yy = Fl::event_y();
-					int dy = drag_start_y - yy;
-					if(xx > x() + (w() / 2))
+					ImageWindow *iw = (ImageWindow *)use;
+					int nn = Fl::event_dy();
+					if(nn < 0)
 					{
-						if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
-						{
-							Immediate *im = (Immediate *)use;
-							if(dy > 0)
-							{
-								im->angle -= M_PI / 100.0;
-								drag_start_y = yy;
-								im->redraw();
-							}
-							else if(dy < 0)
-							{
-								im->angle += M_PI / 100.0;
-								drag_start_y = yy;
-								im->redraw();
-							}
-						}
-						else
-						{
-							ImageWindow *iw = (ImageWindow *)use;
-							if(dy > 0)
-							{
-								iw->angle -= M_PI / 100.0;
-								drag_start_y = yy;
-								iw->redraw();
-							}
-							else if(dy < 0)
-							{
-								iw->angle += M_PI / 100.0;
-								drag_start_y = yy;
-								iw->redraw();
-							}
-						}
+						iw->angle -= M_PI / 1000.0;
+						iw->redraw();
 					}
-					else
+					else if(nn > 0)
 					{
-						if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
-						{
-							Immediate *im = (Immediate *)use;
-							if(dy < 0)
-							{
-								im->angle -= M_PI / 100.0;
-								drag_start_y = yy;
-								im->redraw();
-							}
-							else if(dy > 0)
-							{
-								im->angle += M_PI / 100.0;
-								drag_start_y = yy;
-								im->redraw();
-							}
-						}
-						else
-						{
-							ImageWindow *iw = (ImageWindow *)use;
-							if(dy < 0)
-							{
-								iw->angle -= M_PI / 100.0;
-								drag_start_y = yy;
-								iw->redraw();
-							}
-							else if(dy > 0)
-							{
-								iw->angle += M_PI / 100.0;
-								drag_start_y = yy;
-								iw->redraw();
-							}
-						}
+						iw->angle += M_PI / 1000.0;
+						iw->redraw();
 					}
-					flag = 1;
+				}
+			}
+			else
+			{
+				int nn = Fl::event_dy();
+				if(nn > 0)
+				{
+					resize(x(), y(), dw * 1.01, dh * 1.01);
+					use->size(w() - 12, h() - (12.0 * proportion));
+				}
+				else if(nn < 0)
+				{
+					resize(x(), y(), dw * 0.99, dh * 0.99);
+					use->size(w() - 12, h() - (12.0 * proportion));
 				}
 			}
 		}
+		flag = 1;
 	}
-	else if(event == FL_RELEASE)
+	return(flag);
+}
+
+int		ResizeFrame::OnMove()
+{
+	int flag = 0;
+	if(Fl::event_inside(this))
 	{
-		if((mode > 0) && (ignore_release == 0))
+		int xx = Fl::event_x();
+		int yy = Fl::event_y();
+		if((xx > x() + 10) && (yy > y() + 13)
+		&& (xx < x() + 10 + 10) && (yy < y() + 13 + 10)
+		&& (operation == FRAME_OPERATION_DELETE))
+		{
+			fl_cursor(FL_CURSOR_DEFAULT);
+		}
+		else if((xx > x() + 25) && (yy > y() + 12)
+		&& (xx < x() + 25 + 90) && (yy < y() + 12 + 14))
+		{
+			fl_cursor(FL_CURSOR_DEFAULT);
+		}
+		else if(operation == FRAME_OPERATION_ROTATE)
+		{
+			potential_mode = 0;
+			fl_cursor(FL_CURSOR_NS);
+		}
+		else if(((xx > x()) && (xx < x() + 20))
+		&& ((yy > y()) && (yy < y() + 20)))
+		{
+			potential_mode = DRAG_MODE_LEFT_TOP;
+			fl_cursor(FL_CURSOR_CROSS);
+		}
+		else if(((xx > x()) && (xx < x() + 20))
+		&& ((yy < y() + h()) && (yy > y() + h() - 20)))
+		{
+			potential_mode = DRAG_MODE_LEFT_BOTTOM;
+			fl_cursor(FL_CURSOR_CROSS);
+		}
+		else if(((xx < x() + w()) && (xx > x() + w() - 20))
+		&& ((yy < y() + h()) && (yy > y() + h() - 20)))
+		{
+			potential_mode = DRAG_MODE_RIGHT_BOTTOM;
+			fl_cursor(FL_CURSOR_CROSS);
+		}
+		else if(((xx < x() + w()) && (xx > x() + w() - 20))
+		&& ((yy > y()) && (yy < y() + 20)))
+		{
+			potential_mode = DRAG_MODE_RIGHT_TOP;
+			fl_cursor(FL_CURSOR_CROSS);
+		}
+		else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
+		&& ((yy > y()) && (yy < y() + 16)))
+		{
+			potential_mode = DRAG_MODE_TOP;
+			fl_cursor(FL_CURSOR_NS);
+		}
+		else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
+		&& ((yy > y() + h() - 16) && (yy < y() + h())))
+		{
+			potential_mode = DRAG_MODE_BOTTOM;
+			fl_cursor(FL_CURSOR_NS);
+		}
+		else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
+		&& ((xx > x()) && (xx < x() + 16)))
+		{
+			potential_mode = DRAG_MODE_LEFT;
+			fl_cursor(FL_CURSOR_WE);
+		}
+		else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
+		&& ((xx > x() + w() - 16) && (xx < x() + w())))
+		{
+			potential_mode = DRAG_MODE_RIGHT;
+			fl_cursor(FL_CURSOR_WE);
+		}
+		else
+		{
+			potential_mode = 0;
+			fl_cursor(FL_CURSOR_MOVE);
+		}
+		if(operation == FRAME_OPERATION_DELETE)
+		{
+			potential_mode = 0;
+			fl_cursor(FL_CURSOR_DEFAULT);
+		}
+		flag = 1;
+	}
+	else
+	{
+		fl_cursor(FL_CURSOR_DEFAULT);
+	}
+	return(flag);
+}
+
+void	ResizeFrame::PostHandle(int event, int old_x, int old_y)
+{
+	if(use != NULL)
+	{
+		if((event != FL_MOVE) && (ignore_release == 0))
 		{
 			if(Fl::event_button() == FL_LEFT_MOUSE)
 			{
-				if(operation == FRAME_OPERATION_PROPORTIONAL_RESIZE)
+				if((x() != old_x) || (y() != old_y))
 				{
-					double ddh = proportion * (double)w();
-					resize(x(), y(), w(), ddh);
-					use->size(w() - 12, h() - (12.0 * proportion));
-				}
-				else if(operation == FRAME_OPERATION_CROP)
-				{
-					if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
+					if((operation != FRAME_OPERATION_CROP)
+					&& (operation != FRAME_OPERATION_DELETE))
 					{
-						Immediate *im = (Immediate *)use;
-						int xx = x() - im->x();
-						int yy = y() - im->y();
-						int ww = w();
-						int hh = h();
-						im->crop_x = xx;
-						im->crop_y = yy;
-						im->crop_w = ww;
-						im->crop_h = hh;
+						Camera *cam = my_window->DisplayedCamera();
+						int use_x = x() + 6;
+						int use_y = y() + 6;
+						int use_w = w() - 12;
+						int use_h = h() - (12 * proportion);
+						int ux = use_x - cam->image_sx;
+						int uy = use_y - cam->image_sy;
+						my_window->SnapToGrid(ux, uy, use_w, use_h);
+						use_x = ux + cam->image_sx;
+						use_y = uy + cam->image_sy;
+						if((operation != FRAME_OPERATION_PROPORTIONAL_RESIZE)
+						&& (operation != FRAME_OPERATION_FREE_RESIZE)
+						&& (operation != FRAME_OPERATION_RESIZE_FRAME))
+						{
+							use_w = w() - 12;
+							use_h = h() - (12.0 * proportion);
+						}
+						use->resize(use_x, use_y, use_w, use_h);
 					}
 					else
 					{
-						ImageWindow *im = (ImageWindow *)use;
-						int xx = x() - im->x();
-						if(xx < 0) xx = 0;
-						int yy = y() - im->y();
-						if(yy < 0) yy = 0;
-						int ww = w();
-						if(ww > im->w() - 1) ww = im->w() - 1;
-						int hh = h();
-						if(hh > im->h() - 1) hh = im->h() - 1;
-						im->crop_x = xx;
-						im->crop_y = yy;
-						im->crop_w = ww;
-						im->crop_h = hh;
+						use->resize(x() + 6, y() + 6, use->w(), use->h());
 					}
 				}
-				mode = 0;
-				drag_start_x = -1;
-				drag_start_y = -1;
-				if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
-				{
-					AdjustForImmediateLine();
-				}
-				flag = 1;
 			}
 		}
-		ignore_release = 0;
+	}
+}
+
+int		ResizeFrame::handle(int event)
+{
+	int flag = 0;
+	if(event == FL_PUSH)
+	{
+		flag = OnPush();
+	}
+	else if(event == FL_DRAG)
+	{
+		flag = OnDrag();
+	}
+	else if(event == FL_RELEASE)
+	{
+		flag = OnRelease();
 	}
 	else if(event == FL_LEAVE)
 	{
@@ -8000,216 +8349,18 @@ int		ResizeFrame::handle(int event)
 	}
 	else if(event == FL_MOUSEWHEEL)
 	{
-		if(use != NULL)
-		{
-			int xx = Fl::event_x();
-			int yy = Fl::event_y();
-			if((xx > x() + 25) && (yy > y() + 12)
-			&& (xx < x() + 115) && (yy < y() + 26))
-			{
-				int ry = Fl::event_dy();
-				if(ry < 0)
-				{
-					operation--;
-					if(operation < FRAME_OPERATION_PROPORTIONAL_RESIZE)
-					{
-						operation = FRAME_OPERATION_DELETE;
-					}
-					ignore_release = 1;
-				}
-				else if(ry > 0)
-				{
-					operation++;
-					if(operation > FRAME_OPERATION_DELETE)
-					{
-						operation = FRAME_OPERATION_PROPORTIONAL_RESIZE;
-					}
-					ignore_release = 1;
-				}
-			}
-			else
-			{
-				if(operation == FRAME_OPERATION_ROTATE)
-				{
-					if(object_type == FRAME_OBJECT_TYPE_IMMEDIATE)
-					{
-						Immediate *im = (Immediate *)use;
-						int nn = Fl::event_dy();
-						if(nn < 0)
-						{
-							im->angle -= M_PI / 1000.0;
-							im->redraw();
-						}
-						else if(nn > 0)
-						{
-							im->angle += M_PI / 1000.0;
-							im->redraw();
-						}
-					}
-					else
-					{
-						ImageWindow *iw = (ImageWindow *)use;
-						int nn = Fl::event_dy();
-						if(nn < 0)
-						{
-							iw->angle -= M_PI / 1000.0;
-							iw->redraw();
-						}
-						else if(nn > 0)
-						{
-							iw->angle += M_PI / 1000.0;
-							iw->redraw();
-						}
-					}
-				}
-				else
-				{
-					int nn = Fl::event_dy();
-					if(nn > 0)
-					{
-						resize(x(), y(), dw * 1.01, dh * 1.01);
-						use->size(w() - 12, h() - (12.0 * proportion));
-					}
-					else if(nn < 0)
-					{
-						resize(x(), y(), dw * 0.99, dh * 0.99);
-						use->size(w() - 12, h() - (12.0 * proportion));
-					}
-				}
-			}
-			flag = 1;
-		}
+		flag = OnMousewheel();
 	}
 	else if(event == FL_MOVE)
 	{
-		if(Fl::event_inside(this))
-		{
-			int xx = Fl::event_x();
-			int yy = Fl::event_y();
-			if((xx > x() + 10) && (yy > y() + 13)
-			&& (xx < x() + 10 + 10) && (yy < y() + 13 + 10)
-			&& (operation == FRAME_OPERATION_DELETE))
-			{
-				fl_cursor(FL_CURSOR_DEFAULT);
-			}
-			else if((xx > x() + 25) && (yy > y() + 12)
-			&& (xx < x() + 25 + 90) && (yy < y() + 12 + 14))
-			{
-				fl_cursor(FL_CURSOR_DEFAULT);
-			}
-			else if(operation == FRAME_OPERATION_ROTATE)
-			{
-				potential_mode = 0;
-				fl_cursor(FL_CURSOR_NS);
-			}
-			else if(((xx > x()) && (xx < x() + 20))
-			&& ((yy > y()) && (yy < y() + 20)))
-			{
-				potential_mode = DRAG_MODE_LEFT_TOP;
-				fl_cursor(FL_CURSOR_CROSS);
-			}
-			else if(((xx > x()) && (xx < x() + 20))
-			&& ((yy < y() + h()) && (yy > y() + h() - 20)))
-			{
-				potential_mode = DRAG_MODE_LEFT_BOTTOM;
-				fl_cursor(FL_CURSOR_CROSS);
-			}
-			else if(((xx < x() + w()) && (xx > x() + w() - 20))
-			&& ((yy < y() + h()) && (yy > y() + h() - 20)))
-			{
-				potential_mode = DRAG_MODE_RIGHT_BOTTOM;
-				fl_cursor(FL_CURSOR_CROSS);
-			}
-			else if(((xx < x() + w()) && (xx > x() + w() - 20))
-			&& ((yy > y()) && (yy < y() + 20)))
-			{
-				potential_mode = DRAG_MODE_RIGHT_TOP;
-				fl_cursor(FL_CURSOR_CROSS);
-			}
-			else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
-			&& ((yy > y()) && (yy < y() + 16)))
-			{
-				potential_mode = DRAG_MODE_TOP;
-				fl_cursor(FL_CURSOR_NS);
-			}
-			else if(((xx > x() + (w() / 2) - 5) && (xx < x() + (w() / 2) + 5))
-			&& ((yy > y() + h() - 16) && (yy < y() + h())))
-			{
-				potential_mode = DRAG_MODE_BOTTOM;
-				fl_cursor(FL_CURSOR_NS);
-			}
-			else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
-			&& ((xx > x()) && (xx < x() + 16)))
-			{
-				potential_mode = DRAG_MODE_LEFT;
-				fl_cursor(FL_CURSOR_WE);
-			}
-			else if(((yy > y() + (h() / 2) - 5) && (yy < y() + (h() / 2) + 5))
-			&& ((xx > x() + w() - 16) && (xx < x() + w())))
-			{
-				potential_mode = DRAG_MODE_RIGHT;
-				fl_cursor(FL_CURSOR_WE);
-			}
-			else
-			{
-				potential_mode = 0;
-				fl_cursor(FL_CURSOR_MOVE);
-			}
-			if(operation == FRAME_OPERATION_DELETE)
-			{
-				potential_mode = 0;
-				fl_cursor(FL_CURSOR_DEFAULT);
-			}
-			flag = 1;
-		}
-		else
-		{
-			fl_cursor(FL_CURSOR_DEFAULT);
-		}
+		flag = OnMove();
 	}
 	if(flag == 0)
 	{
 		int old_x = x();
 		int old_y = y();
 		flag = DragGroup::handle(event);
-		if(use != NULL)
-		{
-			if((event != FL_MOVE) && (ignore_release == 0))
-			{
-				if(Fl::event_button() == FL_LEFT_MOUSE)
-				{
-					if((x() != old_x) || (y() != old_y))
-					{
-						if((operation != FRAME_OPERATION_CROP)
-						&& (operation != FRAME_OPERATION_DELETE))
-						{
-							Camera *cam = my_window->DisplayedCamera();
-							int use_x = x() + 6;
-							int use_y = y() + 6;
-							int use_w = w() - 12;
-							int use_h = h() - (12 * proportion);
-							int ux = use_x - cam->image_sx;
-							int uy = use_y - cam->image_sy;
-							my_window->SnapToGrid(ux, uy, use_w, use_h);
-							use_x = ux + cam->image_sx;
-							use_y = uy + cam->image_sy;
-							if((operation != FRAME_OPERATION_PROPORTIONAL_RESIZE)
-							&& (operation != FRAME_OPERATION_FREE_RESIZE)
-							&& (operation != FRAME_OPERATION_RESIZE_FRAME))
-							{
-								use_w = w() - 12;
-								use_h = h() - (12.0 * proportion);
-							}
-							use->resize(use_x, use_y, use_w, use_h);
-						}
-						else
-						{
-							use->resize(x() + 6, y() + 6, use->w(), use->h());
-						}
-					}
-				}
-			}
-		}
+		PostHandle(event, old_x, old_y);
 	}
 	return(flag);
 }
@@ -8288,7 +8439,6 @@ void	ResizeFrame::Use(int in_type, MyGroup *in_use)
 	double uy = use->y() - 6;
 	double uw = use->w() + 12;
 	double uh = use->h() + 12;
-
 	scale_w = use->scale_w;
 	scale_h = use->scale_h;
 	initial_w = use->initial_w;
@@ -8354,6 +8504,71 @@ MyScroll::~MyScroll()
 {
 }
 
+int		MyScroll::OnKeyboard(int key, int next_item_key, int prev_item_key, int next_row_key, int prev_row_key)
+{
+	int flag = 0;
+	if(key == next_item_key)
+	{
+		SelectNext();
+		ScrollToSelection();
+		flag = 1;
+	}
+	else if(key == prev_item_key)
+	{
+		SelectPrev();
+		ScrollToSelection();
+		flag = 1;
+	}
+	else if(key == next_row_key)
+	{
+		SelectNextRow();
+		ScrollToSelection();
+		flag = 1;
+	}
+	else if(key == prev_row_key)
+	{
+		SelectPrevRow();
+		ScrollToSelection();
+		flag = 1;
+	}
+	else if(key == FL_Page_Down)
+	{
+		int yy = yposition() + h();
+		if(yy > (item_cnt * row_height) - h())
+		{
+			yy = (item_cnt * row_height) - h();
+		}
+		scroll_to(0, yy);
+		SelectFirstVisible();
+		flag = 1;
+	}
+	else if(key == FL_Page_Up)
+	{
+		int yy = yposition() - h();
+		if(yy < 0)
+		{
+			yy = 0;
+		}
+		scroll_to(0, yy);
+		SelectFirstVisible();
+		flag = 1;
+	}
+	else if(key == FL_Home)
+	{
+		scroll_to(0, 0);
+		SelectFirstVisible();
+		flag = 1;
+	}
+	else if(key == FL_End)
+	{
+		int yy = (item_cnt * row_height) - h();
+		scroll_to(0, yy);
+		SelectFirstVisible();
+		flag = 1;
+	}
+	return(flag);
+}
+
 int	MyScroll::handle(int event)
 {
 	int flag = 0;
@@ -8395,65 +8610,7 @@ int	MyScroll::handle(int event)
 			if(key == FL_Right) key = FL_Down;
 			if(key == FL_Left) key = FL_Up;
 		}
-		if(key == next_item_key)
-		{
-			SelectNext();
-			ScrollToSelection();
-			flag = 1;
-		}
-		else if(key == prev_item_key)
-		{
-			SelectPrev();
-			ScrollToSelection();
-			flag = 1;
-		}
-		else if(key == next_row_key)
-		{
-			SelectNextRow();
-			ScrollToSelection();
-			flag = 1;
-		}
-		else if(key == prev_row_key)
-		{
-			SelectPrevRow();
-			ScrollToSelection();
-			flag = 1;
-		}
-		else if(key == FL_Page_Down)
-		{
-			int yy = yposition() + h();
-			if(yy > (item_cnt * row_height) - h())
-			{
-				yy = (item_cnt * row_height) - h();
-			}
-			scroll_to(0, yy);
-			SelectFirstVisible();
-			flag = 1;
-		}
-		else if(key == FL_Page_Up)
-		{
-			int yy = yposition() - h();
-			if(yy < 0)
-			{
-				yy = 0;
-			}
-			scroll_to(0, yy);
-			SelectFirstVisible();
-			flag = 1;
-		}
-		else if(key == FL_Home)
-		{
-			scroll_to(0, 0);
-			SelectFirstVisible();
-			flag = 1;
-		}
-		else if(key == FL_End)
-		{
-			int yy = (item_cnt * row_height) - h();
-			scroll_to(0, yy);
-			SelectFirstVisible();
-			flag = 1;
-		}
+		flag = OnKeyboard(key, next_item_key, prev_item_key, next_row_key, prev_row_key);
 	}
 	if(flag == 0)
 	{
@@ -10027,7 +10184,7 @@ char			use_filter[4096];
 					Fl_Color fore = WHITE;
 					if(file_list[loop]->is_dir == 1)
 					{
-						fore = GRAY;
+						fore = fl_darker(WHITE);
 					}
 					int use_color = fl_darker(WHITE);
 					MyButton *path_button = new MyButton(my_window, scroll->x(), scroll->y() + yy, 300, scroll->row_height, file_list[loop]->filename);
@@ -10486,6 +10643,22 @@ MyButton::~MyButton()
 {
 }
 
+void	MyButton::RightClickMenu()
+{
+	popup = new PopupMenu(my_window, x(), y(), 160, 300);
+	popup->browser->callback(my_button_popup_cb, this);
+	popup->browser->add("Assign Shortcut", this);
+	popup->browser->add("Relabel", this);
+	popup->browser->add("Cancel", this);
+
+	popup->Fit();
+	popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	popup->set_modal();
+	Fl_Group *grp = Fl_Group::current();
+	Fl_Group::current(0);
+	popup->show();
+}
+
 int	MyButton::handle(int event)
 {
 	int flag = 0;
@@ -10514,18 +10687,7 @@ int	MyButton::handle(int event)
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
 		{
-			popup = new PopupMenu(my_window, x(), y(), 160, 300);
-			popup->browser->callback(my_button_popup_cb, this);
-			popup->browser->add("Assign Shortcut", this);
-			popup->browser->add("Relabel", this);
-			popup->browser->add("Cancel", this);
-
-			popup->Fit();
-			popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-			popup->set_modal();
-			Fl_Group *grp = Fl_Group::current();
-			Fl_Group::current(0);
-			popup->show();
+			RightClickMenu();
 			flag = 1;
 		}
 		else
@@ -10574,6 +10736,20 @@ MyToggleButton::~MyToggleButton()
 {
 }
 
+void	MyToggleButton::RightClickMenu()
+{
+	popup = new PopupMenu(my_window, x(), y(), 160, 300);
+	popup->browser->callback(my_button_popup_cb, this);
+	popup->browser->add("Assign Shortcut", this);
+
+	popup->Fit();
+	popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	popup->set_modal();
+	Fl_Group *grp = Fl_Group::current();
+	Fl_Group::current(0);
+	popup->show();
+}
+
 int	MyToggleButton::handle(int event)
 {
 	int flag = 0;
@@ -10596,16 +10772,7 @@ int	MyToggleButton::handle(int event)
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
 		{
-			popup = new PopupMenu(my_window, x(), y(), 160, 300);
-			popup->browser->callback(my_button_popup_cb, this);
-			popup->browser->add("Assign Shortcut", this);
-
-			popup->Fit();
-			popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-			popup->set_modal();
-			Fl_Group *grp = Fl_Group::current();
-			Fl_Group::current(0);
-			popup->show();
+			RightClickMenu();
 			flag = 1;
 		}
 	}
@@ -10624,6 +10791,20 @@ MyLightButton::MyLightButton(MyWin *in_win, int xx, int yy, int ww, int hh, char
 
 MyLightButton::~MyLightButton()
 {
+}
+
+void	MyLightButton::RightClickMenu()
+{
+	popup = new PopupMenu(my_window, x(), y(), 160, 300);
+	popup->browser->callback(my_button_popup_cb, this);
+	popup->browser->add("Assign Shortcut", this);
+
+	popup->Fit();
+	popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	popup->set_modal();
+	Fl_Group *grp = Fl_Group::current();
+	Fl_Group::current(0);
+	popup->show();
 }
 
 int	MyLightButton::handle(int event)
@@ -10648,16 +10829,7 @@ int	MyLightButton::handle(int event)
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
 		{
-			popup = new PopupMenu(my_window, x(), y(), 160, 300);
-			popup->browser->callback(my_button_popup_cb, this);
-			popup->browser->add("Assign Shortcut", this);
-
-			popup->Fit();
-			popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-			popup->set_modal();
-			Fl_Group *grp = Fl_Group::current();
-			Fl_Group::current(0);
-			popup->show();
+			RightClickMenu();
 			flag = 1;
 		}
 	}
@@ -10676,6 +10848,20 @@ MyRepeatButton::MyRepeatButton(MyWin *in_win, int xx, int yy, int ww, int hh, ch
 
 MyRepeatButton::~MyRepeatButton()
 {
+}
+
+void	MyRepeatButton::RightClickMenu()
+{
+	popup = new PopupMenu(my_window, x(), y(), 160, 300);
+	popup->browser->callback(my_button_popup_cb, this);
+	popup->browser->add("Assign Shortcut", this);
+
+	popup->Fit();
+	popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	popup->set_modal();
+	Fl_Group *grp = Fl_Group::current();
+	Fl_Group::current(0);
+	popup->show();
 }
 
 int	MyRepeatButton::handle(int event)
@@ -10700,16 +10886,7 @@ int	MyRepeatButton::handle(int event)
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
 		{
-			popup = new PopupMenu(my_window, x(), y(), 160, 300);
-			popup->browser->callback(my_button_popup_cb, this);
-			popup->browser->add("Assign Shortcut", this);
-
-			popup->Fit();
-			popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-			popup->set_modal();
-			Fl_Group *grp = Fl_Group::current();
-			Fl_Group::current(0);
-			popup->show();
+			RightClickMenu();
 			flag = 1;
 		}
 	}
@@ -10972,6 +11149,110 @@ char	wid_path[4096];
 	return(flag);
 }
 
+// SECTION *********************************** SIMPLE DRAG WINDOW *******************************************
+
+SimpleDragWindow::SimpleDragWindow(MyWin *in_win, int ww, int hh) : Fl_Double_Window(ww, hh)
+{
+	my_window = in_win;
+	last_x = 0;
+	last_y = 0;
+	border(0);
+	set_non_modal();
+	box(FL_FRAME_BOX);
+	color(BLACK);
+}
+
+SimpleDragWindow::SimpleDragWindow(MyWin *in_win, int ww, int hh, char *lbl) : Fl_Double_Window(ww, hh, lbl)
+{
+	my_window = in_win;
+	last_x = 0;
+	last_y = 0;
+	border(0);
+	set_non_modal();
+	box(FL_FRAME_BOX);
+	color(BLACK);
+}
+
+SimpleDragWindow::SimpleDragWindow(MyWin *in_win, int xx, int yy, int ww, int hh) : Fl_Double_Window(xx, yy, ww, hh)
+{
+	my_window = in_win;
+	last_x = 0;
+	last_y = 0;
+	border(0);
+	set_non_modal();
+	box(FL_FRAME_BOX);
+	color(BLACK);
+}
+
+SimpleDragWindow::SimpleDragWindow(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : Fl_Double_Window(xx, yy, ww, hh, lbl)
+{
+	my_window = in_win;
+	last_x = 0;
+	last_y = 0;
+	border(0);
+	set_non_modal();
+	box(FL_FRAME_BOX);
+	color(BLACK);
+}
+
+SimpleDragWindow::~SimpleDragWindow()
+{
+}
+
+int	SimpleDragWindow::handle(int event)
+{
+int		loop;
+int		inner;
+char	wid_path[4096];
+
+	int flag = 0;
+	if(event == FL_PUSH)
+	{
+		last_x = Fl::event_x_root();
+		last_y = Fl::event_y_root();
+	}
+	else if(event == FL_DRAG)
+	{
+		int xx = Fl::event_x_root();
+		int yy = Fl::event_y_root();
+		int dx = last_x - xx;
+		int dy = last_y - yy;
+		resize(x() - dx, y() - dy, w(), h());
+		last_x = xx;
+		last_y = yy;
+		flag = 1;
+	}
+	else if(event == FL_FOCUS)
+	{
+		flag = 1;
+	}
+	else if(event == FL_UNFOCUS)
+	{
+		flag = 1;
+	}
+	else if(event == FL_KEYBOARD)
+	{
+		int key = Fl::event_key();
+		if(key == FL_Escape)
+		{
+			hide();
+			flag = 1;
+		}
+	}
+	if(flag == 0)
+	{
+		flag = Fl_Double_Window::handle(event);
+		if(flag == 0)
+		{
+			if(event == FL_PUSH)
+			{
+				flag = 1;
+			}
+		}
+	}
+	return(flag);
+}
+
 // SECTION *********************************** DIALOG *******************************************
 
 void	dialog_common(MyWin *in_win, Dialog *dialog, char *lbl)
@@ -11003,6 +11284,7 @@ Dialog::Dialog(MyWin *in_win, int ww, int hh, char *lbl) : DragWindow(in_win, ww
 {
 	MyWin *my_window = in_win;
 	dialog_common(my_window, this, lbl);
+	color(DARK_PURPLE);
 }
 
 Dialog::Dialog(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : DragWindow(in_win, xx, yy, ww, hh + 20, lbl)
@@ -11010,6 +11292,7 @@ Dialog::Dialog(MyWin *in_win, int xx, int yy, int ww, int hh, char *lbl) : DragW
 	MyWin *my_window = in_win;
 	dialog_common(my_window, this, lbl);
 	hide_close = 0;
+	color(DARK_PURPLE);
 }
 
 Dialog::~Dialog()
@@ -11689,8 +11972,7 @@ void	immediate_drawing_mode_cb(Fl_Widget *w, void *v)
 		Camera *cam = id->my_window->DisplayedCamera();
 		if(cam->immediate_list != NULL)
 		{
-			int loop;
-			for(loop = 0;loop < cam->immediate_cnt;loop++)
+			for(int loop = 0;loop < cam->immediate_cnt;loop++)
 			{
 				if(cam->immediate_list[loop] != NULL)
 				{
@@ -13516,11 +13798,12 @@ int		ii;
 		grid_size_output->value(buf);
 		yp += 14;
 
-		snap_size_button = new MyToggleButton(my_window, 180, yp, 100, 16, "Snap Sizing");
+		snap_size_button = new MyLightButton(my_window, 180, yp, 100, 16, "Snap Sizing");
 		snap_size_button->labelsize(9);
 		snap_size_button->labelcolor(WHITE);
 		snap_size_button->color(DARK_GRAY);
 		snap_size_button->box(FL_FLAT_BOX);
+		snap_size_button->align(FL_ALIGN_CENTER);
 		snap_size_button->clear_visible_focus();
 		snap_size_button->value(my_window->snap_size_to_grid);
 		snap_size_button->callback(snap_sizing_cb, this);
@@ -13621,6 +13904,7 @@ int		ii;
 		load_button->callback(general_load_button_cb, this);
 	general_group->end();
 	general_group->hide();
+
 	text_group = new MyGroup(120, 20, 1920, 1080);
 	text_group->box(FL_NO_BOX);
 	text_group->color(DARK_GRAY);
@@ -13850,6 +14134,7 @@ int		ii;
 
 	text_group->end();
 	text_group->hide();
+
 	line_group = new MyGroup(120, 20, 1920, 1080);
 	line_group->box(FL_NO_BOX);
 	line_group->color(DARK_GRAY);
@@ -14107,6 +14392,7 @@ int		ii;
 		line_join_group->end();
 	line_group->end();
 	line_group->hide();
+
 	rectangle_group = new MyGroup(120, 20, 1920, 1080);
 	rectangle_group->box(FL_NO_BOX);
 	rectangle_group->color(DARK_GRAY);
@@ -14521,6 +14807,7 @@ int		ii;
 
 	freehand_group->end();
 	freehand_group->hide();
+
 	image_group = new MyGroup(120, 20, 1920, 1080);
 	image_group->box(FL_NO_BOX);
 	image_group->color(DARK_GRAY);
@@ -15302,119 +15589,122 @@ unsigned char	*local_capture_cap(int *width, int *height)
 	return(ptr);
 }
 
-Camera::Camera(MyWin *in_win, int in_id, char *source, int num, double forced_fps, int in_requested_w, int in_requested_h, int rr, int gg, int bb, int aa, int t_rr, int t_gg, int t_bb, int t_aa, int use_chroma)
+void	Camera::SetupLiveCamera(VideoCapture *n_cap, char *source, int num)
 {
 int		loop;
 
-	InitializeVariables();
-	hot = 0;
-	hot_ready = 0;
-	hot_delay = 10000;
+	SetSystemAlias();
+	starting_width = requested_w;
+	starting_height = requested_h;
+	if(my_window->fast_start == 0)
+	{
+		starting_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
+		starting_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
 
-	stop_detecting_objects = 0;
-	detecting_objects = 0;
-	object_triggered = 0;
-	capture_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+		if(strlen(format_code) > 0)
+		{
+			n_cap->set(CAP_PROP_FOURCC, VideoWriter::fourcc(format_code[0], format_code[1], format_code[2], format_code[3]));
+		}
+		else
+		{
+			char *fourcc_list[128];
+			char use_source[4096];
+			if(source == NULL)
+			{
+				sprintf(use_source, "/dev/video%d", num);
+			}
+			else
+			{
+				strcpy(use_source, source);
+			}
+			int fourcc_cnt = query_fourcc(use_source, fourcc_list);
+			for(loop = 0;loop < fourcc_cnt;loop++)
+			{
+				if(fourcc_list[loop] != NULL)
+				{
+					if(strcasecmp(fourcc_list[loop], "MJPG") == 0)
+					{
+						int fourcc_mjpg = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+						n_cap->set(cv::CAP_PROP_FOURCC, fourcc_mjpg);
+					}
+					free(fourcc_list[loop]);
+				}
+			}
+		}
+	}
+	int n_width = requested_w;
+	int n_height = requested_h;
+	if((starting_width != requested_w) || (starting_height != requested_h))
+	{
+		n_cap->set(CAP_PROP_FRAME_WIDTH, requested_w);
+		n_cap->set(CAP_PROP_FRAME_HEIGHT, requested_h);
+		sleep(1);
+	}
+	n_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
+	n_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
+	n_cap->set(CAP_PROP_BUFFERSIZE, 10);
+	n_cap->set(CAP_PROP_FPS, 60);
 
-	my_window = in_win;
-	type = CAMERA_TYPE_CAMERA;
-	id = in_id;
-	power = 1;
-	failed = 0;
-	last_retrieve = 0;
-	triggers_requested = 0;
-	trigger_override = 0;
-	sustain_recording = 12;
-	result_trigger = 0;
-	record_error = 0;
-	sound_trigger = 0.5;
-	detect_time = 0;
-	requested_x = -1;
-	requested_y = -1;
-	requested_w = in_requested_w;
-	requested_h = in_requested_h;
-	strcpy(path, "");
-	strcpy(original_path, "");
-	strcpy(alias, "");
-	record = 0;
-	recording = 0;
-	last = 0;
-	record_trigger = 0;
-	schedule_start = 0;
-	schedule_stop = 0;
-	schedule_day = 0;
-	darkness_trigger = 0.5;
-	darkness_score = 0.0;
-	motion_score = 0;
-	ever_opened = 0;
-	capture_scaling = 1.0;
-	zoom = 1.0;
-	priority = 0;
-	cap = NULL;
-	width = 0;
-	height = 0;
-	orig_width = 0;
-	orig_height = 0;
-	starting_width = 0;
-	starting_height = 0;
-	last_grab_time = 0;
-	grab_interval = 0;
-	last_capture_time = 0;
-	capture_interval = 0.0;
-	newly_captured = 0;
-	clockwise_rotation = 0;
-	font_sz = 32;
-	grab_window_id = 0;
-	fullscreen_instance = 0;
-	static_initialized = 0;
-	save_fifo = NULL;
-	stopped = 1;
-	forced_aspect_x = 1.0;
-	forced_aspect_y = 1.0;
-	hot_fps = my_window->minimum_fps;
-	fd = -1;
-	total_frames = 0;
-	true_total_frames = 0;
-	since_frames = 0;
-	since_time = 0;
-	elapsed = 0;
-	old_elapsed = -1;
-	frame_cnt = 0;
-	fps = forced_fps;
-	capturing = 0;
-	current_fps = 30.0;
-	old_fps = 0;
-	fps_cnt = 0;
-	focus_using_samples = 0;
-	keep_focusing = 0;
-	focus_frame_ready = 0;
-	cap_fourcc = 0;
+	cap_fourcc = n_cap->get(cv::CAP_PROP_FOURCC);
+	char c1, c2, c3, c4;
+	convert_fourcc(cap_fourcc, c1, c2, c3, c4);
 	cap_total_frames = 0;
-	cap_format = 0;
-	ccx = 0;
-	ccy = 0;
-	cx = 0;
-	cy = 0;
-	last_cx = cx;
-	last_cy = cy;
-	shared_image = NULL;
-	shared_image_width = -1;
-	shared_image_height = -1;
-	accel = 100;
-	pip_idx = -1;
-	keep_pip = 0;
-	red = rr;
-	green = gg;
-	blue = bb;
-	alpha = aa;
-	text_red = t_rr;
-	text_green = t_gg;
-	text_blue = t_bb;
-	text_alpha = t_aa;
-	dynamic_text_start_time = 0;
-	dynamic_text_interval = 5;
-	dynamic_text_scroll_x = 0;
-	dynamic_text_scroll_y = 0;
+	cap_total_frames = n_cap->get(cv::CAP_PROP_FRAME_COUNT);
+	cap_format = n_cap->get(cv::CAP_PROP_FORMAT);
+	int frame_rate = n_cap->get(cv::CAP_PROP_FPS);
+	int frame_pos = n_cap->get(cv::CAP_PROP_POS_FRAMES);
+
+	Mat test_only = imread(path);
+	if(cap_total_frames < 2)
+	{
+		if((cap_fourcc == 0) || ((test_only.rows > 0) && (test_only.cols > 0)))
+		{
+			type = CAMERA_TYPE_IMAGE;
+		}
+	}
+	n_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
+	n_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
+
+	cap = n_cap;
+	width = n_width;
+	height = n_height;
+	if((n_width != requested_w) || (n_height != requested_h))
+	{
+		fprintf(stderr, "Warning: received dimensions differ from requested dimensions. (%d x %d) vs. (%d x %d).\nImage will be scaled in software.\n",
+			n_width, n_height,
+			requested_w, requested_h);
+		width = requested_w;
+		height = requested_h;
+	}
+}
+
+void	Camera::SetupBlankCamera(char *source)
+{
+	red = 0;
+	green = 0;
+	blue = 0;
+	alpha = 0;
+	char *cp = source + strlen("blank://");
+	if(strlen(cp) > 0)
+	{
+		parse_quadlet(cp, &red, &green, &blue, &alpha);
+	}
+	cv::Mat local_mat(my_window->requested_h, my_window->requested_w, CV_8UC4, cv::Scalar(red, green, blue, alpha));
+	mat = local_mat;
+	reserve_mat = local_mat.clone();
+
+	width = requested_w;
+	height = requested_h;
+	type = CAMERA_TYPE_BLANK;
+}
+
+void	Camera::SetupDynamicCamera()
+{
+	width = requested_w;
+	height = requested_h;
+	dynamic_text_start_time = time(0);
+	dynamic_text_scroll_x = width;
+	dynamic_text_scroll_y = height;
 	dynamic_text_line_cnt = 0;
 	dynamic_text_initialized = 0;
 	dynamic_text_loop_limit = 0;
@@ -15426,221 +15716,1164 @@ int		loop;
 	dynamic_text_squash_direction = 0;
 	dynamic_text_scale_x = 1.0;
 	dynamic_text_scale_y = 1.0;
-	html = NULL;
-	capture_effects = 1;
-	do_not_display = 0;
-	match_template = 0;
-	match_template_start = 0;
-	for(loop = 0;loop < 128;loop++)
+	type = CAMERA_TYPE_DYNAMIC_TEXT;
+}
+
+void	Camera::SetupSlideshowCamera(char *source)
+{
+	char *filename = source + strlen("slideshow://");
+	if(IsDirectory(filename))
 	{
-		standalone_display[loop] = NULL;
+		struct dirent **namelist;
+		int n = scandir(filename, &namelist, NULL, alphasort);
+		for(int i = 0; i < n; i++) 
+		{
+			if(slideshow_list_cnt < 1024)
+			{
+				if((strcmp(namelist[i]->d_name, ".") != 0) && (strcmp(namelist[i]->d_name, "..") != 0))
+				{
+					char buf[PATH_MAX];
+					sprintf(buf, "%s/%s", filename, namelist[i]->d_name);
+					slideshow_list[slideshow_list_cnt] = strdup(buf);
+					slideshow_list_cnt++;
+				}
+			}
+			free(namelist[i]);
+		}
+		free(namelist);
 	}
-	standalone_display_cnt = 0;
-
-	strcpy(snapshot_filename_format, "photo_%U.png");
-	snapshot_initial_delay = 0;
-	snapshot_repeat_delay = 0;
-	snapshot_trigger_condition = SNAPSHOT_TRIGGER_BUTTON;
-	snapshot_scale = 1.0;
-	snapshot = 0;
-	start_timer = 0;
-	stop_timer = 0;
-	initial_timer = 0;
-	military_clock = 0;
-	timer_format = 1;
-	analog = 0;
-	analog_size = -1;
-	slideshow_fp = NULL;
-	slideshow_list_cnt = 0;
-	slideshow_current = 0;
-	for(loop = 0;loop < 1024;loop++)
+	else
 	{
-		slideshow_list[loop] = NULL;
+		slideshow_fp = fopen(filename, "r");
 	}
-	strcpy(alert_monitor_file, "");
-	alert_trigger_mode = 0;
-	alert_display_mode = ALERT_DISPLAY_MODE_ALL;
-	alert_duration = 0;
-	alert_did_exist = 0;
-	alert_end_time = 0;
-	alert_permanent_trigger = 0;
-	strcpy(alert_old_buffer, "");
-	strcpy(alert_audio_file, "");
-	for(loop = 0;loop < 128;loop++)
+	Fl::add_timeout(0.1, slideshow_cb, this);
+	type = CAMERA_TYPE_SLIDESHOW;
+}
+
+void	Camera::SetupAlertCamera(char *source)
+{
+	char *cp = source + strlen("alert://");
+	strcpy(alert_monitor_file, cp);
+	cp = alert_monitor_file;
+	while((*cp != ':') && (*cp != '\0')) cp++;
+	if(*cp == ':')
 	{
-		my_muxer[loop] = NULL;
+		*cp = '\0';
+		cp++;
+		alert_trigger_mode = atoi(cp);
+		while((*cp != ':') && (*cp != '\0')) cp++;
+		if(*cp == ':')
+		{
+			*cp = '\0';
+			cp++;
+			alert_display_mode = atoi(cp);
+			while((*cp != ':') && (*cp != '\0')) cp++;
+			if(*cp == ':')
+			{
+				*cp = '\0';
+				cp++;
+				alert_duration = atoi(cp);
+				while((*cp != ':') && (*cp != '\0')) cp++;
+				if(*cp == ':')
+				{
+					*cp = '\0';
+					cp++;
+					alert_opaque = atoi(cp);
+					while((*cp != ':') && (*cp != '\0')) cp++;
+					if(*cp == ':')
+					{
+						cp++;
+						if(strlen(cp) > 0)
+						{
+							strcpy(alert_audio_file, cp);
+						}
+					}
+				}
+			}
+		}
 	}
-	muxer_cnt = 0;
+	type = CAMERA_TYPE_ALERT;
+}
 
-	irc_session = NULL;
-	irc_done = 0;
-
-	blend_alias_one = NULL;
-	blend_alias_two = NULL;
-	blend_amount = 0.0;
-
-	anim_preview = 0;
-
-	ptz_lock_interface = -1;
-	ptz_lock_camera = -1;
-	v4l_pending_command = 0;
-
-	immediate_list = NULL;
-	immediate_cnt = 0;
-	for(loop = 0;loop < 8;loop++)
+void	Camera::SetupPipeCamera(char *source)
+{
+	char *cp = source + strlen("pipe://");
+	pipe_pid = popen2(cp, &pipe_in, &pipe_out);
+	if(pipe_pid != -1)
 	{
-		layer_state[loop] = 1;
+		piping_text = 1;
+		type = CAMERA_TYPE_PIPED;
+		pipe_fp = fdopen(pipe_out, "r");
+		if(pipe_fp != NULL)
+		{
+			create_task((int (*)(int *))read_pipe, (void *)this);
+		}
+		else
+		{
+			my_window->SetErrorMessage("No Pipe Created");
+		}
 	}
-	edit_layer = 0;
-	split_source_cnt = 0;
-	for(loop = 0;loop < 128;loop++)
+	else
 	{
-		split_source[loop] = NULL;
+		my_window->SetErrorMessage("No Pipe Created");
 	}
-	ndi_recv = NULL;
-	for(loop = 0;loop < 128;loop++)
+}
+
+void	Camera::SetupIRCCamera(char *source)
+{
+	char *cp = source + strlen("irc://");
+	char *server = cp;
+	while((*cp != 10) && (*cp != '\0')) cp++;
+	if(*cp == 10)
 	{
-		trigger_mic_list[loop] = NULL;
+		*cp = '\0';
+		cp++;
+		int port = atoi(cp);
+		while((*cp != 10) && (*cp != '\0')) cp++;
+		if(*cp == 10)
+		{
+			*cp = '\0';
+			cp++;
+			char *user = cp;
+			while((*cp != 10) && (*cp != '\0')) cp++;
+			if(*cp == 10)
+			{
+				*cp = '\0';
+				cp++;
+				char *password = cp;
+				while((*cp != 10) && (*cp != '\0')) cp++;
+				if(*cp == 10)
+				{
+					*cp = '\0';
+					cp++;
+					char *channel = cp;
+					irc_session = cow_irc_connect(server, port, user, password, channel);
+					if(irc_session != NULL)
+					{
+						piping_text = 1;
+						type = CAMERA_TYPE_TEXT;
+						create_task((int (*)(int *))run_irc, (void *)this);
+						create_task((int (*)(int *))read_irc, (void *)this);
+					}
+				}
+			}
+		}
 	}
-	trigger_mic_list_cnt = 0;
+}
 
-	strcpy(ndi_fourcc_str, "");
-	strcpy(ndi_format_type, "");
-	ndi_width = 0;
-	ndi_height = 0;
-	ndi_frame_rate = 0.0;
-	ndi_stride = 0;
-	ndi_exposure = 0.5;
-
-	ndi_capture = 0;
-	ndi_ptz = 0;
-	prefer_ndi = 0;
-	prefer_v4l = 0;
-
-	strcpy(pseudo_camera_name, "PSEUDO CAMERA");
-	plugin_camera = NULL;
-	freeze_video = 0;
-	mute_video = 0;
-	alternate_interval = 5.0;
-	alternate_index = 0;
-	alternate_time = 0;
-	for(loop = 0;loop < 128;loop++)
+void	Camera::SetupNDICamera(char *source)
+{
+	char *cp = source + strlen("ndi://");
+	if(strlen(cp) > 0)
 	{
-		color_it_r[loop] = 0;
-		color_it_g[loop] = 0;
-		color_it_b[loop] = 0;
-		color_it_tolerance_r[loop] = 24;
-		color_it_tolerance_g[loop] = 24;
-		color_it_tolerance_b[loop] = 24;
-		color_it_replace_r[loop] = 0;
-		color_it_replace_g[loop] = 0;
-		color_it_replace_b[loop] = 0;
-		color_it_replace_a[loop] = 0;
+		type = CAMERA_TYPE_CAMERA;
+		ndi_recv = NULL;
+		ndi_recv = FindNDI(cp, 0);
+		if(ndi_recv != NULL)
+		{
+			ndi_capture = 1;
+		}
 	}
-	color_it_cnt = 0;
+}
 
-	crop_start_x = 0;
-	crop_start_y = 0;
-	use_crop_start = 0;
-	last_start_x = 0;
-	last_start_y = 0;
+void	Camera::SetupNDI_UYVYCamera(char *source)
+{
+	char *cp = source + strlen("ndi_uyvy://");
+	if(strlen(cp) > 0)
+	{
+		type = CAMERA_TYPE_CAMERA;
+		ndi_recv = NULL;
+		ndi_recv = FindNDI(cp, 1);
+		if(ndi_recv != NULL)
+		{
+			ndi_capture = 1;
+		}
+	}
+}
 
-	edge_blend = 0.5;
-	paused_accumulation_ts = 0;
-	paused_start_ts = 0;
-	start_ts = local_timestamp();
-	local_ts = local_timestamp();
-	running_time = 0;
-	starting_time = 0;
+void	Camera::SetupNDI_P216Camera(char *source)
+{
+	char *cp = source + strlen("ndi_p216://");
+	if(strlen(cp) > 0)
+	{
+		type = CAMERA_TYPE_CAMERA;
+		ndi_recv = NULL;
+		ndi_recv = FindNDI(cp, 2);
+		if(ndi_recv != NULL)
+		{
+			ndi_capture = 1;
+		}
+	}
+}
 
-	flip_horizontal = 0;
-	flip_vertical = 0;
-	brightness = 0.5;
-	saturation = 1.0;
-	hue = 1.0;
-	intensity = 1.0;
-	red_intensity = 1.0;
-	green_intensity = 1.0;
-	blue_intensity = 1.0;
-	alpha_intensity = 1.0;
-	contrast = 0.5;
-	motion_threshold = 100;
-	recognition_threshold = 0.5;
-	recognize_interval = 10;
-	extra_url = NULL;
-	extra_css = NULL;
-	extra_js_once = NULL;
-	extra_js_always = NULL;
+void	Camera::SetupNDI_BGRXCamera(char *source)
+{
+	char *cp = source + strlen("ndi_bgrx://");
+	if(strlen(cp) > 0)
+	{
+		type = CAMERA_TYPE_CAMERA;
+		ndi_recv = NULL;
+		ndi_recv = FindNDI(cp, 3);
+		if(ndi_recv != NULL)
+		{
+			ndi_capture = 1;
+		}
+	}
+}
 
-	v4l_capable = 0;
+void	Camera::SetupNDI_RGBXCamera(char *source)
+{
+	char *cp = source + strlen("ndi_rgbx://");
+	if(strlen(cp) > 0)
+	{
+		type = CAMERA_TYPE_CAMERA;
+		ndi_recv = NULL;
+		ndi_recv = FindNDI(cp, 4);
+		if(ndi_recv != NULL)
+		{
+			ndi_capture = 1;
+		}
+	}
+}
 
-	zoom_box_display = 0;
-	zoom_box_x = -1;
-	zoom_box_y = -1;
-	zoom_box_w = -1;
-	zoom_box_h = -1;
-	resuming = 0;
-	strcpy(format_code, "");
-	grab_portion_x = -1;
-	grab_portion_y = -1;
-	grab_portion_w = -1;
-	grab_portion_h = -1;
+void	Camera::SetupSFFCamera(char *source)
+{
+	char *cp = source + strlen("sff://");
+	single_frame_fd = open(cp, O_RDWR);
+	if(single_frame_fd != -1)
+	{
+		type = CAMERA_TYPE_SINGLE_FRAME_FILE;
+		create_task((int (*)(int *))read_single_frame_file, (void *)this);
+	}
+	else
+	{
+		my_window->SetErrorMessage("No SFF Found");
+	}
+}
+
+void	Camera::SetupOSGCamera(char *source)
+{
+	if(global_osg_enabled == 1)
+	{
+		char *cp = source + strlen("osg://");
+		char *file[1];
+		file[0] = cp;
+
+		MyViewer *(*osg_open_osg)(int, char **, int, int);
+		osg_open_osg = (MyViewer *(*)(int, char **, int, int))void_OSG_open_osg;
+		if(osg_open_osg != NULL)
+		{
+			osg_viewer = osg_open_osg(1, file, requested_w, requested_h);
+			if(osg_viewer != NULL)
+			{
+				type = CAMERA_TYPE_OSG;
+			}
+			else
+			{
+				my_window->SetErrorMessage("OSG Viewer not created");
+			}
+		}
+		else
+		{
+			my_window->SetErrorMessage("OSG Viewer not created");
+		}
+	}
+	else
+	{
+		my_window->SetErrorMessage("OSG is not enabled");
+	}
+}
+
+void	Camera::SetupFullscreenCamera(char *source)
+{
+	int instance = 0;
+	char *cp = source + strlen("fullscreen://");
+	if(strlen(cp) > 0)
+	{
+		instance = atoi(cp);
+	}
+	fullscreen_instance = instance;
+	type = CAMERA_TYPE_FULLSCREEN;
+	width = Fl::w();
+	height = Fl::h();
+	cv::Mat local_mat(width, height, CV_8UC4, cv::Scalar(0, 0, 0, 255));
+	mat = local_mat;
+	reserve_mat = local_mat.clone();
+	Fl::add_timeout(2.0, look_for_fullscreen_win_cb, this);
+}
+
+void	Camera::SetupDesktopCamera(char *source)
+{
+	char *cp = source + strlen("desktop://");
+	if(strlen(cp) > 0)
+	{
+		int sx = 0;
+		int sy = 0;
+		int sw = Fl::w();
+		int sh = Fl::h();
+		parse_quadlet(cp, &sx, &sy, &sw, &sh);
+		grab_portion_x = sx;
+		grab_portion_y = sy;
+		grab_portion_w = sw;
+		grab_portion_h = sh;
+	}
+	my_window->GrabDesktop();
+	width = my_window->desktop_mat.cols;
+	height = my_window->desktop_mat.rows;
+	type = CAMERA_TYPE_DESKTOP;
+}
+
+void	Camera::SetupWindowCamera(char *source)
+{
+	char *cp = source + strlen("window://");
+	if(strlen(cp) > 0)
+	{
+		grab_window_id = (unsigned long int)atol(cp);
+		GrabWindow();
+		width = mat.cols;
+		height = mat.rows;
+		type = CAMERA_TYPE_WINDOW;
+	}
+	else
+	{
+		my_window->SetErrorMessage("Window ID Missing");
+	}
+}
+
+void	Camera::SetupPseudoCamera(char *source)
+{
+	if(void_pseudo_camera != NULL)
+	{
+		int use_id = 0;
+		char *cp = source + strlen("pseudo://");
+		if(strlen(cp) > 0)
+		{
+			strcpy(pseudo_camera_name, cp);
+		}
+		void *(*pseudo_camera)(char *, int *, int *, int *);
+		pseudo_camera = (void *(*)(char *, int *, int *, int *))void_pseudo_camera;
+		int pseudo_width = 0;
+		int pseudo_height = 0;
+		int pseudo_depth = 0;
+		void *ptr = pseudo_camera(pseudo_camera_name, &pseudo_width, &pseudo_height, &pseudo_depth);
+		if(ptr != NULL)
+		{
+			free(ptr);
+			width = pseudo_width;
+			height = pseudo_height;
+			type = CAMERA_TYPE_PSEUDO;
+		}
+		else
+		{
+			my_window->SetErrorMessage("No Pseudo Camera Created");
+		}
+	}
+}
+
+void	Camera::SetupPluginCamera(char *source)
+{
+	int use_id = 0;
+	char *cp = source + strlen("plugin://");
+	if(strlen(cp) > 0)
+	{
+		void *rr = resolve_plugin_camera_name(my_window, cp);
+		if(rr != NULL)
+		{
+			plugin_camera = rr;
+			void *(*pseudo_camera)(char *, int *, int *, int *);
+			pseudo_camera = (void *(*)(char *, int *, int *, int *))plugin_camera;
+			int pseudo_width = 0;
+			int pseudo_height = 0;
+			int pseudo_depth = 0;
+			void *ptr = pseudo_camera(pseudo_camera_name, &pseudo_width, &pseudo_height, &pseudo_depth);
+			if(ptr != NULL)
+			{
+				free(ptr);
+				width = pseudo_width;
+				height = pseudo_height;
+				type = CAMERA_TYPE_PLUGIN;
+			}
+			else
+			{
+				my_window->SetErrorMessage("No Plugin Camera Created");
+			}
+		}
+		else
+		{
+			my_window->SetErrorMessage("No Plugin Camera Found");
+		}
+	}
+}
+
+void	Camera::SetupBlendCamera(char *source)
+{
+	char *cp = source + strlen("blend://");
+	if(strlen(cp) > 0)
+	{
+		char *one = cp;
+		while((*cp != ':') && (*cp != '\0'))
+		{
+			cp++;
+		}
+		if(*cp == ':')
+		{
+			*cp = '\0';
+			cp++;
+			char *two = cp;
+			while((*cp != ':') && (*cp != '\0'))
+			{
+				cp++;
+			}
+			if(*cp == ':')
+			{
+				*cp = '\0';
+				cp++;
+				blend_amount = atof(cp);
+				type = CAMERA_TYPE_BLEND;
+				blend_alias_one = strdup(one);
+				blend_alias_two = strdup(two);
+			}
+		}
+	}
+}
+
+void	Camera::SetupTimerCamera(char *source)
+{
+	char *cp = source + strlen("timer://");
+	if(strlen(cp) > 0)
+	{
+		start_timer = atol(cp);
+		while(*cp != '\0')
+		{
+			if(*cp == ',')
+			{
+				cp++;
+				stop_timer = atol(cp);
+			}
+			if(*cp == ':')
+			{
+				cp++;
+				timer_format = atoi(cp);
+			}
+			cp++;
+		}
+		initial_timer = time(0);
+		type = CAMERA_TYPE_TIMER;
+	}
+	else
+	{
+		my_window->SetErrorMessage("No Timer Parameters");
+	}
+}
+
+void	Camera::SetupClockCamera(char *source)
+{
+	char *cp = source + strlen("clock://");
+	if(strlen(cp) > 0)
+	{
+		military_clock = atoi(cp);
+		while(*cp != '\0')
+		{
+			if(*cp == ':')
+			{
+				cp++;
+				timer_format = atoi(cp);
+				while(*cp != '\0')
+				{
+					if(*cp == ':')
+					{
+						cp++;
+						analog = atoi(cp);
+						while(*cp != '\0')
+						{
+							if(*cp == ':')
+							{
+								cp++;
+								analog_size = atoi(cp);
+							}
+							cp++;
+						}
+					}
+					cp++;
+				}
+			}
+			cp++;
+		}
+		type = CAMERA_TYPE_CLOCK;
+	}
+	else
+	{
+		my_window->SetErrorMessage("No Clock Parameters");
+	}
+}
+
+void	Camera::SetupAVCamera(char *source)
+{
+	char *cp = source + strlen("av://");
+	if(strlen(cp) > 0)
+	{
+		int repeats = 1;
+		if(*cp == '[')
+		{
+			cp++;
+			repeats = atoi(cp);
+			while((*cp != ']') && (*cp != '\0'))
+			{
+				cp++;
+			}
+			if(*cp == ']') cp++;
+		}
+		if(*cp != '\0')
+		{
+			av_window = new VLC_Window(cp, repeats, width, height);
+			if(av_window->creation_failed == 0)
+			{
+				type = CAMERA_TYPE_AV;
+				Fl::add_timeout(1.0, vlc_window_start_cb, av_window);
+			}
+			else
+			{
+				type = CAMERA_TYPE_TEXT;
+				my_window->SetErrorMessage("AV Camera creation failed");
+			}
+		}
+		else
+		{
+			my_window->SetErrorMessage("Illegal AV Parameters");
+		}
+	}
+	else
+	{
+		my_window->SetErrorMessage("No AV Parameters");
+	}
+}
+
+void	Camera::SetupVectorCamera(char *source)
+{
+	char *cp = source + strlen("vector://");
+	if(strlen(cp) > 0)
+	{
+		type = CAMERA_TYPE_VECTOR;
+	}
+	else
+	{
+		my_window->SetErrorMessage("No Vector File Parameters");
+	}
+}
+
+void	Camera::SetupHTMLCamera(char *source)
+{
+	if(global_html == 1)
+	{
+		char *cp = source + strlen("html://");
+		if((strlen(cp) > 0) && (strlen(cp) < 32768))
+		{
+			extra_url = NULL;
+			extra_css = NULL;
+			extra_js_once = NULL;
+			extra_js_always = NULL;
+
+			char url[32768];
+			char css[32768];
+			char js_once[32768];
+			char js_always[32768];
+			find_url_css_js(cp, url, css, js_once, js_always);
+			if(strlen(url) > 0) extra_url = strdup(url);
+			if(strlen(css) > 0) extra_css = strdup(css);
+			if(strlen(js_once) > 0) extra_js_once = strdup(js_once);
+			if(strlen(js_always) > 0) extra_js_always = strdup(js_always);
+			HTML_Win *(*make_html)(char *, char *, int, char *, char *, char *, int, int);
+			make_html = (HTML_Win *(*)(char *, char *, int, char *, char *, char *, int, int))void_MakeHTMLWindow_cef;
+			if(make_html != NULL)
+			{
+				html = make_html(extra_url, NULL, my_window->html_background, extra_css, extra_js_once, extra_js_always, width, height);
+				while(html->raw == NULL)
+				{
+					Fl::check();
+				}
+				type = CAMERA_TYPE_HTML;
+			}
+		}
+		else
+		{
+			my_window->SetErrorMessage("No HTML Parameters");
+		}
+	}
+	else
+	{
+		my_window->SetErrorMessage("HTML Rendering disabled");
+	}
+}
+
+void	Camera::SetupHTTPCamera(char *source)
+{
+	if(global_html == 1)
+	{
+		if((strlen(source) > 0) && (strlen(source) < 32768))
+		{
+			extra_url = NULL;
+			extra_css = NULL;
+			extra_js_once = NULL;
+			extra_js_always = NULL;
+			char url[32768];
+			char css[32768];
+			char js_once[32768];
+			char js_always[32768];
+			find_url_css_js(source, url, css, js_once, js_always);
+			if(strlen(url) > 0) extra_url = strdup(url);
+			if(strlen(css) > 0) extra_css = strdup(css);
+			if(strlen(js_once) > 0) extra_js_once = strdup(js_once);
+			if(strlen(js_always) > 0) extra_js_always = strdup(js_always);
+			HTML_Win *(*make_html)(char *, char *, int, char *, char *, char *, int, int);
+			make_html = (HTML_Win *(*)(char *, char *, int, char *, char *, char *, int, int))void_MakeHTMLWindow_cef;
+			if(make_html != NULL)
+			{
+				make_html = (HTML_Win *(*)(char *, char *, int, char *, char *, char *, int, int))void_MakeHTMLWindow_cef;
+				html = make_html(extra_url, NULL, my_window->html_background, extra_css, extra_js_once, extra_js_always, width, height);
+				while(html->raw == NULL)
+				{
+					Fl::check();
+				}
+				type = CAMERA_TYPE_HTML;
+			}
+		}
+	}
+	else
+	{
+		my_window->SetErrorMessage("HTML Rendering disabled");
+	}
+}
+
+void	Camera::SetupHTMLSourceCamera(char *source)
+{
+	if(global_html == 1)
+	{
+		char *cp = source + strlen("html source://");
+		if(strlen(cp) > 0)
+		{
+			HTML_Win *(*make_html)(char *, char *, int, char *, char *, char *, int, int);
+			make_html = (HTML_Win *(*)(char *, char *, int, char *, char *, char *, int, int))void_MakeHTMLWindow_cef;
+			if(make_html != NULL)
+			{
+				html = make_html(NULL, cp, my_window->html_background, NULL, NULL, NULL, width, height);
+				while(html->raw == NULL)
+				{
+					Fl::check();
+				}
+				type = CAMERA_TYPE_HTML;
+			}
+		}
+		else
+		{
+			my_window->SetErrorMessage("No HTML");
+		}
+	}
+	else
+	{
+		my_window->SetErrorMessage("HTML Rendering disabled");
+	}
+}
+
+void	Camera::SetupSourcedCamera(char *source)
+{
+int		loop;
+
 	source_camera = NULL;
-	cairo_surface = NULL;
-	cairo_context = NULL;
-	single_frame_fd = -1;
-	chroma_color = CHROMA_ON_GREEN;
-
-	recog_min_x = 10000000;
-	recog_min_y = 10000000;
-	recog_max_x = -10000000;
-	recog_max_y = -10000000;
-	recog_retain_cnt = 0;
-
-	python_filter_function = NULL;
-	python_filter_code = strdup("#This is an example that draws a rectangle on the incoming frame\n#Note: the defined function must be named \"python_filter\" and must accept the cv::Mat as an argument.\n\n#\nimport cv2\nimport numpy as np\n\ndef python_filter(img=None):\n\tif img is not None:\n\t\tcv2.rectangle(img, (20, 30), (100, 80), (20, 50, 80), -1)\n");
-
-	for(loop = 0;loop < 128;loop++)
+	char *cp = source + strlen("sourced://");
+	if(strlen(cp) > 0)
 	{
-		filter_plugin[loop] = NULL;
-		filter_plugin_name[loop] = NULL;
-		filter_name[loop] = NULL;
-		filter_dialog[loop] = NULL;
+		double factor = 1.0;
+		if(*cp == '(')
+		{
+			cp++;
+			factor = atof(cp);
+			while((*cp != ')') && (*cp != '\0')) cp++;
+			while(*cp == ')') cp++;
+		}
+		int match = -1;
+		for(loop = 0;((loop < my_window->source_cnt) && (match == -1));loop++)
+		{
+			Camera *compare_cam = my_window->camera[loop];
+			if(strcmp(cp, compare_cam->alias) == 0)
+			{
+				match = loop;
+			}
+			if(match == -1)
+			{
+				if(strcmp(cp, compare_cam->path) == 0)
+				{
+					match = loop;
+				}
+			}
+		}
+		if(match > -1)
+		{
+			Camera *test_camera = my_window->camera[match];
+			if((test_camera->type != CAMERA_TYPE_ALL)
+			&& (test_camera->type != CAMERA_TYPE_ALTERNATING)
+			&& (test_camera->type != CAMERA_TYPE_BLEND)
+			&& (test_camera->type != CAMERA_TYPE_SOURCED)
+			&& (test_camera->type != CAMERA_TYPE_EDGE_DETECT)
+			&& (test_camera->type != CAMERA_TYPE_SPLIT)
+			&& (test_camera->type != CAMERA_TYPE_CHROMAKEY))
+			{
+				source_camera = test_camera;
+				requested_w = source_camera->width * factor;
+				requested_h = source_camera->height * factor;
+				type = CAMERA_TYPE_SOURCED;
+			}
+			else
+			{
+				my_window->SetErrorMessage("No Acceptable Source Found");
+			}
+		}
+		else
+		{
+			my_window->SetErrorMessage("No Source Found");
+		}
 	}
-	filter_plugin_cnt = 0;
-	filter_cnt = 0;
-
-	osg_viewer = NULL;
-	instrument_window = NULL;
-	for(loop = 0;loop < 128;loop++)
+	else
 	{
-		matrix_state[loop] = NULL;
+		my_window->SetErrorMessage("No Source");
 	}
-	matrix_state_cnt = 0;
+}
 
-	av_window = NULL;
+void	Camera::SetupEdgeCamera(char *source)
+{
+int		loop;
 
-	list_length = -1;
-	list_position = 0;
-	pipe_done = 0;
-	for(loop = 0;loop < 128;loop++)
+	source_camera = NULL;
+	char *cp = source + strlen("edge://");
+	if(strlen(cp) > 0)
 	{
-		strcpy(text_list[loop], "");
+		double factor = 1.0;
+		if(*cp == '(')
+		{
+			cp++;
+			factor = atof(cp);
+			while((*cp != ')') && (*cp != '\0')) cp++;
+			while(*cp == ')') cp++;
+		}
+		int match = -1;
+		for(loop = 0;((loop < my_window->source_cnt) && (match == -1));loop++)
+		{
+			Camera *compare_cam = my_window->camera[loop];
+			if(strcmp(cp, compare_cam->alias) == 0)
+			{
+				match = loop;
+			}
+			if(match == -1)
+			{
+				if(strcmp(cp, compare_cam->path) == 0)
+				{
+					match = loop;
+				}
+			}
+		}
+		if(match > -1)
+		{
+			Camera *test_camera = my_window->camera[match];
+			if((test_camera->type != CAMERA_TYPE_ALL)
+			&& (test_camera->type != CAMERA_TYPE_ALTERNATING)
+			&& (test_camera->type != CAMERA_TYPE_BLEND)
+			&& (test_camera->type != CAMERA_TYPE_SOURCED)
+			&& (test_camera->type != CAMERA_TYPE_EDGE_DETECT)
+			&& (test_camera->type != CAMERA_TYPE_SPLIT)
+			&& (test_camera->type != CAMERA_TYPE_CHROMAKEY))
+			{
+				source_camera = test_camera;
+				requested_w = source_camera->width * factor;
+				requested_h = source_camera->height * factor;
+				type = CAMERA_TYPE_EDGE_DETECT;
+			}
+			else
+			{
+				my_window->SetErrorMessage("No Acceptable Source Found");
+			}
+		}
+		else
+		{
+			my_window->SetErrorMessage("No Source Found");
+		}
 	}
+	else
+	{
+		my_window->SetErrorMessage("No Edge Source");
+	}
+}
+
+void	Camera::SetupChromaCamera(char *source, int use_chroma)
+{
+int		loop;
+
+	source_camera = NULL;
+	char *cp = source + strlen("chroma://");
+	if(strlen(cp) > 0)
+	{
+		double factor = 1.0;
+		if(*cp == '(')
+		{
+			cp++;
+			factor = atof(cp);
+			while((*cp != ')') && (*cp != '\0')) cp++;
+			while(*cp == ')') cp++;
+		}
+		int match = -1;
+		for(loop = 0;((loop < my_window->source_cnt) && (match == -1));loop++)
+		{
+			Camera *compare_cam = my_window->camera[loop];
+			if(strcmp(cp, compare_cam->alias) == 0)
+			{
+				match = loop;
+			}
+			if(match == -1)
+			{
+				if(strcmp(cp, compare_cam->path) == 0)
+				{
+					match = loop;
+				}
+			}
+		}
+		if(match > -1)
+		{
+			Camera *test_camera = my_window->camera[match];
+			if((test_camera->type != CAMERA_TYPE_ALL)
+			&& (test_camera->type != CAMERA_TYPE_ALTERNATING)
+			&& (test_camera->type != CAMERA_TYPE_BLEND)
+			&& (test_camera->type != CAMERA_TYPE_SOURCED)
+			&& (test_camera->type != CAMERA_TYPE_EDGE_DETECT)
+			&& (test_camera->type != CAMERA_TYPE_SPLIT)
+			&& (test_camera->type != CAMERA_TYPE_CHROMAKEY))
+			{
+				source_camera = test_camera;
+				requested_w = source_camera->width * factor;
+				requested_h = source_camera->height * factor;
+				chroma_color = use_chroma;
+				type = CAMERA_TYPE_CHROMAKEY;
+			}
+			else
+			{
+				my_window->SetErrorMessage("No Acceptable Source Found");
+			}
+		}
+		else
+		{
+			my_window->SetErrorMessage("No Source Found");
+		}
+	}
+	else
+	{
+		my_window->SetErrorMessage("No Chroma Source");
+	}
+}
+
+void	Camera::SetupAlternatingCamera(char *source)
+{
+	alternate_interval = 5;
+	char *cp = source + strlen("alternating://");
+	if(strlen(cp) > 0)
+	{
+		alternate_interval = atof(cp);
+	}
+	alternate_index = 0;
+	alternate_time = precise_time();
+	type = CAMERA_TYPE_ALTERNATING;
+}
+
+void	Camera::SetupSplitCamera(char *source)
+{
+int		loop;
+
+	split_cols = 2;
+	split_rows = 2;
+	split_source_cnt = 0;
+	char *cp = source + strlen("split://");
+	if(strlen(cp) > 0)
+	{
+		split_cols = atoi(cp);
+		while((*cp != '\0') && (*cp != ',')) cp++;
+		if(*cp == ',')
+		{
+			cp++;
+			split_rows = atoi(cp);
+			int cnt = split_cols * split_rows;
+			while((*cp != '\0') && (*cp != ';')) cp++;
+			if(*cp == ';')
+			{
+				cp++;
+				char *start = cp;
+				for(loop = 0;loop < cnt;loop++)
+				{
+					while((*cp != '\0') && (*cp != ',')) cp++;
+					if(*cp == ',')
+					{
+						*cp = '\0';
+						cp++;
+					}
+					split_source[split_source_cnt] = strdup(start);
+					split_source_cnt++;
+					start = cp;
+				}
+			}
+		}
+	}
+	alternate_index = 0;
+	alternate_time = precise_time();
+	type = CAMERA_TYPE_SPLIT;
+}
+
+void	Camera::StartupLiveCamera(char *source)
+{
+	if(start_win != NULL)
+	{
+		char buf[8192];
+		if(strlen(alias) > 0)
+		{
+			sprintf(buf, "Open camera:\n%s", alias);
+		}
+		else
+		{
+			sprintf(buf, "Open camera:\n%s", source);
+		}
+		if(my_window->fast_start == 0)
+		{
+			if(mat.empty())
+			{
+				if(cap != NULL)
+				{
+					if(cap->isOpened())
+					{
+						cap->grab();
+						last_grab_time = precise_time();
+					}
+				}
+				Capture(1);
+			}
+			if(!mat.empty())
+			{
+				if(start_win->image_mat_cnt < 128)
+				{
+					Mat local_mat;
+					mat.copyTo(local_mat);
+					cv::resize(local_mat, local_mat, cv::Size(160, 90));
+					start_win->image_mat[start_win->image_mat_cnt] = local_mat.clone();
+					start_win->image_mat_cnt++;
+					start_win->redraw();
+					if(start_win->intro_pipe_fp != NULL)
+					{
+						Mat send_mat;
+						int nn = fileno(start_win->intro_pipe_fp);
+						int sz = local_mat.total() * local_mat.elemSize();
+						fprintf(start_win->intro_pipe_fp, "image: %d\n", sz);
+						fflush(start_win->intro_pipe_fp);
+						unsigned char *cp = local_mat.ptr();
+						for(int inner = 0;inner < sz;inner++)
+						{
+							fprintf(start_win->intro_pipe_fp, "%u\n", *cp);
+							cp++;
+						}
+						fflush(start_win->intro_pipe_fp);
+					}
+				}
+			}
+			start_win->Update(buf);
+		}
+	}
+}
+
+void	Camera::StartupCairoForCamera()
+{
+	if(mat.channels() == 3)
+	{
+		cvtColor(mat, mat, COLOR_RGB2RGBA);
+	}
+	cairo_surface = cairo_image_surface_create_for_data(mat.ptr(), CAIRO_FORMAT_ARGB32, mat.cols, mat.rows, mat.step);
+	if(cairo_surface != NULL)
+	{
+		cairo_context = cairo_create(cairo_surface);
+		cairo_set_antialias(cairo_context, CAIRO_ANTIALIAS_BEST);
+	}
+}
+
+int		Camera::SetupCamera(char *source, int use_chroma)
+{
+	int progress_thumb = 0;
+	if(strncasecmp(source, "text://", strlen("text://")) == 0)
+	{
+		char *cp = source + strlen("text://");
+		strcpy(path, cp);
+	}
+	else if(strncasecmp(source, "blank://", strlen("blank://")) == 0)
+	{
+		SetupBlankCamera(source);
+	}
+	else if(strncasecmp(source, "dynamic://", strlen("dynamic://")) == 0)
+	{
+		SetupDynamicCamera();
+	}
+	else if(strncasecmp(source, "slideshow://", strlen("slideshow://")) == 0)
+	{
+		SetupSlideshowCamera(source);
+	}
+	else if(strncasecmp(source, "alert://", strlen("alert://")) == 0)
+	{
+		SetupAlertCamera(source);
+	}
+	else if(strncasecmp(source, "pipe://", strlen("pipe://")) == 0)
+	{
+		SetupPipeCamera(source);
+	}
+	else if(strncasecmp(source, "irc://", strlen("irc://")) == 0)
+	{
+		SetupIRCCamera(source);
+	}
+	else if(strncasecmp(source, "ndi://", strlen("ndi://")) == 0)
+	{
+		SetupNDICamera(source);
+		progress_thumb = 1;
+	}
+	else if(strncasecmp(source, "ndi_uyvy://", strlen("ndi_uyvy://")) == 0)
+	{
+		SetupNDI_UYVYCamera(source);
+		progress_thumb = 1;
+	}
+	else if(strncasecmp(source, "ndi_p216://", strlen("ndi_p216://")) == 0)
+	{
+		SetupNDI_P216Camera(source);
+		progress_thumb = 1;
+	}
+	else if(strncasecmp(source, "ndi_bgrx://", strlen("ndi_bgrx://")) == 0)
+	{
+		SetupNDI_BGRXCamera(source);
+		progress_thumb = 1;
+	}
+	else if(strncasecmp(source, "ndi_rgbx://", strlen("ndi_rgbx://")) == 0)
+	{
+		SetupNDI_RGBXCamera(source);
+		progress_thumb = 1;
+	}
+	else if(strncasecmp(source, "sff://", strlen("sff://")) == 0)
+	{
+		SetupSFFCamera(source);
+	}
+	else if(strncasecmp(source, "osg://", strlen("osg://")) == 0)
+	{
+		SetupOSGCamera(source);
+	}
+	else if(strncasecmp(source, "fullscreen://", strlen("fullscreen://")) == 0)
+	{
+		SetupFullscreenCamera(source);
+	}
+	else if(strncasecmp(source, "desktop://", strlen("desktop://")) == 0)
+	{
+		SetupDesktopCamera(source);
+	}
+	else if(strncasecmp(source, "this://", strlen("this://")) == 0)
+	{
+	}
+	else if(strncasecmp(source, "window://", strlen("window://")) == 0)
+	{
+		SetupWindowCamera(source);
+	}
+	else if(strncasecmp(source, "pseudo://", strlen("pseudo://")) == 0)
+	{
+		SetupPseudoCamera(source);
+	}
+	else if(strncasecmp(source, "plugin://", strlen("plugin://")) == 0)
+	{
+		SetupPluginCamera(source);
+	}
+	else if(strncasecmp(source, "blend://", strlen("blend://")) == 0)
+	{
+		SetupBlendCamera(source);
+	}
+	else if(strncasecmp(source, "timer://", strlen("timer://")) == 0)
+	{
+		SetupTimerCamera(source);
+	}
+	else if(strncasecmp(source, "clock://", strlen("clock://")) == 0)
+	{
+		SetupClockCamera(source);
+	}
+	else if(strncasecmp(source, "av://", strlen("av://")) == 0)
+	{
+		SetupAVCamera(source);
+	}
+	else if(strncasecmp(source, "vector://", strlen("vector://")) == 0)
+	{
+		SetupVectorCamera(source);
+	}
+	else if(strncasecmp(source, "html://", strlen("html://")) == 0)
+	{
+		SetupHTMLCamera(source);
+	}
+	else if((strncasecmp(source, "http://", strlen("http://")) == 0)
+	|| (strncasecmp(source, "https://", strlen("https://")) == 0))
+	{
+		SetupHTTPCamera(source);
+	}
+	else if(strncasecmp(source, "html source://", strlen("html source://")) == 0)
+	{
+		SetupHTMLSourceCamera(source);
+	}
+	else if(strncasecmp(source, "sourced://", strlen("sourced://")) == 0)
+	{
+		SetupSourcedCamera(source);
+	}
+	else if(strncasecmp(source, "edge://", strlen("edge://")) == 0)
+	{
+		SetupEdgeCamera(source);
+	}
+	else if(strncasecmp(source, "chroma://", strlen("chroma://")) == 0)
+	{
+		SetupChromaCamera(source, use_chroma);
+	}
+	else if(strncasecmp(source, "alternating://", strlen("alternating://")) == 0)
+	{
+		SetupAlternatingCamera(source);
+	}
+	else if(strncasecmp(source, "all://", strlen("all://")) == 0)
+	{
+		type = CAMERA_TYPE_ALL;
+	}
+	else if(strncasecmp(source, "split://", strlen("split://")) == 0)
+	{
+		SetupSplitCamera(source);
+	}
+	return(progress_thumb);
+}
+
+Camera::Camera(MyWin *in_win, int in_id, char *source, int num, double forced_fps, int in_requested_w, int in_requested_h, int rr, int gg, int bb, int aa, int t_rr, int t_gg, int t_bb, int t_aa, int use_chroma)
+{
+int		loop;
+
+	InitializeVariables();
+
+	my_window = in_win;
 	display_width = my_window->display_width;
 	display_height = my_window->display_height;
+	hot_fps = my_window->minimum_fps;
+	id = in_id;
+	fps = forced_fps;
+	requested_x = -1;
+	requested_y = -1;
+	requested_w = in_requested_w;
+	requested_h = in_requested_h;
+	red = rr;
+	green = gg;
+	blue = bb;
+	alpha = aa;
+	text_red = t_rr;
+	text_green = t_gg;
+	text_blue = t_bb;
+	text_alpha = t_aa;
+
+	DisplayScaleFactor();
 	old_display_width = display_width;
 	old_display_height = display_height;
 	int mw_w = my_window->w();
 	int mw_h = my_window->h();
 
-	show_alias = 0;
-	
-	bound_mic_cnt = -1;
-	for(loop = 0;loop < 128;loop++)
-	{
-		bound_mic[loop] = NULL;
-	}
 	if(my_window->auto_scale == 1)
 	{
 		if(Fl::h() > 0)
@@ -15653,44 +16886,7 @@ int		loop;
 	image_sx = (mw_w / 2) - (display_width / 2);
 	image_sy = (mw_h / 2) - (display_height / 2);
 
-	once = 0;
-	detected_object_cnt = 0;
-	detected_object_countdown = 0;
-	for(loop = 0;loop < 10;loop++)
-	{
-		detected_object[loop].x = -1;
-		detected_object[loop].y = -1;
-		detected_object[loop].w = -1;
-		detected_object[loop].h = -1;
-		detected_object[loop].idx = -1;
-		detected_object[loop].confidence = 0.0;
-	}
-	following_object = 0;
-	for(loop = 0;loop < 1024;loop++)
-	{
-		object_index[loop] = 0;
-	}
-	trigger_cnt = 0;
-	for(loop = 0;loop < 128;loop++)
-	{
-		trigger[loop] = -1;
-	}
-	for(loop = 0;loop < 32;loop++)
-	{
-		pip[loop] = NULL;
-	}
-	for(loop = 0;loop < 128;loop++)
-	{
-		image_window[loop] = NULL;
-	}
-	image_window_cnt = 0;
 	int progress_thumb = 0;
-
-	pipe_pid = -1;
-	pipe_in = -1;
-	pipe_out = -1;
-	pipe_fp = NULL;
-	piping_text = 0;
 	if(source != NULL)
 	{
 		if(strncmp(source, "camera://", strlen("camera://")) == 0)
@@ -15700,6 +16896,10 @@ int		loop;
 		if(strncmp(source, "image://", strlen("image://")) == 0)
 		{
 			source += strlen("image://");
+		}
+		if(strncmp(source, "text://image://", strlen("text://image://")) == 0)
+		{
+			source += strlen("text://");
 		}
 	}
 	int live_camera = 0;
@@ -15713,91 +16913,7 @@ int		loop;
 	}
 	if(live_camera == 1)
 	{
-		SetSystemAlias();
-		starting_width = requested_w;
-		starting_height = requested_h;
-		if(my_window->fast_start == 0)
-		{
-			starting_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
-			starting_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
-
-			if(strlen(format_code) > 0)
-			{
-				n_cap->set(CAP_PROP_FOURCC, VideoWriter::fourcc(format_code[0], format_code[1], format_code[2], format_code[3]));
-			}
-			else
-			{
-				char *fourcc_list[128];
-				char use_source[4096];
-				if(source == NULL)
-				{
-					sprintf(use_source, "/dev/video%d", num);
-				}
-				else
-				{
-					strcpy(use_source, source);
-				}
-				int fourcc_cnt = query_fourcc(use_source, fourcc_list);
-				for(loop = 0;loop < fourcc_cnt;loop++)
-				{
-					if(fourcc_list[loop] != NULL)
-					{
-						if(strcasecmp(fourcc_list[loop], "MJPG") == 0)
-						{
-							int fourcc_mjpg = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
-							n_cap->set(cv::CAP_PROP_FOURCC, fourcc_mjpg);
-						}
-						free(fourcc_list[loop]);
-					}
-				}
-			}
-		}
-		int n_width = requested_w;
-		int n_height = requested_h;
-		if(my_window->fast_start == 0)
-		{
-			if((starting_width != requested_w) || (starting_height != requested_h))
-			{
-				n_cap->set(CAP_PROP_FRAME_WIDTH, requested_w);
-				n_cap->set(CAP_PROP_FRAME_HEIGHT, requested_h);
-				sleep(1);
-			}
-			int n_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
-			int n_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
-			n_cap->set(CAP_PROP_BUFFERSIZE, 10);
-			n_cap->set(CAP_PROP_FPS, 60);
-
-			cap_fourcc = n_cap->get(cv::CAP_PROP_FOURCC);
-			char c1, c2, c3, c4;
-			convert_fourcc(cap_fourcc, c1, c2, c3, c4);
-			cap_total_frames = 0;
-			cap_total_frames = n_cap->get(cv::CAP_PROP_FRAME_COUNT);
-			cap_format = n_cap->get(cv::CAP_PROP_FORMAT);
-			int frame_rate = n_cap->get(cv::CAP_PROP_FPS);
-			int frame_pos = n_cap->get(cv::CAP_PROP_POS_FRAMES);
-
-			Mat test_only = imread(path);
-			if(cap_total_frames < 2)
-			{
-				if((cap_fourcc == 0) || ((test_only.rows > 0) && (test_only.cols > 0)))
-				{
-					type = CAMERA_TYPE_IMAGE;
-				}
-			}
-			n_width = (int)n_cap->get(CAP_PROP_FRAME_WIDTH);
-			n_height = (int)n_cap->get(CAP_PROP_FRAME_HEIGHT);
-		}
-		cap = n_cap;
-		width = n_width;
-		height = n_height;
-		if((n_width != requested_w) || (n_height != requested_h))
-		{
-			fprintf(stderr, "Warning: received dimensions differ from requested dimensions. (%d x %d) vs. (%d x %d).\nImage will be scaled in software.\n",
-				n_width, n_height,
-				requested_w, requested_h);
-			width = requested_w;
-			height = requested_h;
-		}
+		SetupLiveCamera(n_cap, source, num);
 		progress_thumb = 1;
 	}
 	else if(source != NULL)
@@ -15805,987 +16921,16 @@ int		loop;
 		type = CAMERA_TYPE_TEXT;
 		width = requested_w;
 		height = requested_h;
-		if(strncasecmp(source, "text://", strlen("text://")) == 0)
-		{
-			char *cp = source + strlen("text://");
-			strcpy(path, cp);
-		}
-		else if(strncasecmp(source, "blank://", strlen("blank://")) == 0)
-		{
-			red = 0;
-			green = 0;
-			blue = 0;
-			alpha = 0;
-			char *cp = source + strlen("blank://");
-			if(strlen(cp) > 0)
-			{
-				parse_quadlet(cp, &red, &green, &blue, &alpha);
-			}
-			cv::Mat local_mat(my_window->requested_h, my_window->requested_w, CV_8UC4, cv::Scalar(red, green, blue, alpha));
-			mat = local_mat;
-			reserve_mat = local_mat.clone();
-
-			width = requested_w;
-			height = requested_h;
-			type = CAMERA_TYPE_BLANK;
-		}
-		else if(strncasecmp(source, "dynamic://", strlen("dynamic://")) == 0)
-		{
-			width = requested_w;
-			height = requested_h;
-			dynamic_text_start_time = time(0);
-			dynamic_text_scroll_x = width;
-			dynamic_text_scroll_y = height;
-			dynamic_text_line_cnt = 0;
-			dynamic_text_initialized = 0;
-			dynamic_text_loop_limit = 0;
-			dynamic_text_loop_cnt = 0;
-			dynamic_text_cycle = 0;
-			dynamic_text_fade = 0.0;
-			dynamic_text_fade_direction = 0;
-			dynamic_text_fade_peak = 0;
-			dynamic_text_squash_direction = 0;
-			dynamic_text_scale_x = 1.0;
-			dynamic_text_scale_y = 1.0;
-			type = CAMERA_TYPE_DYNAMIC_TEXT;
-		}
-		else if(strncasecmp(source, "slideshow://", strlen("slideshow://")) == 0)
-		{
-			char *filename = source + strlen("slideshow://");
-			if(IsDirectory(filename))
-			{
-				struct dirent **namelist;
-				int n = scandir(filename, &namelist, NULL, alphasort);
-				for(int i = 0; i < n; i++) 
-				{
-					if(slideshow_list_cnt < 1024)
-					{
-						slideshow_list[slideshow_list_cnt] = strdup(namelist[i]->d_name);
-						slideshow_list_cnt++;
-					}
-					free(namelist[i]);
-				}
-				free(namelist);
-			}
-			else
-			{
-				slideshow_fp = fopen(filename, "r");
-			}
-			Fl::add_timeout(0.1, slideshow_cb, this);
-			type = CAMERA_TYPE_SLIDESHOW;
-		}
-		else if(strncasecmp(source, "alert://", strlen("alert://")) == 0)
-		{
-			char *cp = source + strlen("alert://");
-			strcpy(alert_monitor_file, cp);
-			cp = alert_monitor_file;
-			while((*cp != ':') && (*cp != '\0')) cp++;
-			if(*cp == ':')
-			{
-				*cp = '\0';
-				cp++;
-				alert_trigger_mode = atoi(cp);
-				while((*cp != ':') && (*cp != '\0')) cp++;
-				if(*cp == ':')
-				{
-					*cp = '\0';
-					cp++;
-					alert_display_mode = atoi(cp);
-					while((*cp != ':') && (*cp != '\0')) cp++;
-					if(*cp == ':')
-					{
-						*cp = '\0';
-						cp++;
-						alert_duration = atoi(cp);
-						while((*cp != ':') && (*cp != '\0')) cp++;
-						if(*cp == ':')
-						{
-							*cp = '\0';
-							cp++;
-							alert_opaque = atoi(cp);
-							while((*cp != ':') && (*cp != '\0')) cp++;
-							if(*cp == ':')
-							{
-								cp++;
-								if(strlen(cp) > 0)
-								{
-									strcpy(alert_audio_file, cp);
-								}
-							}
-						}
-					}
-				}
-			}
-			type = CAMERA_TYPE_ALERT;
-		}
-		else if(strncasecmp(source, "pipe://", strlen("pipe://")) == 0)
-		{
-			char *cp = source + strlen("pipe://");
-			pipe_pid = popen2(cp, &pipe_in, &pipe_out);
-			if(pipe_pid != -1)
-			{
-				piping_text = 1;
-				type = CAMERA_TYPE_PIPED;
-				pipe_fp = fdopen(pipe_out, "r");
-				if(pipe_fp != NULL)
-				{
-					create_task((int (*)(int *))read_pipe, (void *)this);
-				}
-				else
-				{
-					my_window->SetErrorMessage("No Pipe Created");
-				}
-			}
-			else
-			{
-				my_window->SetErrorMessage("No Pipe Created");
-			}
-		}
-		else if(strncasecmp(source, "irc://", strlen("irc://")) == 0)
-		{
-			char *cp = source + strlen("irc://");
-			char *server = cp;
-			while((*cp != 10) && (*cp != '\0')) cp++;
-			if(*cp == 10)
-			{
-				*cp = '\0';
-				cp++;
-				int port = atoi(cp);
-				while((*cp != 10) && (*cp != '\0')) cp++;
-				if(*cp == 10)
-				{
-					*cp = '\0';
-					cp++;
-					char *user = cp;
-					while((*cp != 10) && (*cp != '\0')) cp++;
-					if(*cp == 10)
-					{
-						*cp = '\0';
-						cp++;
-						char *password = cp;
-						while((*cp != 10) && (*cp != '\0')) cp++;
-						if(*cp == 10)
-						{
-							*cp = '\0';
-							cp++;
-							char *channel = cp;
-							irc_session = cow_irc_connect(server, port, user, password, channel);
-							if(irc_session != NULL)
-							{
-								piping_text = 1;
-								type = CAMERA_TYPE_TEXT;
-								create_task((int (*)(int *))run_irc, (void *)this);
-								create_task((int (*)(int *))read_irc, (void *)this);
-							}
-						}
-					}
-				}
-			}
-		}
-		else if(strncasecmp(source, "ndi://", strlen("ndi://")) == 0)
-		{
-			char *cp = source + strlen("ndi://");
-			if(strlen(cp) > 0)
-			{
-				type = CAMERA_TYPE_CAMERA;
-				ndi_recv = NULL;
-				ndi_recv = FindNDI(cp, 0);
-				if(ndi_recv != NULL)
-				{
-					ndi_capture = 1;
-				}
-			}
-			progress_thumb = 1;
-		}
-		else if(strncasecmp(source, "ndi_uyvy://", strlen("ndi_uyvy://")) == 0)
-		{
-			char *cp = source + strlen("ndi_uyvy://");
-			if(strlen(cp) > 0)
-			{
-				type = CAMERA_TYPE_CAMERA;
-				ndi_recv = NULL;
-				ndi_recv = FindNDI(cp, 1);
-				if(ndi_recv != NULL)
-				{
-					ndi_capture = 1;
-				}
-			}
-			progress_thumb = 1;
-		}
-		else if(strncasecmp(source, "ndi_p216://", strlen("ndi_p216://")) == 0)
-		{
-			char *cp = source + strlen("ndi_p216://");
-			if(strlen(cp) > 0)
-			{
-				type = CAMERA_TYPE_CAMERA;
-				ndi_recv = NULL;
-				ndi_recv = FindNDI(cp, 2);
-				if(ndi_recv != NULL)
-				{
-					ndi_capture = 1;
-				}
-			}
-			progress_thumb = 1;
-		}
-		else if(strncasecmp(source, "ndi_bgrx://", strlen("ndi_bgrx://")) == 0)
-		{
-			char *cp = source + strlen("ndi_bgrx://");
-			if(strlen(cp) > 0)
-			{
-				type = CAMERA_TYPE_CAMERA;
-				ndi_recv = NULL;
-				ndi_recv = FindNDI(cp, 3);
-				if(ndi_recv != NULL)
-				{
-					ndi_capture = 1;
-				}
-			}
-			progress_thumb = 1;
-		}
-		else if(strncasecmp(source, "ndi_rgbx://", strlen("ndi_rgbx://")) == 0)
-		{
-			char *cp = source + strlen("ndi_rgbx://");
-			if(strlen(cp) > 0)
-			{
-				type = CAMERA_TYPE_CAMERA;
-				ndi_recv = NULL;
-				ndi_recv = FindNDI(cp, 4);
-				if(ndi_recv != NULL)
-				{
-					ndi_capture = 1;
-				}
-			}
-			progress_thumb = 1;
-		}
-		else if(strncasecmp(source, "sff://", strlen("sff://")) == 0)
-		{
-			char *cp = source + strlen("sff://");
-			single_frame_fd = open(cp, O_RDWR);
-			if(single_frame_fd != -1)
-			{
-				type = CAMERA_TYPE_SINGLE_FRAME_FILE;
-				create_task((int (*)(int *))read_single_frame_file, (void *)this);
-			}
-			else
-			{
-				my_window->SetErrorMessage("No SFF Found");
-			}
-		}
-		else if(strncasecmp(source, "osg://", strlen("osg://")) == 0)
-		{
-			if(global_osg_enabled == 1)
-			{
-				char *cp = source + strlen("osg://");
-				char *file[1];
-				file[0] = cp;
-
-				MyViewer *(*osg_open_osg)(int, char **, int, int);
-				osg_open_osg = (MyViewer *(*)(int, char **, int, int))void_OSG_open_osg;
-				if(osg_open_osg != NULL)
-				{
-					osg_viewer = osg_open_osg(1, file, requested_w, requested_h);
-					if(osg_viewer != NULL)
-					{
-						type = CAMERA_TYPE_OSG;
-					}
-					else
-					{
-						my_window->SetErrorMessage("OSG Viewer not created");
-					}
-				}
-				else
-				{
-					my_window->SetErrorMessage("OSG Viewer not created");
-				}
-			}
-			else
-			{
-				my_window->SetErrorMessage("OSG is not enabled");
-			}
-		}
-		else if(strncasecmp(source, "fullscreen://", strlen("fullscreen://")) == 0)
-		{
-			int instance = 0;
-			char *cp = source + strlen("fullscreen://");
-			if(strlen(cp) > 0)
-			{
-				instance = atoi(cp);
-			}
-			fullscreen_instance = instance;
-			type = CAMERA_TYPE_FULLSCREEN;
-			width = Fl::w();
-			height = Fl::h();
-			cv::Mat local_mat(width, height, CV_8UC4, cv::Scalar(0, 0, 0, 255));
-			mat = local_mat;
-			reserve_mat = local_mat.clone();
-			Fl::add_timeout(2.0, look_for_fullscreen_win_cb, this);
-		}
-		else if(strncasecmp(source, "desktop://", strlen("desktop://")) == 0)
-		{
-			char *cp = source + strlen("desktop://");
-			if(strlen(cp) > 0)
-			{
-				int sx = 0;
-				int sy = 0;
-				int sw = Fl::w();
-				int sh = Fl::h();
-				parse_quadlet(cp, &sx, &sy, &sw, &sh);
-				grab_portion_x = sx;
-				grab_portion_y = sy;
-				grab_portion_w = sw;
-				grab_portion_h = sh;
-			}
-			in_win->GrabDesktop();
-			width = in_win->desktop_mat.cols;
-			height = in_win->desktop_mat.rows;
-			type = CAMERA_TYPE_DESKTOP;
-		}
-		else if(strncasecmp(source, "this://", strlen("this://")) == 0)
-		{
-		}
-		else if(strncasecmp(source, "window://", strlen("window://")) == 0)
-		{
-			char *cp = source + strlen("window://");
-			if(strlen(cp) > 0)
-			{
-				grab_window_id = (unsigned long int)atol(cp);
-				GrabWindow();
-				width = mat.cols;
-				height = mat.rows;
-				type = CAMERA_TYPE_WINDOW;
-			}
-			else
-			{
-				my_window->SetErrorMessage("Window ID Missing");
-			}
-		}
-		else if(strncasecmp(source, "pseudo://", strlen("pseudo://")) == 0)
-		{
-			if(void_pseudo_camera != NULL)
-			{
-				int use_id = 0;
-				char *cp = source + strlen("pseudo://");
-				if(strlen(cp) > 0)
-				{
-					strcpy(pseudo_camera_name, cp);
-				}
-				void *(*pseudo_camera)(char *, int *, int *, int *);
-				pseudo_camera = (void *(*)(char *, int *, int *, int *))void_pseudo_camera;
-				int pseudo_width = 0;
-				int pseudo_height = 0;
-				int pseudo_depth = 0;
-				void *ptr = pseudo_camera(pseudo_camera_name, &pseudo_width, &pseudo_height, &pseudo_depth);
-				if(ptr != NULL)
-				{
-					free(ptr);
-					width = pseudo_width;
-					height = pseudo_height;
-					type = CAMERA_TYPE_PSEUDO;
-				}
-				else
-				{
-					my_window->SetErrorMessage("No Pseudo Camera Created");
-				}
-			}
-		}
-		else if(strncasecmp(source, "plugin://", strlen("plugin://")) == 0)
-		{
-			int use_id = 0;
-			char *cp = source + strlen("plugin://");
-			if(strlen(cp) > 0)
-			{
-				void *rr = resolve_plugin_camera_name(my_window, cp);
-				if(rr != NULL)
-				{
-					plugin_camera = rr;
-					void *(*pseudo_camera)(char *, int *, int *, int *);
-					pseudo_camera = (void *(*)(char *, int *, int *, int *))plugin_camera;
-					int pseudo_width = 0;
-					int pseudo_height = 0;
-					int pseudo_depth = 0;
-					void *ptr = pseudo_camera(pseudo_camera_name, &pseudo_width, &pseudo_height, &pseudo_depth);
-					if(ptr != NULL)
-					{
-						free(ptr);
-						width = pseudo_width;
-						height = pseudo_height;
-						type = CAMERA_TYPE_PLUGIN;
-					}
-					else
-					{
-						my_window->SetErrorMessage("No Plugin Camera Created");
-					}
-				}
-				else
-				{
-					my_window->SetErrorMessage("No Plugin Camera Found");
-				}
-			}
-		}
-		else if(strncasecmp(source, "blend://", strlen("blend://")) == 0)
-		{
-			char *cp = source + strlen("blend://");
-			if(strlen(cp) > 0)
-			{
-				char *one = cp;
-				while((*cp != ':') && (*cp != '\0'))
-				{
-					cp++;
-				}
-				if(*cp == ':')
-				{
-					*cp = '\0';
-					cp++;
-					char *two = cp;
-					while((*cp != ':') && (*cp != '\0'))
-					{
-						cp++;
-					}
-					if(*cp == ':')
-					{
-						*cp = '\0';
-						cp++;
-						blend_amount = atof(cp);
-						type = CAMERA_TYPE_BLEND;
-						blend_alias_one = strdup(one);
-						blend_alias_two = strdup(two);
-					}
-				}
-			}
-		}
-		else if(strncasecmp(source, "timer://", strlen("timer://")) == 0)
-		{
-			char *cp = source + strlen("timer://");
-			if(strlen(cp) > 0)
-			{
-				start_timer = atol(cp);
-				while(*cp != '\0')
-				{
-					if(*cp == ',')
-					{
-						cp++;
-						stop_timer = atol(cp);
-					}
-					if(*cp == ':')
-					{
-						cp++;
-						timer_format = atoi(cp);
-					}
-					cp++;
-				}
-				initial_timer = time(0);
-				type = CAMERA_TYPE_TIMER;
-			}
-			else
-			{
-				my_window->SetErrorMessage("No Timer Parameters");
-			}
-		}
-		else if(strncasecmp(source, "clock://", strlen("clock://")) == 0)
-		{
-			char *cp = source + strlen("clock://");
-			if(strlen(cp) > 0)
-			{
-				military_clock = atoi(cp);
-				while(*cp != '\0')
-				{
-					if(*cp == ':')
-					{
-						cp++;
-						timer_format = atoi(cp);
-						while(*cp != '\0')
-						{
-							if(*cp == ':')
-							{
-								cp++;
-								analog = atoi(cp);
-								while(*cp != '\0')
-								{
-									if(*cp == ':')
-									{
-										cp++;
-										analog_size = atoi(cp);
-									}
-									cp++;
-								}
-							}
-							cp++;
-						}
-					}
-					cp++;
-				}
-				type = CAMERA_TYPE_CLOCK;
-			}
-			else
-			{
-				my_window->SetErrorMessage("No Clock Parameters");
-			}
-		}
-		else if(strncasecmp(source, "av://", strlen("av://")) == 0)
-		{
-			char *cp = source + strlen("av://");
-			if(strlen(cp) > 0)
-			{
-				av_window = new VLC_Window(cp, width, height);
-				type = CAMERA_TYPE_AV;
-				Fl::add_timeout(1.0, vlc_window_start_cb, av_window);
-			}
-			else
-			{
-				my_window->SetErrorMessage("No AV Parameters");
-			}
-		}
-		else if(strncasecmp(source, "vector://", strlen("vector://")) == 0)
-		{
-			char *cp = source + strlen("vector://");
-			if(strlen(cp) > 0)
-			{
-				type = CAMERA_TYPE_VECTOR;
-			}
-			else
-			{
-				my_window->SetErrorMessage("No Vector File Parameters");
-			}
-		}
-		else if(strncasecmp(source, "html://", strlen("html://")) == 0)
-		{
-			if(global_html == 1)
-			{
-				char *cp = source + strlen("html://");
-				if((strlen(cp) > 0) && (strlen(cp) < 32768))
-				{
-					extra_url = NULL;
-					extra_css = NULL;
-					extra_js_once = NULL;
-					extra_js_always = NULL;
-
-					char url[32768];
-					char css[32768];
-					char js_once[32768];
-					char js_always[32768];
-					find_url_css_js(cp, url, css, js_once, js_always);
-					if(strlen(url) > 0) extra_url = strdup(url);
-					if(strlen(css) > 0) extra_css = strdup(css);
-					if(strlen(js_once) > 0) extra_js_once = strdup(js_once);
-					if(strlen(js_always) > 0) extra_js_always = strdup(js_always);
-					HTML_Win *(*make_html)(char *, char *, int, char *, char *, char *, int, int);
-					make_html = (HTML_Win *(*)(char *, char *, int, char *, char *, char *, int, int))void_MakeHTMLWindow_cef;
-					if(make_html != NULL)
-					{
-						html = make_html(extra_url, NULL, my_window->html_background, extra_css, extra_js_once, extra_js_always, width, height);
-						while(html->raw == NULL)
-						{
-							Fl::check();
-						}
-						type = CAMERA_TYPE_HTML;
-					}
-				}
-				else
-				{
-					my_window->SetErrorMessage("No HTML Parameters");
-				}
-			}
-			else
-			{
-				my_window->SetErrorMessage("HTML Rendering disabled");
-			}
-		}
-		else if((strncasecmp(source, "http://", strlen("http://")) == 0)
-		|| (strncasecmp(source, "https://", strlen("https://")) == 0))
-		{
-			if(global_html == 1)
-			{
-				if((strlen(source) > 0) && (strlen(source) < 32768))
-				{
-					extra_url = NULL;
-					extra_css = NULL;
-					extra_js_once = NULL;
-					extra_js_always = NULL;
-					char url[32768];
-					char css[32768];
-					char js_once[32768];
-					char js_always[32768];
-					find_url_css_js(source, url, css, js_once, js_always);
-					if(strlen(url) > 0) extra_url = strdup(url);
-					if(strlen(css) > 0) extra_css = strdup(css);
-					if(strlen(js_once) > 0) extra_js_once = strdup(js_once);
-					if(strlen(js_always) > 0) extra_js_always = strdup(js_always);
-					HTML_Win *(*make_html)(char *, char *, int, char *, char *, char *, int, int);
-					make_html = (HTML_Win *(*)(char *, char *, int, char *, char *, char *, int, int))void_MakeHTMLWindow_cef;
-					if(make_html != NULL)
-					{
-						make_html = (HTML_Win *(*)(char *, char *, int, char *, char *, char *, int, int))void_MakeHTMLWindow_cef;
-						html = make_html(extra_url, NULL, my_window->html_background, extra_css, extra_js_once, extra_js_always, width, height);
-						while(html->raw == NULL)
-						{
-							Fl::check();
-						}
-						type = CAMERA_TYPE_HTML;
-					}
-				}
-			}
-			else
-			{
-				my_window->SetErrorMessage("HTML Rendering disabled");
-			}
-		}
-		else if(strncasecmp(source, "html source://", strlen("html source://")) == 0)
-		{
-			if(global_html == 1)
-			{
-				char *cp = source + strlen("html source://");
-				if(strlen(cp) > 0)
-				{
-					HTML_Win *(*make_html)(char *, char *, int, char *, char *, char *, int, int);
-					make_html = (HTML_Win *(*)(char *, char *, int, char *, char *, char *, int, int))void_MakeHTMLWindow_cef;
-					if(make_html != NULL)
-					{
-						html = make_html(NULL, cp, my_window->html_background, NULL, NULL, NULL, width, height);
-						while(html->raw == NULL)
-						{
-							Fl::check();
-						}
-						type = CAMERA_TYPE_HTML;
-					}
-				}
-				else
-				{
-					my_window->SetErrorMessage("No HTML");
-				}
-			}
-			else
-			{
-				my_window->SetErrorMessage("HTML Rendering disabled");
-			}
-		}
-		else if(strncasecmp(source, "sourced://", strlen("sourced://")) == 0)
-		{
-			source_camera = NULL;
-			char *cp = source + strlen("sourced://");
-			if(strlen(cp) > 0)
-			{
-				double factor = 1.0;
-				if(*cp == '(')
-				{
-					cp++;
-					factor = atof(cp);
-					while((*cp != ')') && (*cp != '\0')) cp++;
-					while(*cp == ')') cp++;
-				}
-				int match = -1;
-				for(loop = 0;((loop < my_window->source_cnt) && (match == -1));loop++)
-				{
-					Camera *compare_cam = my_window->camera[loop];
-					if(strcmp(cp, compare_cam->alias) == 0)
-					{
-						match = loop;
-					}
-					if(match == -1)
-					{
-						if(strcmp(cp, compare_cam->path) == 0)
-						{
-							match = loop;
-						}
-					}
-				}
-				if(match > -1)
-				{
-					Camera *test_camera = my_window->camera[match];
-					if((test_camera->type != CAMERA_TYPE_ALL)
-					&& (test_camera->type != CAMERA_TYPE_ALTERNATING)
-					&& (test_camera->type != CAMERA_TYPE_BLEND)
-					&& (test_camera->type != CAMERA_TYPE_SOURCED)
-					&& (test_camera->type != CAMERA_TYPE_EDGE_DETECT)
-					&& (test_camera->type != CAMERA_TYPE_SPLIT)
-					&& (test_camera->type != CAMERA_TYPE_CHROMAKEY))
-					{
-						source_camera = test_camera;
-						requested_w = source_camera->width * factor;
-						requested_h = source_camera->height * factor;
-						type = CAMERA_TYPE_SOURCED;
-					}
-					else
-					{
-						my_window->SetErrorMessage("No Acceptable Source Found");
-					}
-				}
-				else
-				{
-					my_window->SetErrorMessage("No Source Found");
-				}
-			}
-			else
-			{
-				my_window->SetErrorMessage("No Source");
-			}
-		}
-		else if(strncasecmp(source, "edge://", strlen("edge://")) == 0)
-		{
-			source_camera = NULL;
-			char *cp = source + strlen("edge://");
-			if(strlen(cp) > 0)
-			{
-				double factor = 1.0;
-				if(*cp == '(')
-				{
-					cp++;
-					factor = atof(cp);
-					while((*cp != ')') && (*cp != '\0')) cp++;
-					while(*cp == ')') cp++;
-				}
-				int match = -1;
-				for(loop = 0;((loop < my_window->source_cnt) && (match == -1));loop++)
-				{
-					Camera *compare_cam = my_window->camera[loop];
-					if(strcmp(cp, compare_cam->alias) == 0)
-					{
-						match = loop;
-					}
-					if(match == -1)
-					{
-						if(strcmp(cp, compare_cam->path) == 0)
-						{
-							match = loop;
-						}
-					}
-				}
-				if(match > -1)
-				{
-					Camera *test_camera = my_window->camera[match];
-					if((test_camera->type != CAMERA_TYPE_ALL)
-					&& (test_camera->type != CAMERA_TYPE_ALTERNATING)
-					&& (test_camera->type != CAMERA_TYPE_BLEND)
-					&& (test_camera->type != CAMERA_TYPE_SOURCED)
-					&& (test_camera->type != CAMERA_TYPE_EDGE_DETECT)
-					&& (test_camera->type != CAMERA_TYPE_SPLIT)
-					&& (test_camera->type != CAMERA_TYPE_CHROMAKEY))
-					{
-						source_camera = test_camera;
-						requested_w = source_camera->width * factor;
-						requested_h = source_camera->height * factor;
-						type = CAMERA_TYPE_EDGE_DETECT;
-					}
-					else
-					{
-						my_window->SetErrorMessage("No Acceptable Source Found");
-					}
-				}
-				else
-				{
-					my_window->SetErrorMessage("No Source Found");
-				}
-			}
-			else
-			{
-				my_window->SetErrorMessage("No Edge Source");
-			}
-		}
-		else if(strncasecmp(source, "chroma://", strlen("chroma://")) == 0)
-		{
-			source_camera = NULL;
-			char *cp = source + strlen("chroma://");
-			if(strlen(cp) > 0)
-			{
-				double factor = 1.0;
-				if(*cp == '(')
-				{
-					cp++;
-					factor = atof(cp);
-					while((*cp != ')') && (*cp != '\0')) cp++;
-					while(*cp == ')') cp++;
-				}
-				int match = -1;
-				for(loop = 0;((loop < my_window->source_cnt) && (match == -1));loop++)
-				{
-					Camera *compare_cam = my_window->camera[loop];
-					if(strcmp(cp, compare_cam->alias) == 0)
-					{
-						match = loop;
-					}
-					if(match == -1)
-					{
-						if(strcmp(cp, compare_cam->path) == 0)
-						{
-							match = loop;
-						}
-					}
-				}
-				if(match > -1)
-				{
-					Camera *test_camera = my_window->camera[match];
-					if((test_camera->type != CAMERA_TYPE_ALL)
-					&& (test_camera->type != CAMERA_TYPE_ALTERNATING)
-					&& (test_camera->type != CAMERA_TYPE_BLEND)
-					&& (test_camera->type != CAMERA_TYPE_SOURCED)
-					&& (test_camera->type != CAMERA_TYPE_EDGE_DETECT)
-					&& (test_camera->type != CAMERA_TYPE_SPLIT)
-					&& (test_camera->type != CAMERA_TYPE_CHROMAKEY))
-					{
-						source_camera = test_camera;
-						requested_w = source_camera->width * factor;
-						requested_h = source_camera->height * factor;
-						chroma_color = use_chroma;
-						type = CAMERA_TYPE_CHROMAKEY;
-					}
-					else
-					{
-						my_window->SetErrorMessage("No Acceptable Source Found");
-					}
-				}
-				else
-				{
-					my_window->SetErrorMessage("No Source Found");
-				}
-			}
-			else
-			{
-				my_window->SetErrorMessage("No Chroma Source");
-			}
-		}
-		else if(strncasecmp(source, "alternating://", strlen("alternating://")) == 0)
-		{
-			alternate_interval = 5;
-			char *cp = source + strlen("alternating://");
-			if(strlen(cp) > 0)
-			{
-				alternate_interval = atof(cp);
-			}
-			alternate_index = 0;
-			alternate_time = precise_time();
-			type = CAMERA_TYPE_ALTERNATING;
-		}
-		else if(strncasecmp(source, "all://", strlen("all://")) == 0)
-		{
-			type = CAMERA_TYPE_ALL;
-		}
-		else if(strncasecmp(source, "split://", strlen("split://")) == 0)
-		{
-			split_cols = 2;
-			split_rows = 2;
-			split_source_cnt = 0;
-			char *cp = source + strlen("split://");
-			if(strlen(cp) > 0)
-			{
-				split_cols = atoi(cp);
-				while((*cp != '\0') && (*cp != ',')) cp++;
-				if(*cp == ',')
-				{
-					cp++;
-					split_rows = atoi(cp);
-					int cnt = split_cols * split_rows;
-					while((*cp != '\0') && (*cp != ';')) cp++;
-					if(*cp == ';')
-					{
-						cp++;
-						char *start = cp;
-						for(loop = 0;loop < cnt;loop++)
-						{
-							while((*cp != '\0') && (*cp != ',')) cp++;
-							if(*cp == ',')
-							{
-								*cp = '\0';
-								cp++;
-							}
-							split_source[split_source_cnt] = strdup(start);
-							split_source_cnt++;
-							start = cp;
-						}
-					}
-				}
-			}
-			alternate_index = 0;
-			alternate_time = precise_time();
-			type = CAMERA_TYPE_SPLIT;
-		}
+		progress_thumb = SetupCamera(source, use_chroma);
 		cap = n_cap;
-	}
-	if(my_window->fast_start == 0)
-	{
-#ifdef FORCE_BIRD
-		for(loop = 0;loop < my_window->recognize_class_cnt;loop++)
-		{
-			if(my_window->recognize_class_name[loop] != NULL)
-			{
-				if((strcasecmp("bird", my_window->recognize_class_name[loop]) == 0)
-				|| (strcasecmp("squirrel", my_window->recognize_class_name[loop]) == 0)
-				|| (strcasecmp("animal", my_window->recognize_class_name[loop]) == 0))
-				{
-					object_index[loop] = 1;
-				}
-			}
-		}
-#endif
 	}
 	if(!mat.empty())
 	{
-		if(mat.channels() == 3)
-		{
-			cvtColor(mat, mat, COLOR_RGB2RGBA);
-		}
-		cairo_surface = cairo_image_surface_create_for_data(mat.ptr(), CAIRO_FORMAT_ARGB32, mat.cols, mat.rows, mat.step);
-		if(cairo_surface != NULL)
-		{
-			cairo_context = cairo_create(cairo_surface);
-			cairo_set_antialias(cairo_context, CAIRO_ANTIALIAS_BEST);
-		}
+		StartupCairoForCamera();
 	}
 	if(progress_thumb == 1)
 	{
-		if(start_win != NULL)
-		{
-			char buf[8192];
-			if(strlen(alias) > 0)
-			{
-				sprintf(buf, "Open camera:\n%s", alias);
-			}
-			else
-			{
-				sprintf(buf, "Open camera:\n%s", source);
-			}
-			if(my_window->fast_start == 0)
-			{
-				if(mat.empty())
-				{
-					if(cap != NULL)
-					{
-						if(cap->isOpened())
-						{
-							cap->grab();
-							last_grab_time = precise_time();
-						}
-					}
-					Capture(1);
-				}
-				if(!mat.empty())
-				{
-					if(start_win->image_mat_cnt < 128)
-					{
-						Mat local_mat;
-						mat.copyTo(local_mat);
-						cv::resize(local_mat, local_mat, cv::Size(160, 90));
-						start_win->image_mat[start_win->image_mat_cnt] = local_mat.clone();
-						start_win->image_mat_cnt++;
-						start_win->redraw();
-						if(start_win->intro_pipe_fp != NULL)
-						{
-							Mat send_mat;
-							int nn = fileno(start_win->intro_pipe_fp);
-							int sz = local_mat.total() * local_mat.elemSize();
-							fprintf(start_win->intro_pipe_fp, "image: %d\n", sz);
-							fflush(start_win->intro_pipe_fp);
-							unsigned char *cp = local_mat.ptr();
-							for(int inner = 0;inner < sz;inner++)
-							{
-								fprintf(start_win->intro_pipe_fp, "%u\n", *cp);
-								cp++;
-							}
-							fflush(start_win->intro_pipe_fp);
-						}
-					}
-				}
-				start_win->Update(buf);
-			}
-		}
+		StartupLiveCamera(source);
 	}
 }
 
@@ -17057,7 +17202,21 @@ int	loop;
 	}
 }
 
-void	Camera::DisplayNote()
+void	Camera::DisplayScaleFactor()
+{
+	scale_w = 1.0;
+	scale_h = 1.0;
+	if((display_width != width) || (display_height != height))
+	{
+		if((width > 0) && (height > 0))
+		{
+			scale_w = (double)display_width / (double)width;
+			scale_h = (double)display_height / (double)height;
+		}
+	}
+}
+
+void	Camera::DisplayNote(int in_x, int in_y, int in_w, int in_h)
 {
 	if(note != NULL)
 	{
@@ -17065,7 +17224,18 @@ void	Camera::DisplayNote()
 		{
 			if(note_placement != 0)
 			{
-				int note_w = (display_width / 5);
+				int start_x = image_sx;
+				int start_y = image_sy;
+				int start_w = display_width;
+				int start_h = display_height;
+				if((in_x > -1) && (in_y > -1) && (in_w > -1) && (in_h > -1))
+				{
+					start_x = in_x;
+					start_y = in_y;
+					start_w = in_w;
+					start_h = in_h;
+				}
+				int note_w = (start_w / 5);
 				int note_h = 0;
 				fl_font(FL_HELVETICA, note_font_size);
 				fl_measure(note, note_w, note_h);
@@ -17080,29 +17250,29 @@ void	Camera::DisplayNote()
 				}
 				else if(note_placement == CAMERA_NOTE_PLACEMENT_TOP_RIGHT)
 				{
-					np_x = display_width - (note_w + 15);
+					np_x = start_w - (note_w + 15);
 					np_y = 5;
 				}
 				else if(note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_LEFT)
 				{
 					np_x = 5;
-					np_y = display_height - (note_h + 15);
+					np_y = start_w - (note_h + 15);
 				}
 				else if(note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_RIGHT)
 				{
-					np_x = display_width - (note_w + 15);
-					np_y = display_height - (note_h + 15);
+					np_x = start_w - (note_w + 15);
+					np_y = start_w - (note_h + 15);
 				}
 				else if(note_placement == CAMERA_NOTE_PLACEMENT_TOP_CENTER)
 				{
-					np_x = (display_width / 2) - (note_w / 2);
+					np_x = (start_w / 2) - (note_w / 2);
 					np_y = 5;
 					align_setting = FL_ALIGN_CENTER | FL_ALIGN_TOP | FL_ALIGN_WRAP;
 				}
 				else if(note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_CENTER)
 				{
-					np_x = (display_width / 2) - (note_w / 2);
-					np_y = display_height - (note_h + 15);
+					np_x = (start_w / 2) - (note_w / 2);
+					np_y = start_h - (note_h + 15);
 					align_setting = FL_ALIGN_CENTER | FL_ALIGN_TOP | FL_ALIGN_WRAP;
 				}
 				if(do_not_display == 0)
@@ -17126,18 +17296,20 @@ void	Camera::DisplayNote()
 							{
 								brightness_mat(use, 0.6);
 							}
-							fl_draw_image(use.ptr(), image_sx + np_x, image_sy + np_y, use.cols, use.rows, use.channels());
+							int note_x = start_x + np_x;
+							int note_y = start_y + np_y;
+							fl_draw_image(use.ptr(), note_x, note_y, use.cols, use.rows, use.channels());
 						}
 					}
 				}
 				else
 				{
 					fl_color(BLACK);
-					fl_rectf(image_sx + np_x, image_sy + np_y, note_w + 10, note_h + 10);
+					fl_rectf(start_x + np_x, start_y + np_y, note_w + 10, note_h + 10);
 				}
 				fl_color(WHITE);
 				fl_font(FL_HELVETICA, note_font_size);
-				fl_draw(note, image_sx + np_x + 5, image_sy + np_y + 5, note_w, display_height, align_setting, NULL, 0, 0);
+				fl_draw(note, start_x + np_x + 5, start_y + np_y + 5, note_w, start_h, align_setting, NULL, 0, 0);
 			}
 		}
 	}
@@ -17941,6 +18113,7 @@ int loop;
 			double tmp = display_width;
 			display_width = display_height;
 			display_height = tmp;
+			DisplayScaleFactor();
 			portrait = 0;
 		}
 	}
@@ -17951,6 +18124,7 @@ int loop;
 			double tmp = display_width;
 			display_width = display_height;
 			display_height = tmp;
+			DisplayScaleFactor();
 			portrait = 1;
 		}
 	}
@@ -17983,12 +18157,21 @@ int	loop;
 	html = NULL;
 	pipe_fp = NULL;
 	python_filter_function = NULL;
-	python_filter_code = NULL;
+	python_filter_code = strdup("#This is an example that draws a rectangle on the incoming frame\n#Note: the defined function must be named \"python_filter\" and must accept the cv::Mat as an argument.\n\n#\nimport cv2\nimport numpy as np\n\ndef python_filter(img=None):\n\tif img is not None:\n\t\tcv2.rectangle(img, (20, 30), (100, 80), (20, 50, 80), -1)\n");
 	blend_alias_one = NULL;
 	blend_alias_two = NULL;
 	for(loop = 0;loop < 8;loop++)
 	{
-		layer_state[loop] = 0;
+		layer_state[loop] = 1;
+	}
+	for(loop = 0;loop < 10;loop++)
+	{
+		detected_object[loop].x = -1;
+		detected_object[loop].y = -1;
+		detected_object[loop].w = -1;
+		detected_object[loop].h = -1;
+		detected_object[loop].idx = -1;
+		detected_object[loop].confidence = 0.0;
 	}
 	for(loop = 0;loop < 32;loop++)
 	{
@@ -18016,7 +18199,7 @@ int	loop;
 		color_it_replace_g[loop] = 0;
 		color_it_replace_b[loop] = 0;
 		color_it_replace_a[loop] = 0;
-		trigger[loop] = 0;
+		trigger[loop] = -1;
 	}
 	for(loop = 0;loop < 128;loop++)
 	{
@@ -18033,50 +18216,59 @@ int	loop;
 	{
 		strcpy(text_list[loop], "");
 	}
-	strcpy(pseudo_camera_name, "");
+	strcpy(pseudo_camera_name, "PSEUDO CAMERA");
 	strcpy(font_name, "");
 	strcpy(format_code, "");
 	strcpy(path, "");
 	strcpy(original_path, "");
 	strcpy(alias, "");
-	strcpy(snapshot_filename_format, "");
+	strcpy(snapshot_filename_format, "photo_%U.png");
 	strcpy(alert_monitor_file, "");
 	strcpy(alert_audio_file, "");
 	strcpy(alert_old_buffer, "");
 	strcpy(irc_buffer, "");
+	strcpy(ndi_fourcc_str, "");
+	strcpy(ndi_format_type, "");
 
-	darkness_trigger = 0.0;
+	darkness_trigger = 0.5;
 	darkness_score = 0.0;
 	capture_interval = 0.0;
 	focus_score = 0.0;
-	zoom = 0.0;
-	capture_scaling = 0.0;
-	fps = 0.0;
-	current_fps = 0.0;
-	alternate_interval = 0.0;
-	edge_blend = 0.0;
-	brightness = 0.0;
-	saturation = 0.0;
-	hue = 0.0;
-	intensity = 0.0;
-	contrast = 0.0;
-	red_intensity = 0.0;
-	green_intensity = 0.0;
-	blue_intensity = 0.0;
-	alpha_intensity = 0.0;
-	recognition_threshold = 0.0;
-	forced_aspect_x = 0.0;
-	forced_aspect_y = 0.0;
-	display_width = 0.0;
-	display_height = 0.0;
-	snapshot_scale = 0.0;
+	zoom = 1.0;
+	clockwise_rotation = 0;
+	capture_scaling = 1.0;
+	current_fps = 30.0;
+	alternate_interval = 5.0;
+	edge_blend = 0.5;
+	brightness = 0.5;
+	saturation = 1.0;
+	hue = 1.0;
+	intensity = 1.0;
+	contrast = 0.5;
+	red_intensity = 1.0;
+	green_intensity = 1.0;
+	blue_intensity = 1.0;
+	alpha_intensity = 1.0;
+	recognition_threshold = 0.5;
+	forced_aspect_x = 1.0;
+	forced_aspect_y = 1.0;
+	scale_w = 1.0;
+	scale_h = 1.0;
+	show_alias = 0;
+	snapshot_scale = 1.0;
 	hot = 0;
 	hot_ready = 0;
-	hot_delay = 0;
-	hot_fps = 0;
-	type = 0;
+	hot_delay = 10000;
+	stop_detecting_objects = 0;
+	detecting_objects = 0;
+	object_triggered = 0;
+	capture_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+	low_level_capture_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+	type = CAMERA_TYPE_CAMERA;
 	capturing = 0;
-	power = 0;
+	power = 1;
+	sustain_recording = 12;
+	sound_trigger = 0.5;
 	failed = 0;
 	record = 0;
 	recording = 0;
@@ -18105,7 +18297,8 @@ int	loop;
 	cap_total_frames = 0;
 	cap_fourcc = 0;
 	cap_format = 0;
-	font_sz = 0;
+	font_sz = 32;
+	fullscreen_instance = 0;
 	focus_using_samples = 0;
 	keep_focusing = 0;
 	focus_frame_ready = 0;
@@ -18117,10 +18310,13 @@ int	loop;
 	orig_height = 0;
 	starting_width = 0;
 	starting_height = 0;
-	capture_effects = 0;
+	capture_effects = 1;
+	do_not_display = 0;
+	match_template = 0;
+	match_template_start = 0;
 	grab_window_id = 0;
 	once = 0;
-	fd = 0;
+	fd = -1;
 	total_frames = 0;
 	true_total_frames = 0;
 	since_frames = 0;
@@ -18145,7 +18341,12 @@ int	loop;
 	split_cols = 0;
 	split_rows = 0;
 	split_source_cnt = 0;
-	ndi_recv = 0;
+	ndi_recv = NULL;
+	ndi_width = 0;
+	ndi_height = 0;
+	ndi_frame_rate = 0.0;
+	ndi_stride = 0;
+	ndi_exposure = 0.5;
 	ndi_capture = 0;
 	ndi_ptz = 0;
 	prefer_ndi = 0;
@@ -18159,28 +18360,33 @@ int	loop;
 	alternate_time = 0;
 	alternate_index = 0;
 	color_it_cnt = 0;
-	chroma_color = 0;
+	chroma_color = CHROMA_ON_GREEN;
+	recog_min_x = 10000000;
+	recog_min_y = 10000000;
+	recog_max_x = -10000000;
+	recog_max_y = -10000000;
+	recog_retain_cnt = 0;
 	matrix_state_cnt = 0;
 	crop_start_x = 0;
 	crop_start_y = 0;
 	use_crop_start = 0;
 	last_start_x = 0;
 	last_start_y = 0;
-	single_frame_fd = 0;
+	single_frame_fd = -1;
 	flip_horizontal = 0;
 	flip_vertical = 0;
-	motion_threshold = 0;
-	recognize_interval = 0;
+	motion_threshold = 100;
+	recognize_interval = 10;
 	zoom_box_display = 0;
-	zoom_box_x = 0;
-	zoom_box_y = 0;
-	zoom_box_w = 0;
-	zoom_box_h = 0;
+	zoom_box_x = -1;
+	zoom_box_y = -1;
+	zoom_box_w = -1;
+	zoom_box_h = -1;
 	resuming = 0;
 	paused_accumulation_ts = 0;
 	paused_start_ts = 0;
-	start_ts = 0;
-	local_ts = 0;
+	start_ts = local_timestamp();
+	local_ts = local_timestamp();
 	running_time = 0;
 	starting_time = 0;
 	last = 0;
@@ -18190,10 +18396,10 @@ int	loop;
 	ccy = 0;
 	last_cx = 0;
 	last_cy = 0;
-	accel = 0;
+	accel = 100;
 	trigger_cnt = 0;
-	stopped = 0;
-	pip_idx = 0;
+	stopped = 1;
+	pip_idx = -1;
 	keep_pip = 0;
 	image_sx = 0;
 	image_sy = 0;
@@ -18206,29 +18412,44 @@ int	loop;
 	text_green = 0;
 	text_blue = 0;
 	text_alpha = 0;
-	pipe_pid = 0;
-	pipe_in = 0;
-	pipe_out = 0;
-	list_length = 0;
+	dynamic_text_start_time = 0;
+	dynamic_text_interval = 5;
+	dynamic_text_scroll_x = 0;
+	dynamic_text_scroll_y = 0;
+	dynamic_text_line_cnt = 0;
+	dynamic_text_initialized = 0;
+	dynamic_text_loop_limit = 0;
+	dynamic_text_loop_cnt = 0;
+	dynamic_text_cycle = 0;
+	dynamic_text_fade = 0.0;
+	dynamic_text_fade_direction = 0;
+	dynamic_text_fade_peak = 0;
+	dynamic_text_squash_direction = 0;
+	dynamic_text_scale_x = 1.0;
+	dynamic_text_scale_y = 1.0;
+	pipe_pid = -1;
+	pipe_in = -1;
+	pipe_out = -1;
+	list_length = -1;
 	list_position = 0;
 	pipe_done = 0;
 	piping_text = 0;
-	grab_portion_x = 0;
-	grab_portion_y = 0;
-	grab_portion_w = 0;
-	grab_portion_h = 0;
+	grab_portion_x = -1;
+	grab_portion_y = -1;
+	grab_portion_w = -1;
+	grab_portion_h = -1;
 	filter_plugin_cnt = 0;
 	filter_cnt = 0;
 	snapshot_initial_delay = 0;
 	snapshot_repeat_delay = 0;
-	snapshot_trigger_condition = 0;
+	snapshot_trigger_condition = SNAPSHOT_TRIGGER_BUTTON;
 	snapshot = 0;
-	ptz_lock_interface = 0;
+	ptz_lock_interface = -1;
 	ptz_lock_camera = -1;
 	v4l_pending_command = 0;
-	bound_mic_cnt = 0;
+	bound_mic_cnt = -1;
 	alert_trigger_mode = 0;
-	alert_display_mode = 0;
+	alert_display_mode = ALERT_DISPLAY_MODE_ALL;
 	alert_duration = 0;
 	alert_did_exist = 0;
 	alert_end_time = 0;
@@ -18241,6 +18462,7 @@ int	loop;
 	note_placement = CAMERA_NOTE_PLACEMENT_TOP_LEFT;
 	note_font_size = 11;
 	note = NULL;
+	hidden = 0;
 
 	effect_order[0] = VIDEO_EFFECTS;
 	effect_order[1] = PAINT_RECOGNIZED_OBJECTS;
@@ -18517,6 +18739,7 @@ int	inner;
 	fprintf(fp, "\t\"note\": \"%s\",\n", DQ(note));
 	fprintf(fp, "\t\"note placement\": %d,\n", note_placement);
 	fprintf(fp, "\t\"note font size\": %d,\n", note_font_size);
+	fprintf(fp, "\t\"hidden\": %d,\n", hidden);
 	if(python_filter_function != NULL)
 	{
 		if(python_filter_code != NULL)
@@ -18819,6 +19042,21 @@ int	inner;
 		{
 			if(image_window[loop] != NULL)
 			{
+				double use_sx = ((1.0 / display_width) * (double)(image_window[loop]->dx - image_sx));
+				double use_sy = ((1.0 / display_height) * (double)(image_window[loop]->dy - image_sy));
+				double use_sw = ((1.0 / display_width) * image_window[loop]->dw);
+				double use_sh = ((1.0 / display_height) * image_window[loop]->dh);
+				double use_width = ((1.0 / display_width) * image_window[loop]->width);
+				double use_height = ((1.0 / display_height) * image_window[loop]->height);
+				double use_orig_w = ((1.0 / display_width) * image_window[loop]->orig_w);
+				double use_orig_h = ((1.0 / display_height) * image_window[loop]->orig_h);
+				double use_crop_x = ((1.0 / display_width) * (double)(image_window[loop]->crop_x - image_sx));
+				double use_crop_y = ((1.0 / display_height) * (double)(image_window[loop]->crop_y - image_sy));
+				double use_crop_w = ((1.0 / display_width) * image_window[loop]->crop_w);
+				double use_crop_h = ((1.0 / display_height) * image_window[loop]->crop_h);
+				double use_trim_x = ((1.0 / display_width) * (double)(image_window[loop]->trim_x - image_sx));
+				double use_trim_y = ((1.0 / display_height) * (double)(image_window[loop]->trim_y - image_sy));
+
 				fprintf(fp, "\t\t{\n");
 				char source_path[4096];
 				char source_orig_path[4096];
@@ -18829,25 +19067,25 @@ int	inner;
 				fprintf(fp, "\t\t\t\"index\": %d,\n", image_window[loop]->index);
 				fprintf(fp, "\t\t\t\"layer\": %d,\n", image_window[loop]->layer);
 				fprintf(fp, "\t\t\t\"transform\": %d,\n", image_window[loop]->transform);
-				fprintf(fp, "\t\t\t\"width\": %f,\n", image_window[loop]->width);
-				fprintf(fp, "\t\t\t\"height\": %f,\n", image_window[loop]->height);
-				fprintf(fp, "\t\t\t\"orig w\": %f,\n", image_window[loop]->orig_w);
-				fprintf(fp, "\t\t\t\"orig h\": %f,\n", image_window[loop]->orig_h);
-				fprintf(fp, "\t\t\t\"dx\": %f,\n", image_window[loop]->dx);
-				fprintf(fp, "\t\t\t\"dy\": %f,\n", image_window[loop]->dy);
-				fprintf(fp, "\t\t\t\"dw\": %f,\n", image_window[loop]->dw);
-				fprintf(fp, "\t\t\t\"dh\": %f,\n", image_window[loop]->dh);
+				fprintf(fp, "\t\t\t\"dx\": %f,\n", use_sx);
+				fprintf(fp, "\t\t\t\"dy\": %f,\n", use_sy);
+				fprintf(fp, "\t\t\t\"dw\": %f,\n", use_sw);
+				fprintf(fp, "\t\t\t\"dh\": %f,\n", use_sh);
+				fprintf(fp, "\t\t\t\"width\": %f,\n", use_width);
+				fprintf(fp, "\t\t\t\"height\": %f,\n", use_height);
+				fprintf(fp, "\t\t\t\"width\": %f,\n", use_orig_w);
+				fprintf(fp, "\t\t\t\"height\": %f,\n", use_orig_h);
 				fprintf(fp, "\t\t\t\"buttonize\": %d,\n", image_window[loop]->buttonize);
 				fprintf(fp, "\t\t\t\"buttonized x\": %d,\n", image_window[loop]->buttonized_x);
 				fprintf(fp, "\t\t\t\"buttonized y\": %d,\n", image_window[loop]->buttonized_y);
 				fprintf(fp, "\t\t\t\"buttonized w\": %d,\n", image_window[loop]->buttonized_w);
 				fprintf(fp, "\t\t\t\"buttonized h\": %d,\n", image_window[loop]->buttonized_h);
-				fprintf(fp, "\t\t\t\"crop x\": %d,\n", image_window[loop]->crop_x);
-				fprintf(fp, "\t\t\t\"crop y\": %d,\n", image_window[loop]->crop_y);
-				fprintf(fp, "\t\t\t\"crop w\": %d,\n", image_window[loop]->crop_w);
-				fprintf(fp, "\t\t\t\"crop h\": %d,\n", image_window[loop]->crop_h);
-				fprintf(fp, "\t\t\t\"trim x\": %d,\n", image_window[loop]->trim_x);
-				fprintf(fp, "\t\t\t\"trim y\": %d,\n", image_window[loop]->trim_y);
+				fprintf(fp, "\t\t\t\"crop x\": %f,\n", use_crop_x);
+				fprintf(fp, "\t\t\t\"crop y\": %f,\n", use_crop_y);
+				fprintf(fp, "\t\t\t\"crop w\": %f,\n", use_crop_w);
+				fprintf(fp, "\t\t\t\"crop h\": %f,\n", use_crop_h);
+				fprintf(fp, "\t\t\t\"trim x\": %f,\n", use_trim_x);
+				fprintf(fp, "\t\t\t\"trim y\": %f,\n", use_trim_y);
 				fprintf(fp, "\t\t\t\"overall alpha\": %f,\n", image_window[loop]->overall_alpha);
 				fprintf(fp, "\t\t\t\"use as mask\": %d,\n", image_window[loop]->use_as_mask);
 				fprintf(fp, "\t\t\t\"angle\": %f,\n", image_window[loop]->angle);
@@ -19150,15 +19388,24 @@ NDIlib_metadata_frame_t	metadata_frame;
 void	Camera::CaptureLoop()
 {
 	time_t start = precise_time();
+	time_t last_time_through = 0;
 	int frames = 0;
 	hot_fps = 0;
 	while(hot == 1)
 	{
+		pthread_mutex_lock(&low_level_capture_mutex);
 		if(ndi_capture == 1)
 		{
 			RecvNDI(hot_mat);
-			last_retrieve = precise_time();
-			usleep(hot_delay);
+			time_t right_now = precise_time();
+			last_retrieve = right_now;
+			time_t time_taken = right_now - last_time_through;
+			time_t delay_it = hot_delay - time_taken;
+			if(delay_it > 0)
+			{
+				usleep(delay_it);
+			}
+			last_time_through = precise_time();
 			frames++;
 			time_t elapsed = precise_time() - start;
 			if(elapsed > 1000000)
@@ -19212,7 +19459,14 @@ void	Camera::CaptureLoop()
 							cap = NULL;
 						}
 					}
-					usleep(hot_delay);
+					time_t right_now = precise_time();
+					time_t time_taken = right_now - last_time_through;
+					time_t delay_it = hot_delay - time_taken;
+					if(delay_it > 0)
+					{
+						usleep(delay_it);
+					}
+					last_time_through = precise_time();
 					frames++;
 					time_t elapsed = precise_time() - start;
 					if(elapsed > 1000000)
@@ -19226,6 +19480,7 @@ void	Camera::CaptureLoop()
 				}
 			}
 		}
+		pthread_mutex_unlock(&low_level_capture_mutex);
 	}
 	if(ndi_capture == 1)
 	{
@@ -19604,15 +19859,26 @@ void	Camera::Resize(int ww, int hh)
 			{
 				if((ww >= 320) && (hh >= 240))
 				{
-					cap->set(CAP_PROP_FRAME_WIDTH, ww);
-					cap->set(CAP_PROP_FRAME_HEIGHT, hh);
-					cap->set(CAP_PROP_BUFFERSIZE, 10);
-					cap->set(CAP_PROP_FPS, 60);
-					width = (int)cap->get(CAP_PROP_FRAME_WIDTH);
-					height = (int)cap->get(CAP_PROP_FRAME_HEIGHT);
-					if((width != ww) || (height != hh))
+					int cw = (int)cap->get(CAP_PROP_FRAME_WIDTH);
+					int ch = (int)cap->get(CAP_PROP_FRAME_HEIGHT);
+					if((cw != ww) || (ch != hh))
 					{
-						my_window->SetErrorMessage("Error: Resolution could not be set.");
+						int	nn = CheckLegalResolution(ww, hh);
+						if(nn == 1)
+						{
+							pthread_mutex_lock(&low_level_capture_mutex);
+							cap->set(CAP_PROP_FRAME_WIDTH, ww);
+							cap->set(CAP_PROP_FRAME_HEIGHT, hh);
+							cap->set(CAP_PROP_BUFFERSIZE, 10);
+							cap->set(CAP_PROP_FPS, 60);
+							pthread_mutex_unlock(&low_level_capture_mutex);
+							width = (int)cap->get(CAP_PROP_FRAME_WIDTH);
+							height = (int)cap->get(CAP_PROP_FRAME_HEIGHT);
+							if((width != ww) || (height != hh))
+							{
+								my_window->SetErrorMessage("Error: Resolution could not be set.");
+							}
+						}
 					}
 				}
 			}
@@ -20853,7 +21119,6 @@ int		loop;
 		if((width > 0) && (height > 0))
 		{
 			SetCairo();
-			SetCairoScale();
 			for(loop = 0;loop < 9;loop++)
 			{
 				if(effect_state[loop] == 1)
@@ -20896,7 +21161,6 @@ int		loop;
 					}
 				}
 			}
-			RestoreCairoScale();
 		}
 	}
 }
@@ -21114,6 +21378,25 @@ int		inner;
 								if(strcasecmp(use_camera->alias, blend_alias_two) == 0)
 								{
 									cam[1] = use_camera;
+								}
+							}
+						}
+						if((cam[0] == NULL) || (cam[1] == NULL))
+						{
+							if((strcmp(blend_alias_one, "[blank]") == 0) && (cam[0] == NULL))
+							{
+								int cam_n = my_window->SetupCamera("blank://", "[blank]", width, height, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+								if(cam_n > -1)
+								{
+									cam[0] = my_window->camera[cam_n];
+								}
+							}
+							if((strcmp(blend_alias_two, "[blank]") == 0) && (cam[1] == NULL))
+							{
+								int cam_n = my_window->SetupCamera("blank://", "[blank]", width, height, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+								if(cam_n > -1)
+								{
+									cam[1] = my_window->camera[cam_n];
 								}
 							}
 						}
@@ -22956,28 +23239,416 @@ int	Camera::SetBackendFlag(char *cp)
 	return(flag);
 }
 
+char	*Camera::ParseCaptureArguments(char *cp)
+{
+	if(strncmp(cp, "[alias=", strlen("[alias=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[alias=");
+		char *cp2 = cp;
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			*cp = '\0';
+		}
+		strcpy(alias, cp2);
+	}
+	if(strncmp(cp, "[adjust_display_size=", strlen("[adjust_display_size=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_display_size=");
+		display_width = atoi(cp);
+		while((*cp != '\0') && (*cp != ']') && (*cp != ','))
+		{
+			cp++;
+		}
+		if(*cp == ',')
+		{
+			cp++;
+			display_height = atoi(cp);
+		}
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+		DisplayScaleFactor();
+	}
+	if(strncmp(cp, "[adjust_input_size=", strlen("[adjust_input_size=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_input_size=");
+		int hw = atoi(cp);
+		while((*cp != '\0') && (*cp != ']') && (*cp != ','))
+		{
+			cp++;
+		}
+		if(*cp == ',')
+		{
+			cp++;
+			int hh = atoi(cp);
+			Resize(hw, hh);
+		}
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_contrast=", strlen("[adjust_contrast=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_contrast=");
+		contrast = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_brightness=", strlen("[adjust_brightness=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_brightness=");
+		brightness = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_saturation=", strlen("[adjust_saturation=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_saturation=");
+		saturation = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_hue=", strlen("[adjust_hue=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_hue=");
+		hue = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_alpha=", strlen("[adjust_alpha=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_alpha=");
+		alpha = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_aspect_width=", strlen("[adjust_aspect_width=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_aspect_width=");
+		forced_aspect_x = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_aspect_height=", strlen("[adjust_aspect_height=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_aspect_height=");
+		forced_aspect_y = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_motion_threshold=", strlen("[adjust_motion_threshold=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_motion_threshold=");
+		motion_threshold = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_recognition_threshold=", strlen("[adjust_recognition_threshold=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_recognition_threshold=");
+		recognition_threshold = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_recognition_interval=", strlen("[adjust_recognition_interval=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_recognition_interval=");
+		recognize_interval = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_capture_interval=", strlen("[adjust_capture_interval=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_capture_interval=");
+		capture_interval = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_retrieve_interval=", strlen("[adjust_retrieve_interval=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_retrieve_interval=");
+		hot_delay = atof(cp);
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[adjust_rgb=", strlen("[adjust_rgb=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[adjust_rgb=");
+		red_intensity = atof(cp);
+		while((*cp != '\0') && (*cp != ']') && (*cp != ','))
+		{
+			cp++;
+		}
+		if(*cp == ',')
+		{
+			cp++;
+			green_intensity = atof(cp);
+			while((*cp != '\0') && (*cp != ']') && (*cp != ','))
+			{
+				cp++;
+			}
+			if(*cp == ',')
+			{
+				cp++;
+				blue_intensity = atof(cp);
+			}
+		}
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[note=", strlen("[note=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[note=");
+		char *start = cp;
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			if(*cp == '\\')
+			{
+				cp++;
+			}
+			if(*cp != '\0')
+			{
+				cp++;
+			}
+		}
+		if(*cp == ']')
+		{
+			*cp = '\0';
+			if(note != NULL)
+			{
+				free(note);
+			}
+			note = strdup(start);
+		}
+	}
+	if(strncmp(cp, "[note_placement=", strlen("[note_placement=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[note_placement=");
+		int nn = atoi(cp);
+		if((nn > -1) && (nn < 7))
+		{
+			note_placement = nn;
+		}
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[note_font_size=", strlen("[note_font_size=")) == 0)
+	{
+		*cp = '\0';
+		cp += strlen("[note_font_size=");
+		int nn = atoi(cp);
+		if((nn > 3) && (nn < 65))
+		{
+			note_font_size = nn;
+		}
+		while((*cp != '\0') && (*cp != ']'))
+		{
+			cp++;
+		}
+		if(*cp == ']')
+		{
+			cp++;
+		}
+	}
+	if(strncmp(cp, "[hide]", strlen("[hide]")) == 0)
+	{
+		cp += strlen("[hide]");
+		hidden = 1;
+	}
+	if(strncmp(cp, "[default]", strlen("[default]")) == 0)
+	{
+		cp += strlen("[default]");
+		my_window->default_camera = this;
+	}
+	return(cp);
+}
+
+VideoCapture	*Camera::OpenCameraByNumber(int num)
+{
+	VideoCapture *cam_cap = NULL;
+	char local_buf[256];
+	sprintf(local_buf, "/dev/video%d", num);
+	int no_go = my_window->ScanForDuplicateCameras(local_buf);
+	if(no_go == 0)
+	{
+		int flag = CAP_V4L2;
+		std::vector<int> params = {CAP_PROP_HW_ACCELERATION, VIDEO_ACCELERATION_ANY};
+		cam_cap = new VideoCapture(num, flag, params);
+		if(cam_cap->isOpened() == 0)
+		{
+			delete cam_cap;
+			cam_cap = NULL;
+		}
+		sprintf(path, "/dev/video%d", num);
+		strcpy(original_path, path);
+	}
+	return(cam_cap);
+}
+
+VideoCapture	*Camera::OpenCameraByPath(char *source)
+{
+	char *cp = source;
+	int flag = CAP_V4L2;
+	VideoCapture *cam_cap = NULL;
+	while(*cp != '\0')
+	{
+		if(strncmp(cp, "::", 2) == 0)
+		{
+			*cp = '\0';
+			flag = SetBackendFlag(cp + 2);
+		}
+		cp++;
+	}
+	int no_go = my_window->ScanForDuplicateCameras(source);
+	if(no_go == 0)
+	{
+		std::string camera_path;
+		camera_path = source;
+		std::vector<int> params = {CAP_PROP_HW_ACCELERATION, VIDEO_ACCELERATION_ANY};
+		cam_cap = new VideoCapture(camera_path, flag, params);
+		if(cam_cap != NULL)
+		{
+			if(!cam_cap->isOpened())
+			{
+				delete cam_cap;
+				cam_cap = new VideoCapture(source);
+			}
+		}
+		else
+		{
+			cam_cap = new VideoCapture(source);
+		}
+	}
+	else
+	{
+		cam_cap = new VideoCapture(source);
+	}
+	return(cam_cap);
+}
+
 VideoCapture	*Camera::CreateCameraCapture(char *source, int num)
 {
-	int flag = CAP_V4L2;
 	strcpy(format_code, "");
 	VideoCapture *cam_cap = NULL;
 	if(source == NULL)
 	{
-		char local_buf[256];
-		sprintf(local_buf, "/dev/video%d", num);
-		int no_go = my_window->ScanForDuplicateCameras(local_buf);
-		if(no_go == 0)
-		{
-			std::vector<int> params = {CAP_PROP_HW_ACCELERATION, VIDEO_ACCELERATION_ANY};
-			cam_cap = new VideoCapture(num, flag, params);
-			if(cam_cap->isOpened() == 0)
-			{
-				delete cam_cap;
-				cam_cap = NULL;
-			}
-			sprintf(path, "/dev/video%d", num);
-			strcpy(original_path, path);
-		}
+		cam_cap = OpenCameraByNumber(num);
 	}
 	else
 	{
@@ -22987,18 +23658,7 @@ VideoCapture	*Camera::CreateCameraCapture(char *source, int num)
 			if((source[0] >= '0') && (source[0] <= '9'))
 			{
 				int nn = atoi(source);
-				sprintf(path, "/dev/video%d", nn);
-				int no_go = my_window->ScanForDuplicateCameras(path);
-				if(no_go == 0)
-				{
-					std::vector<int> params = {CAP_PROP_HW_ACCELERATION, VIDEO_ACCELERATION_ANY};
-					cam_cap = new VideoCapture(nn, flag, params);
-					if(cam_cap->isOpened() == 0)
-					{
-						delete cam_cap;
-						cam_cap = NULL;
-					}
-				}
+				cam_cap = OpenCameraByNumber(nn);
 			}
 		}
 		if(cam_cap == NULL)
@@ -23012,468 +23672,40 @@ VideoCapture	*Camera::CreateCameraCapture(char *source, int num)
 			}
 			while(*cp != '\0')
 			{
-				if(strncmp(cp, "[alias=", strlen("[alias=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[alias=");
-					char *cp2 = cp;
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						*cp = '\0';
-					}
-					strcpy(alias, cp2);
-				}
-				if(strncmp(cp, "[adjust_display_size=", strlen("[adjust_display_size=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_display_size=");
-					display_width = atoi(cp);
-					while((*cp != '\0') && (*cp != ']') && (*cp != ','))
-					{
-						cp++;
-					}
-					if(*cp == ',')
-					{
-						cp++;
-						display_height = atoi(cp);
-					}
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_input_size=", strlen("[adjust_input_size=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_input_size=");
-					int hw = atoi(cp);
-					while((*cp != '\0') && (*cp != ']') && (*cp != ','))
-					{
-						cp++;
-					}
-					if(*cp == ',')
-					{
-						cp++;
-						int hh = atoi(cp);
-						Resize(hw, hh);
-					}
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_contrast=", strlen("[adjust_contrast=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_contrast=");
-					contrast = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_brightness=", strlen("[adjust_brightness=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_brightness=");
-					brightness = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_saturation=", strlen("[adjust_saturation=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_saturation=");
-					saturation = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_hue=", strlen("[adjust_hue=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_hue=");
-					hue = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_alpha=", strlen("[adjust_alpha=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_alpha=");
-					alpha = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_aspect_width=", strlen("[adjust_aspect_width=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_aspect_width=");
-					forced_aspect_x = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_aspect_height=", strlen("[adjust_aspect_height=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_aspect_height=");
-					forced_aspect_y = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_motion_threshold=", strlen("[adjust_motion_threshold=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_motion_threshold=");
-					motion_threshold = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_recognition_threshold=", strlen("[adjust_recognition_threshold=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_recognition_threshold=");
-					recognition_threshold = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_recognition_interval=", strlen("[adjust_recognition_interval=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_recognition_interval=");
-					recognize_interval = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_capture_interval=", strlen("[adjust_capture_interval=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_capture_interval=");
-					capture_interval = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_retrieve_interval=", strlen("[adjust_retrieve_interval=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_retrieve_interval=");
-					hot_delay = atof(cp);
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[adjust_rgb=", strlen("[adjust_rgb=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[adjust_rgb=");
-					red_intensity = atof(cp);
-					while((*cp != '\0') && (*cp != ']') && (*cp != ','))
-					{
-						cp++;
-					}
-					if(*cp == ',')
-					{
-						cp++;
-						green_intensity = atof(cp);
-						while((*cp != '\0') && (*cp != ']') && (*cp != ','))
-						{
-							cp++;
-						}
-						if(*cp == ',')
-						{
-							cp++;
-							blue_intensity = atof(cp);
-						}
-					}
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[note=", strlen("[note=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[note=");
-					char *start = cp;
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						if(*cp == '\\')
-						{
-							cp++;
-						}
-						if(*cp != '\0')
-						{
-							cp++;
-						}
-					}
-					if(*cp == ']')
-					{
-						*cp = '\0';
-						if(note != NULL)
-						{
-							free(note);
-						}
-						note = strdup(start);
-					}
-				}
-				if(strncmp(cp, "[note_placement=", strlen("[note_placement=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[note_placement=");
-					int nn = atoi(cp);
-					if((nn > -1) && (nn < 7))
-					{
-						note_placement = nn;
-					}
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
-				if(strncmp(cp, "[note_font_size=", strlen("[note_font_size=")) == 0)
-				{
-					*cp = '\0';
-					cp += strlen("[note_font_size=");
-					int nn = atoi(cp);
-					if((nn > 3) && (nn < 65))
-					{
-						note_font_size = nn;
-					}
-					while((*cp != '\0') && (*cp != ']'))
-					{
-						cp++;
-					}
-					if(*cp == ']')
-					{
-						cp++;
-					}
-				}
+				cp = ParseCaptureArguments(cp);
 				cp++;
 			}
-			if(strncasecmp(source, "blank://", strlen("blank://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "dynamic://", strlen("dynamic://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "av://", strlen("av://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "vector://", strlen("vector://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "fullscreen://", strlen("fullscreen://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "desktop://", strlen("desktop://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "window://", strlen("window://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "clock://", strlen("clock://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "timer://", strlen("timer://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "pseudo://", strlen("pseudo://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "sourced://", strlen("sourced://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "edge://", strlen("edge://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "chroma://", strlen("chroma://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "pipe://", strlen("pipe://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "http://", strlen("http://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "https://", strlen("https://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "html://", strlen("html://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "irc://", strlen("irc://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "ndi://", strlen("ndi://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "ndi_rgbx://", strlen("ndi_rgbx://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "ndi_bgrx://", strlen("ndi_bgrx://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "ndi_i420://", strlen("ndi_i420://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "ndi_p216://", strlen("ndi_p216://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "ndi_uyva://", strlen("ndi_uyva://")) == 0)
-			{
-				cam_cap = new VideoCapture();
-			}
-			else if(strncasecmp(source, "ndi_uyvy://", strlen("ndi_uyvy://")) == 0)
+			if((strncasecmp(source, "blank://", strlen("blank://")) == 0)
+			|| (strncasecmp(source, "dynamic://", strlen("dynamic://")) == 0)
+			|| (strncasecmp(source, "av://", strlen("av://")) == 0)
+			|| (strncasecmp(source, "vector://", strlen("vector://")) == 0)
+			|| (strncasecmp(source, "fullscreen://", strlen("fullscreen://")) == 0)
+			|| (strncasecmp(source, "desktop://", strlen("desktop://")) == 0)
+			|| (strncasecmp(source, "window://", strlen("window://")) == 0)
+			|| (strncasecmp(source, "clock://", strlen("clock://")) == 0)
+			|| (strncasecmp(source, "timer://", strlen("timer://")) == 0)
+			|| (strncasecmp(source, "pseudo://", strlen("pseudo://")) == 0)
+			|| (strncasecmp(source, "sourced://", strlen("sourced://")) == 0)
+			|| (strncasecmp(source, "edge://", strlen("edge://")) == 0)
+			|| (strncasecmp(source, "chroma://", strlen("chroma://")) == 0)
+			|| (strncasecmp(source, "pipe://", strlen("pipe://")) == 0)
+			|| (strncasecmp(source, "http://", strlen("http://")) == 0)
+			|| (strncasecmp(source, "https://", strlen("https://")) == 0)
+			|| (strncasecmp(source, "html://", strlen("html://")) == 0)
+			|| (strncasecmp(source, "irc://", strlen("irc://")) == 0)
+			|| (strncasecmp(source, "ndi://", strlen("ndi://")) == 0)
+			|| (strncasecmp(source, "ndi_rgbx://", strlen("ndi_rgbx://")) == 0)
+			|| (strncasecmp(source, "ndi_bgrx://", strlen("ndi_bgrx://")) == 0)
+			|| (strncasecmp(source, "ndi_i420://", strlen("ndi_i420://")) == 0)
+			|| (strncasecmp(source, "ndi_p216://", strlen("ndi_p216://")) == 0)
+			|| (strncasecmp(source, "ndi_uyva://", strlen("ndi_uyva://")) == 0)
+			|| (strncasecmp(source, "ndi_uyvy://", strlen("ndi_uyvy://")) == 0))
 			{
 				cam_cap = new VideoCapture();
 			}
 			else
 			{
-				char *cp = source;
-				while(*cp != '\0')
-				{
-					if(strncmp(cp, "::", 2) == 0)
-					{
-						*cp = '\0';
-						flag = SetBackendFlag(cp + 2);
-					}
-					cp++;
-				}
-				int no_go = my_window->ScanForDuplicateCameras(source);
-				if(no_go == 0)
-				{
-					std::string camera_path;
-					camera_path = source;
-					std::vector<int> params = {CAP_PROP_HW_ACCELERATION, VIDEO_ACCELERATION_ANY};
-					cam_cap = new VideoCapture(camera_path, flag, params);
-					if(cam_cap != NULL)
-					{
-						if(!cam_cap->isOpened())
-						{
-							delete cam_cap;
-							cam_cap = new VideoCapture(source);
-						}
-					}
-					else
-					{
-						cam_cap = new VideoCapture(source);
-					}
-				}
-				else
-				{
-					cam_cap = new VideoCapture(source);
-				}
+				cam_cap = OpenCameraByPath(source);
 			}
 			strcpy(path, source);
 		}
@@ -24152,43 +24384,6 @@ int loop;
 	return(done);
 }
 
-void	Camera::ColorIt()
-{
-int	row, col;
-int	loop;
-
-	if(color_it_cnt > 0)
-	{
-		int cnt = 0;
-		for(row = 0;row < mat.rows;row++)
-		{
-			for(col = 0;col < mat.cols;col++)
-			{
-				unsigned char *colour = mat.ptr(row, col);
-				int r = colour[0];
-				int g = colour[1];
-				int b = colour[2];
-				for(loop = 0;loop < color_it_cnt;loop++)
-				{
-					int diff_r = abs(r - color_it_r[loop]);
-					int diff_g = abs(g - color_it_g[loop]);
-					int diff_b = abs(b - color_it_b[loop]);
-					if((diff_r < color_it_tolerance_r[loop])
-					&& (diff_g < color_it_tolerance_g[loop])
-					&& (diff_b < color_it_tolerance_b[loop]))
-					{
-						colour[0] = color_it_replace_r[loop];
-						colour[1] = color_it_replace_g[loop];
-						colour[2] = color_it_replace_b[loop];
-						colour[3] = color_it_replace_a[loop];
-						cnt++;
-					}
-				}
-			}
-		}
-	}
-}
-
 void	Camera::ScrollTextList(char *str)
 {
 int	loop;
@@ -24613,7 +24808,11 @@ static Mat	local_mat;
 								}
 								double ifps = (current_fps * my_window->speed_factor);
 								if(ifps < 24) ifps = 24;
-								else if(ifps > 30) ifps = 30;
+								else if(ifps > fps) ifps = fps;
+								if(my_window->test_mux_force_fps > 0)
+								{
+									ifps = my_window->test_mux_force_fps;
+								}
 								if(my_window->streaming == STREAMING_NET)
 								{
 									ifps = 30;
@@ -25545,48 +25744,6 @@ static int last = 0;
 	}
 }
 
-void	Camera::ColorIntensity(Mat frame, double red, double green, double blue, double alpha)
-{
-vector<Mat>	layer;
-int		i, j, n;
-
-	unsigned char *ptr = frame.ptr();
-	int channels = frame.channels();
-	if(ptr != NULL)
-	{
-		for(j = 0; j < frame.rows; j++)
-		{
-			for(i = 0; i < frame.cols; i++)
-			{
-				for(n = 0;n < channels;n++)
-				{
-					int val = (int)*ptr;
-					if(n == 0)
-					{
-						val = (int)((double)val * red);
-					}
-					else if(n == 1)
-					{
-						val = (int)((double)val * green);
-					}
-					else if(n == 2)
-					{
-						val = (int)((double)val * blue);
-					}
-					else if(n == 3)
-					{
-						val = (int)((double)val * alpha);
-					}
-					if(val < 0) val = 0;
-					if(val > 255) val = 255;
-					*ptr = (unsigned char)val;
-					ptr++;
-				}
-			}
-		}
-	}
-}
-
 void	Camera::ShowImmediateList()
 {
 int	loop;
@@ -25598,6 +25755,7 @@ int	outer;
 		{
 			int moving_element = 0;
 			int someone_is_dragging = 0;
+			SetCairoScale();
 			DrawImageWindowsBefore(outer, 0, mat, moving_element, someone_is_dragging);
 			if(immediate_list != NULL)
 			{
@@ -25614,6 +25772,7 @@ int	outer;
 					}
 				}
 			}
+			RestoreCairoScale();
 		}
 	}
 	if(my_window->DisplayedCamera() != this)
@@ -25761,9 +25920,14 @@ int	loop;
 				yy *= image_window[loop]->parent_scale_height;
 				ww *= image_window[loop]->parent_scale_width;
 				hh *= image_window[loop]->parent_scale_height;
+				xx /= scale_w;
+				yy /= scale_h;
+				ww /= scale_w;
+				hh /= scale_h;
 				xx += image_sx;
 				yy += image_sy;
-				if(my_window->resize_frame->use != image_window[loop])
+				if((my_window->resize_frame->use != image_window[loop])
+				|| (!my_window->resize_frame->visible()))
 				{
 					fl_color(YELLOW);
 					fl_rect(xx, yy, ww, hh);
@@ -25802,9 +25966,10 @@ int	loop;
 
 	int cam_x = image_sx;
 	int cam_y = image_sy;
-	int cam_w = width;
-	int cam_h = height;
+	int cam_w = display_width;
+	int cam_h = display_height;
 	fl_color(GRAY);
+	fl_line_style(FL_DOT);
 	for(loop = cam_x;loop < cam_x + cam_w;loop += grid_size)
 	{
 		fl_line(loop, cam_y, loop, cam_y + cam_h);
@@ -25813,6 +25978,7 @@ int	loop;
 	{
 		fl_line(cam_x, loop, cam_x + cam_w, loop);
 	}
+	fl_line_style(FL_SOLID);
 }
 
 void	Camera::DisplayAVWindow()
@@ -28917,8 +29083,6 @@ void	PIP::draw(int idx)
 
 Shape::Shape(MyWin *in_win, int in_x, int in_y, int in_w, int in_h) : Fl_Box(in_x, in_y, in_w, in_h)
 {
-void	shape_popup_cb(Fl_Widget *w, void *v);
-
 	my_window = in_win;
 	type = SHAPE_NO_TYPE;
 
@@ -28948,6 +29112,21 @@ void	shape_popup_cb(Fl_Widget *w, void *v);
 
 	source = NULL;
 	destination = NULL;
+
+	RightClickMenu();
+
+	last_x = 0;
+	last_y = 0;
+}
+
+Shape::~Shape()
+{
+}
+
+void	Shape::RightClickMenu()
+{
+void	shape_popup_cb(Fl_Widget *w, void *v);
+
 	popup = new PopupMenu(my_window, 0, 0, 160, 300);
 	popup->browser->callback(shape_popup_cb, this);
 	popup->browser->add("Move");
@@ -28957,13 +29136,6 @@ void	shape_popup_cb(Fl_Widget *w, void *v);
 	popup->browser->add("Down a Layer");
 	popup->browser->add("Hide");
 	popup->set_non_modal();
-
-	last_x = 0;
-	last_y = 0;
-}
-
-Shape::~Shape()
-{
 }
 
 void	Shape::Remove()
@@ -29852,6 +30024,21 @@ SourceMultiline::~SourceMultiline()
 {
 }
 
+void	SourceMultiline::RightClickMenu()
+{
+	PopupMenu *popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 750, 40);
+	popup->browser->callback(source_popup_cb, this);
+	int cnt = 0;
+	while(available_scheme[cnt] != NULL)
+	{
+		popup->browser->add(available_scheme[cnt], available_scheme[cnt + 1]);
+		cnt += 2;
+	}
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
 int	SourceMultiline::handle(int event)
 {
 	int	flag = 0;
@@ -29859,17 +30046,7 @@ int	SourceMultiline::handle(int event)
 	{
 		if(Fl::event_button() == FL_RIGHT_MOUSE)
 		{
-			PopupMenu *popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 750, 40);
-			popup->browser->callback(source_popup_cb, this);
-			int cnt = 0;
-			while(available_scheme[cnt] != NULL)
-			{
-				popup->browser->add(available_scheme[cnt], available_scheme[cnt + 1]);
-				cnt += 2;
-			}
-			popup->set_non_modal();
-			popup->Fit();
-			popup->show();
+			RightClickMenu();
 			flag = 1;
 		}
 	}
@@ -30506,7 +30683,7 @@ char	buf[8192];
 		int nn = my_file_chooser(win, "Select an A/V file", "*.*", "./", filename);
 		if(nn > 0)
 		{
-			sprintf(buf, "av://%s", filename);
+			sprintf(buf, "av://[1]%s", filename);
 			nsw->source->value(buf);
 		}
 	}
@@ -31055,7 +31232,7 @@ AlertWindow::AlertWindow(MyWin *in_win, int ww, int hh) : Dialog(in_win, ww, hh,
 	grp2->end();
 
 	int use_y = old_y_pos;
-	alert_duration = new Fl_Int_Input(440, use_y, 60, 20, "Duration");
+	alert_duration = new IntInput(440, use_y, 60, 20, "Duration");
 	alert_duration->color(BLACK);
 	alert_duration->textcolor(WHITE);
 	alert_duration->textsize(11);
@@ -31507,7 +31684,7 @@ char	buf[8192];
 		{
 			char path[4096];
 			strcpy(path, "");
-			int nn = my_file_chooser(my_win, "Select a slideshow file", "*.*", "./", path, 1);
+			int nn = my_file_chooser(my_win, "Select a slideshow directory", "*", "./", path, 1);
 			if(nn > 0)
 			{
 				sprintf(buf, "slideshow://%s", path);
@@ -32055,7 +32232,7 @@ int		loop;
 	alias->copy_tooltip("An alias for the source. The alias takes the place of the source path, and should be unique and easily readible.");
 
 	int cx = 60;
-	width = new Fl_Float_Input(cx, new_yp + 200, 50, 20, "Width:");
+	width = new FloatInput(cx, new_yp + 200, 50, 20, "Width:");
 	width->color(BLACK);
 	width->textcolor(WHITE);
 	width->cursor_color(WHITE);
@@ -32068,7 +32245,7 @@ int		loop;
 	width->value(buf);
 	width->copy_tooltip("The width resolution of the source.");
 	cx += 100;
-	height = new Fl_Float_Input(cx, new_yp + 200, 50, 20, "Height:");
+	height = new FloatInput(cx, new_yp + 200, 50, 20, "Height:");
 	height->color(BLACK);
 	height->textcolor(WHITE);
 	height->cursor_color(WHITE);
@@ -32081,7 +32258,7 @@ int		loop;
 	height->value(buf);
 	height->copy_tooltip("The height resolution of the source.");
 	cx += 110;
-	font_sz = new Fl_Int_Input(cx, new_yp + 200, 50, 20, "Font Size:");
+	font_sz = new IntInput(cx, new_yp + 200, 50, 20, "Font Size:");
 	font_sz->color(BLACK);
 	font_sz->textcolor(WHITE);
 	font_sz->cursor_color(WHITE);
@@ -32819,6 +32996,7 @@ void	cancel_test_codec_cb(Fl_Widget *w, void *v)
 TestCodecChoice::TestCodecChoice(MyWin *in_win, char *quest) : Dialog(in_win, 420, 80, "Test Codecs")
 {
 	my_window = in_win;
+	my_window->AuxWindow(this);
 
 	Fl_Box *question = new Fl_Box(2, 2, w() - 4, 40);
 	question->box(FL_FLAT_BOX);
@@ -32844,12 +33022,14 @@ TestCodecChoice::TestCodecChoice(MyWin *in_win, char *quest) : Dialog(in_win, 42
 	cancel->align(FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
 	cancel->callback(cancel_test_codec_cb, this);
 	end();
+
+	set_modal();
 }
 
 TestCodecChoice::~TestCodecChoice()
 {
+	my_window->AuxWindow(NULL);
 }
-
 
 // SECTION *********************************** PULSE AUDIO FILTER *******************************************
 
@@ -33429,6 +33609,7 @@ int	loop;
 	{
 		alias = strdup("");
 	}
+	hidden = 0;
 	in_use = 0;
 	if(ch < 2) ch = 2;
 	int sz = FRAMES_PER_BUFFER * sizeof(SAMPLE) * ch;
@@ -33527,6 +33708,7 @@ int	loop;
 	fprintf(fp, "\t\"compress high\": %f,\n", compress_high);
 	fprintf(fp, "\t\"compress low\": %f,\n", compress_low);
 	fprintf(fp, "\t\"compress percent\": %f,\n", compress_percent);
+	fprintf(fp, "\t\"hidden\": %d,\n", hidden);
 	fprintf(fp, "\t\"filter plugin cnt\": %d,\n", filter_plugin_cnt);
 	if(filter_plugin_cnt > 0)
 	{
@@ -33695,7 +33877,7 @@ int	pulse_play(int *flag);
 
 int	 pulse_record_all(int *flag)
 {
-int		simple_record(int *flag);
+int		feed_input(int *muxer, unsigned char *input_buf);
 void	read_pulse_mic(PulseAudio *pa, int any_recording);
 int		loop;
 int		inner, outer;
@@ -33795,7 +33977,7 @@ int		inner, outer;
 							{
 								if(mux->recording == 1)
 								{
-									simple_record((int *)mux);
+									feed_input((int *)mux, (unsigned char *)mix->buffer);
 									my_window->recorded_frames = mux->current_frame;
 								}
 							}
@@ -34013,6 +34195,8 @@ PulseAudioButton::PulseAudioButton(MyWin *in_win, char *in_dev_name, int hz, int
 		alias = strdup("");
 	}
 	box(FL_NO_BOX);
+	color(BLACK);
+
 	Fl_Box *sizing_box = new Fl_Box(xx, yy, ww, hh);
 	sizing_box->color(fl_rgb_color(122, 0, 0));
 
@@ -34141,6 +34325,7 @@ PulseAudioButton::PulseAudioButton(MyWin *in_win, char *in_dev_name, int hz, int
 	}
 	end();
 	peak = 0;
+	hidden = 0;
 }
 
 PulseAudioButton::~PulseAudioButton()
@@ -34170,7 +34355,7 @@ int		PulseAudioButton::handle(int event)
 	{
 		if(Fl::event_button() == 3)
 		{
-			ShowPopup();
+			RightClickMenu();
 			flag = 1;
 		}
 	}
@@ -34198,23 +34383,26 @@ void	PulseAudioButton::draw()
 {
 int		loop;
 
-	MyGroup::draw();
-	if(microphone != NULL)
+	if(hidden == 0)
 	{
-		double avg = microphone->average * ((microphone->volume1 + microphone->volume2) / 2);
-		int ww = (int)(((double)meter_box->w() / (32768.0 / 2.0)) * abs(avg));
-		int red = (int)((255.0 / (32768.0 / 2.0)) * abs(avg));
-		int green = 255 - (int)((255.0 / (32768.0 / 2.0)) * abs(avg));
-		if(ww > peak) peak = ww;
-		fl_color(BLACK);
-		fl_rectf(meter_box->x(), meter_box->y(), meter_box->w(), meter_box->h());
-		for(loop = 0;loop < ww;loop += 3)
+		MyGroup::draw();
+		if(microphone != NULL)
 		{
-			fl_color(fl_rgb_color(red, green, 0));
-			fl_rectf(meter_box->x() + loop, meter_box->y(), 2, 4);
+			double avg = microphone->average * ((microphone->volume1 + microphone->volume2) / 2);
+			int ww = (int)(((double)meter_box->w() / (32768.0 / 2.0)) * abs(avg));
+			int red = (int)((255.0 / (32768.0 / 2.0)) * abs(avg));
+			int green = 255 - (int)((255.0 / (32768.0 / 2.0)) * abs(avg));
+			if(ww > peak) peak = ww;
+			fl_color(BLACK);
+			fl_rectf(meter_box->x(), meter_box->y(), meter_box->w(), meter_box->h());
+			for(loop = 0;loop < ww;loop += 3)
+			{
+				fl_color(fl_rgb_color(red, green, 0));
+				fl_rectf(meter_box->x() + loop, meter_box->y(), 2, 4);
+			}
+			fl_color(RED);
+			fl_rectf(meter_box->x() + peak, meter_box->y(), 5, 4);
 		}
-		fl_color(RED);
-		fl_rectf(meter_box->x() + peak, meter_box->y(), 5, 4);
 	}
 }
 
@@ -34233,13 +34421,17 @@ void	pulse_audio_button_popup_cb(Fl_Widget *w, void *v)
 			}
 			else if(strcmp(str, "Lock Audio Group") == 0)
 			{
-				iw->my_window->retain_audio = 1;
+				iw->my_window->retain_audio = PANEL_RETAIN;
+			}
+			else if(strcmp(str, "Hide") == 0)
+			{
+				iw->hidden = 1;
 			}
 		}
 	}
 }
 
-void	PulseAudioButton::ShowPopup()
+void	PulseAudioButton::RightClickMenu()
 {
 	if(popup == NULL)
 	{
@@ -34253,7 +34445,8 @@ void	PulseAudioButton::ShowPopup()
 	if(popup != NULL)
 	{
 		popup->browser->clear();
-		if(my_window->retain_audio == 1)
+		popup->browser->add("Hide");
+		if(my_window->retain_audio == PANEL_RETAIN)
 		{
 			popup->browser->add("Hide Audio Group");
 		}
@@ -35540,6 +35733,7 @@ void	ptz_contract_cb(Fl_Widget *w, void *v)
 	PTZ_Window *win = (PTZ_Window *)v;
 	if((win->ptz_contract_group->visible())
 	|| (win->ptz_big_joy_group->visible())
+	|| (win->ptz_absolute_group->visible())
 	|| (win->ptz_named_presets->visible()))
 	{
 		win->Contract();
@@ -35581,6 +35775,7 @@ void	change_pan_tilt_style_cb(Fl_Widget *w, void *v)
 	{
 		win->ptz_contract_group->show();
 		win->ptz_big_joy_group->hide();
+		win->ptz_absolute_group->hide();
 		win->pan_tilt_style = PAN_TILT_STYLE_JOYSTICK;
 		win->pan_tilt_button_group->hide();
 		win->pan_tilt_joystick_group->show();
@@ -35590,13 +35785,23 @@ void	change_pan_tilt_style_cb(Fl_Widget *w, void *v)
 	else if(win->pan_tilt_style == PAN_TILT_STYLE_JOYSTICK)
 	{
 		win->ptz_contract_group->hide();
+		win->ptz_absolute_group->hide();
+		win->ptz_absolute_group->hide();
 		win->ptz_big_joy_group->show();
 		win->pan_tilt_style = PAN_TILT_STYLE_BIG_JOYSTICK;
 	}
 	else if(win->pan_tilt_style == PAN_TILT_STYLE_BIG_JOYSTICK)
 	{
+		win->ptz_contract_group->hide();
+		win->ptz_big_joy_group->hide();
+		win->pan_tilt_style = PAN_TILT_STYLE_ABSOLUTE;
+		win->ptz_absolute_group->show();
+	}
+	else if(win->pan_tilt_style == PAN_TILT_STYLE_ABSOLUTE)
+	{
 		win->ptz_contract_group->show();
 		win->ptz_big_joy_group->hide();
+		win->ptz_absolute_group->hide();
 		win->pan_tilt_style = PAN_TILT_STYLE_BUTTONS;
 		win->pan_tilt_joystick_group->hide();
 		win->pan_tilt_button_group->show();
@@ -35717,6 +35922,31 @@ int	MyZoomRoller::handle(int event)
 	return(flag);
 }
 
+void	ptz_set_absolute_cb(Fl_Widget *w, void *v)
+{
+	PTZ_Window *win = (PTZ_Window *)v;
+	if(w == win->ptz_set_pan_tilt)
+	{
+		char *str = (char *)win->ptz_absolute_pan->value();
+		int target_pan = atoi(str);
+		str = (char *)win->ptz_absolute_tilt->value();
+		int target_tilt = atoi(str);
+		win->my_window->ViscaCommand(win->instance, PTZ_ABSOLUTE_POSITION, 4, 9, 9, target_pan, target_tilt);
+	}
+	else if(w == win->ptz_set_zoom)
+	{
+		char *str = (char *)win->ptz_absolute_zoom->value();
+		int target_zoom = atoi(str);
+		win->my_window->ViscaCommand(win->instance, PTZ_ZOOM, 1, target_zoom);
+	}
+	else if(w == win->ptz_set_focus)
+	{
+		char *str = (char *)win->ptz_absolute_focus->value();
+		int target_focus = atoi(str);
+		win->my_window->ViscaCommand(win->instance, PTZ_FOCUS, 1, target_focus);
+	}
+}
+
 PTZ_Window::PTZ_Window(MyWin *in_win, char *in_alias, int in_instance, int in_xx, int in_yy, int in_ww, int in_hh) : SlidingElement(in_win, OPEN_UP, 0, 0, in_ww, in_hh)
 {
 int		loop;
@@ -35789,6 +36019,9 @@ char	 buf[8192];
 	max_optical_zoom = 0x0;
 	max_motor_step = 0.0;
 	max_magnification = 0;
+	max_tilt_up = 0;
+	max_tilt_down = 0;
+	max_pan = 0;
 	horizontal_field_of_view_degrees = 0.0;
 	pan_steps_per_degree = 0.0;
 	tilt_steps_per_degree = 0.0;
@@ -35871,6 +36104,7 @@ char	 buf[8192];
 	int save_y = start_y;
 
 	ptz_contract_group = new Fl_Group(0, start_y, w(), h() - start_y);
+	ptz_contract_group->color(BLACK);
 	int failed = 0;
 	start_y = AddInterfaceButton(10, start_y);
 	start_y = AddCamerasAndPresets(5, start_y);
@@ -35885,7 +36119,7 @@ char	 buf[8192];
 
 	ptz_big_joy_group = new Fl_Group(0, 20, w(), h() - 20);
 		big_joystick_group = new Fl_Window(1, 20, w() - 2, h() - 21);
-			pt_label2 = new Fl_Button(0, 0, 100, 20, "Pan/Tilt");
+			pt_label2 = new Fl_Button(0, 0, 100, 20, "Pan/Tilt @-9>");
 			pt_label2->box(FL_NO_BOX);
 			pt_label2->color(YELLOW);
 			pt_label2->labelcolor(YELLOW);
@@ -35913,12 +36147,47 @@ char	 buf[8192];
 			pt_big_joystick->pt_big_focus_roller->step(0.1);
 			pt_big_joystick->pt_big_focus_roller->align(FL_ALIGN_TOP | FL_ALIGN_CENTER);
 			pt_big_joystick->pt_big_focus_roller->callback(pt_big_focus_roller_cb, this);
+
+			Fl_Box *box = new Fl_Box(1, w() - 20, w() - 2, 20, "Hold shift to lock horizontal, ctrl to lock vertical");
+			box->box(FL_FLAT_BOX);
+			box->color(BLACK);
+			box->labelcolor(WHITE);
+			box->labelsize(10);
 			
 		big_joystick_group->end();
 		big_joystick_group->box(FL_FLAT_BOX);
 		big_joystick_group->color(BLACK);
 	ptz_big_joy_group->end();
 	ptz_big_joy_group->hide();
+
+	ptz_absolute_group = new Fl_Group(0, 20, w(), h() - 20);
+	ptz_absolute_group->box(FL_FLAT_BOX);
+	ptz_absolute_group->color(BLACK);
+		Fl_Button *pt_label3 = new Fl_Button(0, 20, 100, 20, "Pan/Tilt @-9>");
+		pt_label3->box(FL_NO_BOX);
+		pt_label3->color(YELLOW);
+		pt_label3->labelcolor(YELLOW);
+		pt_label3->labelsize(9);
+		pt_label3->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+		pt_label3->copy_tooltip("Select between joystick and button interfaces for pan/zoom/tilt");
+		pt_label3->callback(change_pan_tilt_style_cb, this);
+
+		int yp = 40;
+		ptz_absolute_pan = new FloatInput(100, yp, 60, 15, "Pan");
+		ptz_set_pan_tilt = new MyButton(my_window, 160, yp + 11, 30, 15, "Set");
+		ptz_set_pan_tilt->callback(ptz_set_absolute_cb, this);
+		yp += 22;
+		ptz_absolute_tilt = new FloatInput(100, yp, 60, 15, "Tilt");
+		yp += 22;
+		ptz_absolute_zoom = new FloatInput(100, yp, 60, 15, "Zoom");
+		ptz_set_zoom = new MyButton(my_window, 160, yp, 30, 15, "Set");
+		ptz_set_zoom->callback(ptz_set_absolute_cb, this);
+		yp += 22;
+		ptz_absolute_focus = new FloatInput(100, yp, 60, 15, "Focus");
+		ptz_set_focus = new MyButton(my_window, 160, yp, 30, 15, "Set");
+		ptz_set_focus->callback(ptz_set_absolute_cb, this);
+	ptz_absolute_group->end();
+	ptz_absolute_group->hide();
 
 	ptz_contract_button2 = new MyButton(my_window, w() - 20, h() - 20, 20, 20, "@2>");
 	ptz_contract_button2->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
@@ -35944,6 +36213,10 @@ char	 buf[8192];
 	else if(pan_tilt_style == PAN_TILT_STYLE_BIG_JOYSTICK)
 	{
 		pan_tilt_joystick_group->show();
+	}
+	else if(pan_tilt_style == PAN_TILT_STYLE_ABSOLUTE)
+	{
+		ptz_absolute_group->show();
 	}
 	if((my_window->initial_ptz_x[instance] > -1) && (my_window->initial_ptz_y[instance] > -1))
 	{
@@ -35980,6 +36253,9 @@ int		loop;
 		horizontal_field_of_view_degrees = 71.0;
 		pan_steps_per_degree = 51.2;
 		tilt_steps_per_degree = 51.2;
+		max_tilt_up = 1280;
+		max_tilt_down = -1280;
+		max_pan = 5120;
 		zoom_node[0].position = 0x0000;
 		zoom_node[0].magnification = 1.0;
 		zoom_node[1].position = 0x1970;
@@ -36013,6 +36289,9 @@ int		loop;
 		horizontal_field_of_view_degrees = 60.7;
 		pan_steps_per_degree = 161.0;
 		tilt_steps_per_degree = 161.0;
+		max_tilt_up = 1296;
+		max_tilt_down = -432;
+		max_pan = 2448;
 		zoom_node[0].magnification = 1.0;
 		zoom_node[0].position = 0x0000;
 		zoom_node[1].magnification = 1.2;
@@ -36078,6 +36357,7 @@ int		loop;
 
 void	PTZ_Window::show()
 {
+	UpdatePTZButtons();
 	SlidingElement::show();
 }
 
@@ -36271,6 +36551,7 @@ void	PTZ_Window::Contract()
 {
 	ptz_contract_group->hide();
 	ptz_big_joy_group->hide();
+	ptz_absolute_group->hide();
 	ptz_named_presets->hide();
 	resize(initial_left, (my_window->h() - initial_bottom) - 24, w(), 24);
 
@@ -36306,13 +36587,18 @@ void	PTZ_Window::Contract()
 
 void	PTZ_Window::Expand()
 {
-	if(pan_tilt_style != PAN_TILT_STYLE_BIG_JOYSTICK)
+	if((pan_tilt_style != PAN_TILT_STYLE_BIG_JOYSTICK)
+	&& (pan_tilt_style != PAN_TILT_STYLE_ABSOLUTE))
 	{
 		ptz_contract_group->show();
 	}
-	else
+	else if(pan_tilt_style == PAN_TILT_STYLE_BIG_JOYSTICK)
 	{
 		ptz_big_joy_group->show();
+	}
+	else
+	{
+		ptz_absolute_group->show();
 	}
 	resize(initial_left, (my_window->h() - initial_bottom) - 330, w(), 330);
 
@@ -36452,6 +36738,9 @@ void	PTZ_Window::LoadZoomParamsFromJSON(cJSON *json)
 	success = json_parse_double(json, "ptz horizontal field of view degrees", horizontal_field_of_view_degrees);
 	success = json_parse_double(json, "ptz pan steps per degree", pan_steps_per_degree);
 	success = json_parse_double(json, "ptz tilt steps per degree", tilt_steps_per_degree);
+	success = json_parse_int(json, "ptz max tilt up", max_tilt_up);
+	success = json_parse_int(json, "ptz max tilt down", max_tilt_down);
+	success = json_parse_int(json, "ptz max pan", max_pan);
 	cJSON *ptz_zoom_node_item = NULL;
 	cJSON *ptz_zoom_node_items = json_parse_array(json, "ptz zoom node");
 	int idx = 0;
@@ -36948,8 +37237,8 @@ int	PTZ_Window::AddZoomFocusAperture(int start_x, int start_y)
 	int yy = start_y;
 	zoom_label = new Fl_Box(start_x, yy, 100, 20, "Zoom");
 	zoom_label->box(FL_NO_BOX);
-	zoom_label->color(YELLOW);
-	zoom_label->labelcolor(YELLOW);
+	zoom_label->color(BLACK);
+	zoom_label->labelcolor(WHITE);
 	zoom_label->labelsize(9);
 	zoom_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 
@@ -36979,8 +37268,8 @@ int	PTZ_Window::AddZoomFocusAperture(int start_x, int start_y)
 
 	focus_label = new Fl_Box(start_x, yy, 80, 20, "Focus");
 	focus_label->box(FL_NO_BOX);
-	focus_label->color(YELLOW);
-	focus_label->labelcolor(YELLOW);
+	focus_label->color(BLACK);
+	focus_label->labelcolor(WHITE);
 	focus_label->labelsize(9);
 	focus_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 
@@ -37010,8 +37299,8 @@ int	PTZ_Window::AddZoomFocusAperture(int start_x, int start_y)
 
 	aperture_label = new Fl_Box(start_x, yy, 80, 20, "App");
 	aperture_label->box(FL_NO_BOX);
-	aperture_label->color(YELLOW);
-	aperture_label->labelcolor(YELLOW);
+	aperture_label->color(BLACK);
+	aperture_label->labelcolor(WHITE);
 	aperture_label->labelsize(9);
 	aperture_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 
@@ -37107,7 +37396,7 @@ int	PTZ_Window::AddSpeedSlider(int start_x, int start_y)
 	ptz_speed_slider->slider(FL_FRAME_BOX);
 	ptz_speed_slider->color(BLACK);
 	ptz_speed_slider->labelsize(9);
-	ptz_speed_slider->labelcolor(YELLOW);
+	ptz_speed_slider->labelcolor(WHITE);
 	ptz_speed_slider->align(FL_ALIGN_CENTER | FL_ALIGN_TOP);
 	ptz_speed_slider->value(0.24);
 	ptz_speed_slider->bounds(0.01, 1.0);
@@ -37131,7 +37420,7 @@ int	PTZ_Window::AddSpeedSlider(int start_x, int start_y)
 int	PTZ_Window::AddPanTiltButtons(int start_x, int start_y)
 {
 	int yy = start_y;
-	pt_label = new Fl_Button(start_x, yy, 100, 20, "Pan/Tilt");
+	pt_label = new Fl_Button(start_x, yy, 100, 20, "Pan/Tilt @-9>");
 	pt_label->box(FL_NO_BOX);
 	pt_label->color(YELLOW);
 	pt_label->labelcolor(YELLOW);
@@ -37313,7 +37602,16 @@ int		PanTiltJoystick::handle(int event)
 		{
 			int xx = Fl::event_x();
 			int yy = Fl::event_y();
-
+			if(Fl::event_shift())
+			{
+				xx = Fl::event_x();
+				yy = pos_y;
+			}
+			else if(Fl::event_ctrl())
+			{
+				xx = pos_x;
+				yy = Fl::event_y();
+			}
 			double dx = (double)abs(xx - (x() + (w() / 2)));
 			double dy = (double)abs(yy - (y() + (h() / 2)));
 			double dist = sqrt((dx * dx) + (dy * dy));
@@ -37430,6 +37728,7 @@ void	ptz_restore_ptz_cb(Fl_Widget *w, void *v)
 	PTZ_Window *win = (PTZ_Window *)v;
 	win->ptz_contract_group->show();
 	win->ptz_big_joy_group->hide();
+	win->ptz_absolute_group->hide();
 	win->ptz_named_presets->hide();
 	win->preset_group_mode = PTZ_PRESET_GROUP_MODE_BUTTONS;
 	win->preset_name_group->hide();
@@ -37450,6 +37749,7 @@ void	ptz_preset_label_cb(Fl_Widget *w, void *v)
 	{
 		win->ptz_contract_group->hide();
 		win->ptz_big_joy_group->hide();
+		win->ptz_absolute_group->hide();
 		win->ptz_named_presets->show();
 		win->preset_group_mode = PTZ_PRESET_GROUP_MODE_EDIT;
 	}
@@ -37583,9 +37883,9 @@ char	buf[256];
 	ptz_named_presets->box(FL_FLAT_BOX);
 
 	yy += 5;
-	MyButton *ptz_restore_label = new MyButton(my_window, 0, yy, w(), 20, "Presets");
+	MyButton *ptz_restore_label = new MyButton(my_window, 0, yy, w(), 20, "Presets @-9>");
 	ptz_restore_label->box(FL_NO_BOX);
-	ptz_restore_label->color(YELLOW);
+	ptz_restore_label->color(WHITE);
 	ptz_restore_label->labelcolor(YELLOW);
 	ptz_restore_label->labelsize(11);
 	ptz_restore_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
@@ -37639,8 +37939,8 @@ int	loop;
 	int yy = start_y;
 	Fl_Box *camera_label = new Fl_Box(0, yy, 150, 20, "Cameras");
 	camera_label->box(FL_NO_BOX);
-	camera_label->color(YELLOW);
-	camera_label->labelcolor(YELLOW);
+	camera_label->color(BLACK);
+	camera_label->labelcolor(WHITE);
 	camera_label->labelsize(9);
 	camera_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 
@@ -37659,9 +37959,9 @@ int	loop;
 		ptz_camera_select_button[loop]->callback(ptz_select_camera_cb, this);
 	}
 	yy += 44;
-	MyButton *ptz_preset_label = new MyButton(my_window, start_x, yy, 150, 20, "Presets");
+	MyButton *ptz_preset_label = new MyButton(my_window, start_x, yy, 150, 20, "Presets @-9>");
 	ptz_preset_label->box(FL_NO_BOX);
-	ptz_preset_label->color(YELLOW);
+	ptz_preset_label->color(BLACK);
 	ptz_preset_label->labelcolor(YELLOW);
 	ptz_preset_label->labelsize(9);
 	ptz_preset_label->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
@@ -37858,7 +38158,7 @@ int	inner;
 	ptz_interface_button = new SelectButton(my_window, start_x, start_y, 160, 20, "Interfaces");
 	ptz_interface_button->box(FL_FLAT_BOX);
 	ptz_interface_button->color(BLACK);
-	ptz_interface_button->labelcolor(YELLOW);
+	ptz_interface_button->labelcolor(WHITE);
 	ptz_interface_button->labelsize(9);
 	ptz_interface_button->box(FL_NO_BOX);
 	ptz_interface_button->align(FL_ALIGN_CENTER | FL_ALIGN_TOP);
@@ -38064,12 +38364,12 @@ void	ptz_popup_cb(Fl_Widget *w, void *v)
 		}
 		else if(strcmp(str, "Lock PTZ Group") == 0)
 		{
-			mw->my_window->retain_ptz = 1;
+			mw->my_window->retain_ptz = PANEL_RETAIN;
 		}
 	}
 }
 
-void	PTZ_Window::ShowPopup()
+void	PTZ_Window::RightClickMenu()
 {
 	if(popup == NULL)
 	{
@@ -38083,7 +38383,7 @@ void	PTZ_Window::ShowPopup()
 	if(popup != NULL)
 	{
 		popup->browser->clear();
-		if(my_window->retain_ptz == 1)
+		if(my_window->retain_ptz == PANEL_RETAIN)
 		{
 			popup->browser->add("Hide PTZ Group");
 		}
@@ -38095,6 +38395,255 @@ void	PTZ_Window::ShowPopup()
 		popup->Fit();
 		popup->show();
 	}
+}
+
+int	PTZ_Window::OnShow()
+{
+	int flag = 0;
+	if(bound_camera != NULL)
+	{
+		if(bound_camera->ptz_lock_interface > -1)
+		{
+			ptz_interface_button->SetCurrent(bound_camera->ptz_lock_interface);
+			ptz_select_interface_cb(NULL, this);
+		}
+	}
+	if(contracted == 0)
+	{
+		Expand();
+	}
+	else
+	{
+		Contract();
+	}
+	return(flag);
+}
+
+int		PTZ_Window::OnPush()
+{
+	int flag = 0;
+	if(Fl::event_button() == FL_RIGHT_MOUSE)
+	{
+		RightClickMenu();
+	}
+	else
+	{
+		if(bound_camera != NULL)
+		{
+			if((!Fl::event_inside(ptz_alias_button))
+			&& (!Fl::event_inside(ptz_contract_button)))
+			{
+				int child_cnt = ptz_contract_group->children();
+				int no_go = 0;
+				for(int loop = 0;loop < child_cnt;loop++)
+				{
+					Fl_Widget *chld = ptz_contract_group->child(loop);
+					if(Fl::event_inside(chld))
+					{
+						no_go = 1;
+					}
+				}
+				if(no_go == 0)
+				{
+					if(ptz_big_joy_group->visible())
+					{
+						child_cnt = ptz_big_joy_group->children();
+						for(int loop = 0;loop < child_cnt;loop++)
+						{
+							Fl_Widget *chld = ptz_big_joy_group->child(loop);
+							if(Fl::event_inside(chld))
+							{
+								no_go = 1;
+							}
+						}
+					}
+				}
+				if(no_go == 0)
+				{
+					if(bound_camera != my_window->DisplayedCamera())
+					{
+						if(my_window->alt_displayed_source == -1)
+						{
+							my_window->DisplayCamera(bound_camera);
+						}
+					}
+				}
+			}
+			else
+			{
+				if(Fl::event_inside(ptz_alias_button))
+				{
+					push_time = precise_time();
+				}
+			}
+		}
+		Fl_Group *p = parent();
+		p->remove(this);
+		p->add(this);
+		p->redraw();
+		redraw();
+	}
+	return(flag);
+}
+
+int		PTZ_Window::OnKeyboard(int key)
+{
+	int flag = 0;
+	int ctrl = Fl::event_state(FL_CTRL);
+	int shift = Fl::event_state(FL_SHIFT);
+	if(key == FL_Down)
+	{
+		if((shift == 0) && (ctrl == 0))
+		{
+			key_table[MY_KEY_DOWN] = 1;
+		}
+		else if(shift)
+		{
+			my_window->ViscaCommand(instance, PTZ_ZOOM_OUT);
+			zooming = 1;
+		}
+		else if(ctrl)
+		{
+			my_window->ViscaCommand(instance, PTZ_FOCUS_NEAR);
+			focusing = 1;
+		}
+		flag = 1;
+	}
+	else if(key == FL_Up)
+	{
+		if((shift == 0) && (ctrl == 0))
+		{
+			key_table[MY_KEY_UP] = 1;
+		}
+		else if(shift)
+		{
+			my_window->ViscaCommand(instance, PTZ_ZOOM_IN);
+			zooming = 1;
+		}
+		else if(ctrl)
+		{
+			my_window->ViscaCommand(instance, PTZ_FOCUS_FAR);
+			focusing = 1;
+		}
+		flag = 1;
+	}
+	else if(key == FL_Right)
+	{
+		key_table[MY_KEY_RIGHT] = 1;
+		flag = 1;
+	}
+	else if(key == FL_Left)
+	{
+		key_table[MY_KEY_LEFT] = 1;
+		flag = 1;
+	}
+	else if(key == FL_Home)
+	{
+		my_window->ViscaCommand(instance, PTZ_HOME);
+		flag = 1;
+	}
+	else if(key == FL_Page_Up)
+	{
+		my_window->ViscaCommand(instance, PTZ_ZOOM_IN);
+		zooming = 1;
+		flag = 1;
+	}
+	else if(key == FL_Page_Down)
+	{
+		my_window->ViscaCommand(instance, PTZ_ZOOM_OUT);
+		zooming = 1;
+		flag = 1;
+	}
+	if((key_table[MY_KEY_DOWN] == 1) && (key_table[MY_KEY_RIGHT] == 1))
+	{
+		my_window->ViscaCommand(instance, PTZ_DOWN_RIGHT);
+		dir = 1;
+	}
+	else if((key_table[MY_KEY_DOWN] == 1) && (key_table[MY_KEY_LEFT] == 1))
+	{
+		my_window->ViscaCommand(instance, PTZ_DOWN_LEFT);
+		dir = 1;
+	}
+	else if((key_table[MY_KEY_UP] == 1) && (key_table[MY_KEY_RIGHT] == 1))
+	{
+		my_window->ViscaCommand(instance, PTZ_UP_RIGHT);
+		dir = 1;
+	}
+	else if((key_table[MY_KEY_UP] == 1) && (key_table[MY_KEY_LEFT] == 1))
+	{
+		my_window->ViscaCommand(instance, PTZ_UP_LEFT);
+		dir = 1;
+	}
+	else if(key_table[MY_KEY_DOWN] == 1)
+	{
+		my_window->ViscaCommand(instance, PTZ_DOWN);
+		dir = 1;
+	}
+	else if(key_table[MY_KEY_UP] == 1)
+	{
+		my_window->ViscaCommand(instance, PTZ_UP);
+		dir = 1;
+	}
+	else if(key_table[MY_KEY_RIGHT] == 1)
+	{
+		my_window->ViscaCommand(instance, PTZ_RIGHT);
+		dir = 1;
+	}
+	else if(key_table[MY_KEY_LEFT] == 1)
+	{
+		my_window->ViscaCommand(instance, PTZ_LEFT);
+		dir = 1;
+	}
+	return(flag);
+}
+
+int		PTZ_Window::OnKeyUp(int key)
+{
+	int flag = 0;
+	if(key == FL_Down)
+	{
+		key_table[MY_KEY_DOWN] = 0;
+		flag = 1;
+	}
+	else if(key == FL_Up)
+	{
+		key_table[MY_KEY_UP] = 0;
+		flag = 1;
+	}
+	else if(key == FL_Right)
+	{
+		key_table[MY_KEY_RIGHT] = 0;
+		flag = 1;
+	}
+	else if(key == FL_Left)
+	{
+		key_table[MY_KEY_LEFT] = 0;
+		flag = 1;
+	}
+	if(zooming == 1)
+	{
+		my_window->ViscaCommand(instance, PTZ_ZOOM_STOP);
+		zooming = 0;
+		flag = 1;
+	}
+	if(focusing == 1)
+	{
+		my_window->ViscaCommand(instance, PTZ_FOCUS_STOP);
+		focusing = 0;
+		flag = 1;
+	}
+	if(dir == 1)
+	{
+		if((key_table[MY_KEY_DOWN] == 0)
+		&& (key_table[MY_KEY_UP] == 0)
+		&& (key_table[MY_KEY_RIGHT] == 0)
+		&& (key_table[MY_KEY_LEFT] == 0))
+		{
+			my_window->ViscaCommand(instance, PTZ_PAN_STOP);
+		}
+		dir = 0;
+	}
+	return(flag);
 }
 
 int	PTZ_Window::handle(int event)
@@ -38112,86 +38661,11 @@ int	loop;
 	}
 	else if(event == FL_SHOW)
 	{
-		if(bound_camera != NULL)
-		{
-			if(bound_camera->ptz_lock_interface > -1)
-			{
-				ptz_interface_button->SetCurrent(bound_camera->ptz_lock_interface);
-				ptz_select_interface_cb(NULL, this);
-			}
-		}
-		if(contracted == 0)
-		{
-			Expand();
-		}
-		else
-		{
-			Contract();
-		}
+		flag = OnShow();
 	}
 	else if(event == FL_PUSH)
 	{
-		if(Fl::event_button() == FL_RIGHT_MOUSE)
-		{
-			ShowPopup();
-		}
-		else
-		{
-			if(bound_camera != NULL)
-			{
-				if((!Fl::event_inside(ptz_alias_button))
-				&& (!Fl::event_inside(ptz_contract_button)))
-				{
-					int child_cnt = ptz_contract_group->children();
-					int no_go = 0;
-					for(loop = 0;loop < child_cnt;loop++)
-					{
-						Fl_Widget *chld = ptz_contract_group->child(loop);
-						if(Fl::event_inside(chld))
-						{
-							no_go = 1;
-						}
-					}
-					if(no_go == 0)
-					{
-						if(ptz_big_joy_group->visible())
-						{
-							child_cnt = ptz_big_joy_group->children();
-							for(loop = 0;loop < child_cnt;loop++)
-							{
-								Fl_Widget *chld = ptz_big_joy_group->child(loop);
-								if(Fl::event_inside(chld))
-								{
-									no_go = 1;
-								}
-							}
-						}
-					}
-					if(no_go == 0)
-					{
-						if(bound_camera != my_window->DisplayedCamera())
-						{
-							if(my_window->alt_displayed_source == -1)
-							{
-								my_window->DisplayCamera(bound_camera);
-							}
-						}
-					}
-				}
-				else
-				{
-					if(Fl::event_inside(ptz_alias_button))
-					{
-						push_time = precise_time();
-					}
-				}
-			}
-			Fl_Group *p = parent();
-			p->remove(this);
-			p->add(this);
-			p->redraw();
-			redraw();
-		}
+		flag = OnPush();
 	}
 	else if(event == FL_RELEASE)
 	{
@@ -38228,114 +38702,10 @@ int	loop;
 	}
 	else if(event == FL_KEYBOARD)
 	{
-		int ctrl = Fl::event_state(FL_CTRL);
-		int shift = Fl::event_state(FL_SHIFT);
 		if(hovering == 1)
 		{
 			int key = Fl::event_key();
-			if(key == FL_Down)
-			{
-				if((shift == 0) && (ctrl == 0))
-				{
-					key_table[MY_KEY_DOWN] = 1;
-				}
-				else if(shift)
-				{
-					my_window->ViscaCommand(instance, PTZ_ZOOM_OUT);
-					zooming = 1;
-				}
-				else if(ctrl)
-				{
-					my_window->ViscaCommand(instance, PTZ_FOCUS_NEAR);
-					focusing = 1;
-				}
-				flag = 1;
-			}
-			else if(key == FL_Up)
-			{
-				if((shift == 0) && (ctrl == 0))
-				{
-					key_table[MY_KEY_UP] = 1;
-				}
-				else if(shift)
-				{
-					my_window->ViscaCommand(instance, PTZ_ZOOM_IN);
-					zooming = 1;
-				}
-				else if(ctrl)
-				{
-					my_window->ViscaCommand(instance, PTZ_FOCUS_FAR);
-					focusing = 1;
-				}
-				flag = 1;
-			}
-			else if(key == FL_Right)
-			{
-				key_table[MY_KEY_RIGHT] = 1;
-				flag = 1;
-			}
-			else if(key == FL_Left)
-			{
-				key_table[MY_KEY_LEFT] = 1;
-				flag = 1;
-			}
-			else if(key == FL_Home)
-			{
-				my_window->ViscaCommand(instance, PTZ_HOME);
-				flag = 1;
-			}
-			else if(key == FL_Page_Up)
-			{
-				my_window->ViscaCommand(instance, PTZ_ZOOM_IN);
-				zooming = 1;
-				flag = 1;
-			}
-			else if(key == FL_Page_Down)
-			{
-				my_window->ViscaCommand(instance, PTZ_ZOOM_OUT);
-				zooming = 1;
-				flag = 1;
-			}
-			if((key_table[MY_KEY_DOWN] == 1) && (key_table[MY_KEY_RIGHT] == 1))
-			{
-				my_window->ViscaCommand(instance, PTZ_DOWN_RIGHT);
-				dir = 1;
-			}
-			else if((key_table[MY_KEY_DOWN] == 1) && (key_table[MY_KEY_LEFT] == 1))
-			{
-				my_window->ViscaCommand(instance, PTZ_DOWN_LEFT);
-				dir = 1;
-			}
-			else if((key_table[MY_KEY_UP] == 1) && (key_table[MY_KEY_RIGHT] == 1))
-			{
-				my_window->ViscaCommand(instance, PTZ_UP_RIGHT);
-				dir = 1;
-			}
-			else if((key_table[MY_KEY_UP] == 1) && (key_table[MY_KEY_LEFT] == 1))
-			{
-				my_window->ViscaCommand(instance, PTZ_UP_LEFT);
-				dir = 1;
-			}
-			else if(key_table[MY_KEY_DOWN] == 1)
-			{
-				my_window->ViscaCommand(instance, PTZ_DOWN);
-				dir = 1;
-			}
-			else if(key_table[MY_KEY_UP] == 1)
-			{
-				my_window->ViscaCommand(instance, PTZ_UP);
-				dir = 1;
-			}
-			else if(key_table[MY_KEY_RIGHT] == 1)
-			{
-				my_window->ViscaCommand(instance, PTZ_RIGHT);
-				dir = 1;
-			}
-			else if(key_table[MY_KEY_LEFT] == 1)
-			{
-				my_window->ViscaCommand(instance, PTZ_LEFT);
-				dir = 1;
-			}
+			flag = OnKeyboard(key);
 		}
 	}
 	else if(event == FL_KEYUP)
@@ -38343,49 +38713,7 @@ int	loop;
 		if(hovering == 1)
 		{
 			int key = Fl::event_key();
-			if(key == FL_Down)
-			{
-				key_table[MY_KEY_DOWN] = 0;
-				flag = 1;
-			}
-			else if(key == FL_Up)
-			{
-				key_table[MY_KEY_UP] = 0;
-				flag = 1;
-			}
-			else if(key == FL_Right)
-			{
-				key_table[MY_KEY_RIGHT] = 0;
-				flag = 1;
-			}
-			else if(key == FL_Left)
-			{
-				key_table[MY_KEY_LEFT] = 0;
-				flag = 1;
-			}
-			if(zooming == 1)
-			{
-				my_window->ViscaCommand(instance, PTZ_ZOOM_STOP);
-				zooming = 0;
-				flag = 1;
-			}
-			if(focusing == 1)
-			{
-				my_window->ViscaCommand(instance, PTZ_FOCUS_STOP);
-				focusing = 0;
-				flag = 1;
-			}
-			if(dir == 1)
-			{
-				if((key_table[MY_KEY_DOWN] == 0)
-				&& (key_table[MY_KEY_UP] == 0)
-				&& (key_table[MY_KEY_RIGHT] == 0)
-				&& (key_table[MY_KEY_LEFT] == 0))
-				{
-					my_window->ViscaCommand(instance, PTZ_PAN_STOP);
-				}
-				dir = 0;
-			}
+			flag = OnKeyUp(key);
 		}
 	}
 	if(flag == 0)
@@ -38399,11 +38727,20 @@ void	PTZ_Window::draw()
 {
 int		loop;
 
-	if(ptz_preset_name[current_preset] != NULL)
+	if(my_window->retain_ptz != PANEL_HIDE)
 	{
-		if(strlen(ptz_preset_name[current_preset]) > 0)
+		if(ptz_preset_name[current_preset] != NULL)
 		{
-			preset_name_display->label(ptz_preset_name[current_preset]);
+			if(strlen(ptz_preset_name[current_preset]) > 0)
+			{
+				preset_name_display->label(ptz_preset_name[current_preset]);
+			}
+			else
+			{
+				char buf[64];
+				sprintf(buf, "%d", current_preset);
+				preset_name_display->copy_label(buf);
+			}
 		}
 		else
 		{
@@ -38411,20 +38748,14 @@ int		loop;
 			sprintf(buf, "%d", current_preset);
 			preset_name_display->copy_label(buf);
 		}
-	}
-	else
-	{
-		char buf[64];
-		sprintf(buf, "%d", current_preset);
-		preset_name_display->copy_label(buf);
-	}
-	SlidingElement::draw();
-	if(bound_camera != NULL)
-	{
-		if(bound_camera == my_window->DisplayedCamera())
+		SlidingElement::draw();
+		if(bound_camera != NULL)
 		{
-			fl_color(YELLOW);
-			fl_rect(x(), y(), w(), h());
+			if(bound_camera == my_window->DisplayedCamera())
+			{
+				fl_color(YELLOW);
+				fl_rect(x(), y(), w(), h());
+			}
 		}
 	}
 }
@@ -38443,14 +38774,6 @@ void	PTZ_Window::UpdatePTZButtons()
 		else
 		{
 			ptz_lock_to_camera_button->value(0);
-		}
-		if(bound_camera != NULL)
-		{
-			ptz_bind_camera_button->value(1);
-		}
-		else
-		{
-			ptz_bind_camera_button->value(0);
 		}
 		rr = AutoFocusStatus();
 		if(rr == 1)
@@ -38512,59 +38835,67 @@ void	PTZ_Window::UpdatePTZButtons()
 		{
 			ptz_backlight->deactivate();
 		}
-		if(accelerate == 1)
-		{
-			ptz_accelerate->activate();
-			ptz_accelerate->value(1);
-		}
-		else
-		{
-			ptz_accelerate->activate();
-			ptz_accelerate->value(0);
-		}
-		if(click_pt == 1)
-		{
-			ptz_click_pt->activate();
-			ptz_click_pt->value(1);
-		}
-		else
-		{
-			ptz_click_pt->activate();
-			ptz_click_pt->value(0);
-		}
-		if(follow == 1)
-		{
-			ptz_follow_button->activate();
-			ptz_follow_button->value(1);
-		}
-		else
-		{
-			ptz_follow_button->activate();
-			ptz_follow_button->value(0);
-		}
-		if(reverse_horizontal == 1)
-		{
-			ptz_reverse_horizontal_button->activate();
-			ptz_reverse_horizontal_button->value(1);
-		}
-		else
-		{
-			ptz_reverse_horizontal_button->activate();
-			ptz_reverse_horizontal_button->value(0);
-		}
-		if(reverse_vertical == 1)
-		{
-			ptz_reverse_vertical_button->activate();
-			ptz_reverse_vertical_button->value(1);
-		}
-		else
-		{
-			ptz_reverse_vertical_button->activate();
-			ptz_reverse_vertical_button->value(0);
-		}
-		ptz_soft_memory_button->value(ptz_soft_memory[ptz_interface_index][ptz_current_camera_idx]);
-		last_here = time(0);
 	}
+	if(bound_camera != NULL)
+	{
+		ptz_bind_camera_button->value(1);
+	}
+	else
+	{
+		ptz_bind_camera_button->value(0);
+	}
+	if(accelerate == 1)
+	{
+		ptz_accelerate->activate();
+		ptz_accelerate->value(1);
+	}
+	else
+	{
+		ptz_accelerate->activate();
+		ptz_accelerate->value(0);
+	}
+	if(click_pt == 1)
+	{
+		ptz_click_pt->activate();
+		ptz_click_pt->value(1);
+	}
+	else
+	{
+		ptz_click_pt->activate();
+		ptz_click_pt->value(0);
+	}
+	if(follow == 1)
+	{
+		ptz_follow_button->activate();
+		ptz_follow_button->value(1);
+	}
+	else
+	{
+		ptz_follow_button->activate();
+		ptz_follow_button->value(0);
+	}
+	if(reverse_horizontal == 1)
+	{
+		ptz_reverse_horizontal_button->activate();
+		ptz_reverse_horizontal_button->value(1);
+	}
+	else
+	{
+		ptz_reverse_horizontal_button->activate();
+		ptz_reverse_horizontal_button->value(0);
+	}
+	if(reverse_vertical == 1)
+	{
+		ptz_reverse_vertical_button->activate();
+		ptz_reverse_vertical_button->value(1);
+	}
+	else
+	{
+		ptz_reverse_vertical_button->activate();
+		ptz_reverse_vertical_button->value(0);
+	}
+	ptz_soft_memory_button->value(ptz_soft_memory[ptz_interface_index][ptz_current_camera_idx]);
+	last_here = time(0);
 }
 
 void	PTZ_Window::UpdatePresets()
@@ -40466,7 +40797,7 @@ int		MenuButton::handle(int event)
 		}
 		if(hover_menu != NULL)
 		{
-			hover_menu->resize(x() - hover_menu->w(), y(), hover_menu->w(), hover_menu->h());
+			hover_menu->resize((x() - hover_menu->w()) + 5, y(), hover_menu->w(), hover_menu->h());
 			hover_menu->set_non_modal();
 			hover_menu->show();
 			my_menu->hover_menu_shown = hover_menu;
@@ -40687,7 +41018,7 @@ int		MonitorWindow::handle(int event)
 	{
 		if(Fl::event_button() == 3)
 		{
-			ShowPopup();
+			RightClickMenu();
 			flag = 1;
 		}
 	}
@@ -40698,7 +41029,7 @@ int		MonitorWindow::handle(int event)
 	return(flag);
 }
 
-void	MonitorWindow::ShowPopup()
+void	MonitorWindow::RightClickMenu()
 {
 	if(popup == NULL)
 	{
@@ -40785,7 +41116,7 @@ int	MainMenu::handle(int event)
 	{
 		if(Fl::event_button() == FL_RIGHT_MOUSE)
 		{
-			ShowPopup();
+			RightClickMenu();
 			flag = 1;
 		}
 	}
@@ -40932,7 +41263,7 @@ void	main_menu_popup_cb(Fl_Widget *w, void *v)
 			else if(strcmp(str, "Lock Command Group") == 0)
 			{
 				MyWin *win = iw->my_window;
-				win->retain_commands = 1;
+				win->retain_commands = PANEL_RETAIN;
 			}
 			else if(strcmp(str, "Essential Commands") == 0)
 			{
@@ -40956,7 +41287,7 @@ void	main_menu_popup_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	MainMenu::ShowPopup()
+void	MainMenu::RightClickMenu()
 {
 	if(popup == NULL)
 	{
@@ -40970,7 +41301,7 @@ void	MainMenu::ShowPopup()
 	if(popup != NULL)
 	{
 		popup->browser->clear();
-		if(my_window->retain_commands == 1)
+		if(my_window->retain_commands == PANEL_RETAIN)
 		{
 			popup->browser->add("Hide Command Group");
 		}
@@ -41127,6 +41458,158 @@ void	MainMenu::AddButton(MenuButton *in_button)
 	{
 		menu_button[menu_button_cnt] = in_button;
 		menu_button_cnt++;
+	}
+}
+
+int		MainMenu::AddToPack(Fl_Pack *pack, char *str)
+{
+	int done = 0;
+	for(int loop = 0;((loop < menu_button_cnt) && (done == 0));loop++)
+	{
+		if(menu_button[loop] != NULL)
+		{
+			char *lbl = (char *)menu_button[loop]->label();
+			if(lbl != NULL)
+			{
+				if(strcmp(str, lbl) == 0)
+				{
+					MenuButton *mb = menu_button[loop];
+					pack->add(menu_button[loop]);
+					if((strcmp(str, "Record") == 0)
+					|| (strcmp(str, "Record All") == 0))
+					{
+						pack->add(my_window->encode_speed_window);
+					}
+					done = 1;
+				}
+			}
+		}
+	}
+	return(done);
+}
+
+void	MainMenu::ClearPack(Fl_Group *group, Fl_Pack *pack)
+{
+	while(pack->children() > 0)
+	{
+		Fl_Widget *chld = pack->child(0);
+		if(chld != NULL)
+		{
+			group->add(chld);
+		}
+	}
+}
+
+void	MainMenu::LoadOrder(char *filename)
+{
+	char *buf = ReadWholeFile(filename);
+	if(buf != NULL)
+	{
+		cJSON *json = cJSON_Parse(buf);
+		if(json == NULL)
+		{
+			const char *error_ptr = cJSON_GetErrorPtr();
+			if(error_ptr != NULL)
+			{
+				fprintf(stderr, "Error: JSON Error in %s before: %s\n", filename, error_ptr);
+			}
+		}
+		else
+		{
+			Fl_Group *group = new Fl_Group(0, 0, 1024, 2048);
+			group->hide();
+			cJSON *camera_item = NULL;
+			cJSON *camera_items = json_parse_array(json, "Camera");
+			if(camera_items != NULL)
+			{
+				Fl_Pack *pack = my_window->camera_pack;
+				ClearPack(group, pack);
+				cJSON_ArrayForEach(camera_item, camera_items)
+				{
+					if(camera_item->valuestring != NULL)
+					{
+						char *camera = camera_item->valuestring;
+						AddToPack(pack, camera);
+					}
+				}
+			}
+			cJSON *audio_item = NULL;
+			cJSON *audio_items = json_parse_array(json, "Audio");
+			if(audio_items != NULL)
+			{
+				Fl_Pack *pack = my_window->audio_pack;
+				ClearPack(group, pack);
+				cJSON_ArrayForEach(audio_item, audio_items)
+				{
+					if(audio_item->valuestring != NULL)
+					{
+						char *audio = audio_item->valuestring;
+						AddToPack(pack, audio);
+					}
+				}
+			}
+			cJSON *system_item = NULL;
+			cJSON *system_items = json_parse_array(json, "System");
+			if(system_items != NULL)
+			{
+				Fl_Pack *pack = my_window->system_pack;
+				ClearPack(group, pack);
+				cJSON_ArrayForEach(system_item, system_items)
+				{
+					if(system_item->valuestring != NULL)
+					{
+						char *system = system_item->valuestring;
+						AddToPack(pack, system);
+					}
+				}
+			}
+		}
+		free(buf);
+	}
+}
+
+void	save_one_section(FILE *fp, Fl_Pack *pack, char *name, int final)
+{
+	int cnt = 0;
+	fprintf(fp, "\t\"%s\": [", name);
+	for(int loop = 0;loop < pack->children();loop++)
+	{
+		Fl_Widget *chld = pack->child(loop);
+		if(chld != NULL)
+		{
+			char *lbl = (char *)chld->label();
+			if(lbl != NULL)
+			{
+				if(cnt > 0)
+				{
+					fprintf(fp, ",");
+				}
+				fprintf(fp, "\n\t\t\"%s\"", lbl);
+				cnt++;
+			}
+		}
+	}
+	if(final == 0)
+	{
+		fprintf(fp, "\n\t],\n");
+	}
+	else
+	{
+		fprintf(fp, "\n\t]\n");
+	}
+}
+
+void	MainMenu::SaveOrder(char *filename)
+{
+	FILE *fp = fopen(filename, "w");
+	if(fp != NULL)
+	{
+		fprintf(fp, "{\n");
+		save_one_section(fp, my_window->camera_pack, "Camera", 0);
+		save_one_section(fp, my_window->audio_pack, "Audio", 0);
+		save_one_section(fp, my_window->system_pack, "System", 1);
+		fprintf(fp, "}\n");
+		fclose(fp);
 	}
 }
 
@@ -41729,7 +42212,7 @@ void	source_select_image_button_cb(Fl_Widget *w, void *v)
 void	source_select_cols_and_rows_cb(Fl_Widget *w, void *v)
 {
 	SourceSelectWindow *ssw = (SourceSelectWindow *)v;
-	Fl_Int_Input *in = (Fl_Int_Input *)w;
+	IntInput *in = (IntInput *)w;
 	char *val = (char *)in->value();
 	int nn = atoi(val);
 	if(nn > 0)
@@ -41764,7 +42247,7 @@ int	loop;
 	if(col_lock == -1)
 	{
 		cols_nn = 2;
-		cols = new Fl_Int_Input(100, new_yp + 14, 60, 20, "Columns");
+		cols = new IntInput(100, new_yp + 14, 60, 20, "Columns");
 		cols->color(BLACK);
 		cols->textcolor(WHITE);
 		cols->textsize(11);
@@ -41782,7 +42265,7 @@ int	loop;
 	if(row_lock == -1)
 	{
 		rows_nn = 2;
-		rows = new Fl_Int_Input(280, new_yp + 14, 60, 20, "Rows");
+		rows = new IntInput(280, new_yp + 14, 60, 20, "Rows");
 		rows->color(BLACK);
 		rows->textcolor(WHITE);
 		rows->textsize(11);
@@ -41807,7 +42290,7 @@ int	loop;
 	pack->end();
 	scroll->end();
 
-	MyButton *accept = new MyButton(my_window, 100, h() - 40, 80, 20, "Accept");
+	accept = new MyButton(my_window, 100, h() - 40, 80, 20, "Accept");
 	accept->box(FL_FLAT_BOX);
 	accept->color(BLACK);
 	accept->labelcolor(YELLOW);
@@ -41815,8 +42298,9 @@ int	loop;
 	accept->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
 	accept->copy_tooltip("Accept the currently selected sources and close");
 	accept->callback(source_select_accept_cb, this);
+	accept->hide();
 
-	MyButton *cancel = new MyButton(my_window, 240, h() - 40, 80, 20, "Cancel");
+	cancel = new MyButton(my_window, 240, h() - 40, 80, 20, "Cancel");
 	cancel->box(FL_FLAT_BOX);
 	cancel->color(BLACK);
 	cancel->labelcolor(YELLOW);
@@ -41855,12 +42339,13 @@ int	outer, inner;
 	if((cols_nn > 0) && (rows_nn > 0))
 	{
 		fl_color(WHITE);
-		int xx = (w() / 2) - 50;
+		int xx = (w() / 2) - 150;
 		int yy = 60 + vertical_offset;
-		fl_rect(xx, yy, 100, 100);
-		int x_sz = 100 / cols_nn;
+		fl_rect(xx, yy, 300, 100);
+		int x_sz = 300 / cols_nn;
 		int y_sz = 100 / rows_nn;
 		int y_inc = 0;
+		int cnt = 0;
 		for(outer = 0;outer < rows_nn;outer++)
 		{
 			int x_inc = 0;
@@ -41873,18 +42358,54 @@ int	outer, inner;
 					if(list[nn] != NULL)
 					{
 						fl_color(GRAY);
+						fl_rectf(xx + x_inc + 2, yy + y_inc + 2, x_sz - 4, y_sz - 4);
 					}
 					if((outer == cur_row) && (inner == cur_col))
 					{
 						fl_color(WHITE);
+						fl_rect(xx + x_inc + 10, yy + y_inc + 10, x_sz - 20, y_sz - 20);
 					}
-					fl_rectf(xx + x_inc + 2, yy + y_inc + 2, x_sz - 4, y_sz - 4);
+					if(list[nn] != NULL)
+					{
+						Camera *use_cam = NULL;
+						for(int loop = 0;loop < my_window->source_cnt;loop++)
+						{
+							Camera *cam = my_window->camera[loop];
+							if(strcmp(list[nn], cam->alias) == 0)
+							{
+								use_cam = my_window->camera[loop];
+							}
+						}
+						if(use_cam != NULL)
+						{
+							use_cam->Capture();
+							Mat local_mat = use_cam->mat;
+							if(!local_mat.empty())
+							{
+								Mat new_mat;
+								cv::resize(local_mat, new_mat, cv::Size(x_sz - 4, y_sz - 4));
+								fl_draw_image(new_mat.ptr(), xx + x_inc + 2, yy + y_inc + 2, x_sz - 4, y_sz - 4, new_mat.channels());
+							}	
+						}
+						fl_color(WHITE);
+						fl_font(FL_HELVETICA, 7);
+						fl_draw(list[nn], xx + x_inc + 2, yy + y_inc + 2, x_sz - 4, y_sz - 4, FL_ALIGN_CENTER);
+						cnt++;
+					}
 					fl_color(WHITE);
 					fl_rect(xx + x_inc, yy + y_inc, x_sz, y_sz);
 				}
 				x_inc += x_sz;
 			}
 			y_inc += y_sz;
+		}
+		if(cnt > 1)
+		{
+			accept->show();
+		}
+		else
+		{
+			accept->hide();
 		}
 	}
 }
@@ -42361,6 +42882,30 @@ void	review_muxed_button_cb(Fl_Widget *w, void *v)
 	}
 }
 
+void	select_a_video_file(Fl_Widget *w, void *v)
+{
+char	filename[4096];
+
+	MyWin *win = (MyWin *)v;
+	int nn = my_file_chooser(win, "Select a video file", "*.*", "./", filename);
+	if(nn > 0)
+	{
+		win->PlayVideoFile(filename);
+	}
+}
+
+void	MyWin::PlayVideoFile(char *filename)
+{
+char	*list[2];
+
+	list[0] = filename;
+	list[1] = NULL;
+	VideoWindow *vw = new VideoWindow(this, list, 800, 500, "VideoWindow");
+	vw->set_non_modal();
+	vw->show();
+	vw->Play();
+}
+
 int	MyWin::CheckIfReviewFootage()
 {
 	int rr = 0;
@@ -42581,6 +43126,7 @@ void	exit_warning_cb(void *v)
 
 void	MyWin::CloseAllWindows()
 {
+	AuxWindow(NULL);
 	if(alert_window != NULL)
 	{
 		alert_window->hide();
@@ -42853,16 +43399,11 @@ int	loop;
 	MyWin *win = (MyWin *)v;
 	if(win->split == 0)
 	{
-		win->current_fps_window->showing = 0;
-		for(loop = 0;loop < 128;loop++)
-		{
-			win->thumbnail[loop]->hide();
-		}
-		win->split = 1;
+		win->Split();
 	}
 	else
 	{
-		win->split = 0;
+		win->UnSplit();
 	}
 }
 
@@ -43005,6 +43546,7 @@ void	native_resolution_button_cb(Fl_Widget *w, void *v)
 
 			cam->display_width = cam->old_display_width;
 			cam->display_height = cam->old_display_height;
+			cam->DisplayScaleFactor();
 		}
 		else
 		{
@@ -43015,6 +43557,7 @@ void	native_resolution_button_cb(Fl_Widget *w, void *v)
 			cam->old_display_height = cam->display_height;
 			cam->display_width = cam->width;
 			cam->display_height = cam->height;
+			cam->DisplayScaleFactor();
 		}
 		win->redraw();
 	}
@@ -43414,6 +43957,10 @@ int		loop;
 	{
 		override_button->copy_label("Override");
 		override_button->show();
+	}
+	else
+	{
+		override_button->hide();
 	}
 	Camera *recording_now = RecordingCamera();
 	if((recording_now != NULL) && (follow_mode != FOLLOW_MODE_NONE))
@@ -43960,6 +44507,7 @@ MyWin::MyWin(
 	, int display_ww
 	, int display_hh
 	, int in_fps
+	, char *use_output_file
 	, int in_load_state
 	, double in_interval
 	, int in_split
@@ -44041,6 +44589,7 @@ MyWin::MyWin(
 	, int use_threaded_object_recognition
 	, int use_tiled_object_recognition
 	, int use_hide_menu
+	, char *use_menu_order
 	, char *lbl)
 	: Fl_Double_Window(in_w, in_h, lbl)
 {
@@ -44053,6 +44602,12 @@ char	update_buf[256];
 	no_exit = 0;
 	fast_start = use_fast_start;
 	hide_menu = use_hide_menu;
+	default_setup_filename = "default_setup.json";
+	menu_order = NULL;
+	if(use_menu_order != NULL)
+	{
+		menu_order = strdup(use_menu_order);
+	}
 	InitializeVariables();
 
 	resizable(this);
@@ -44089,6 +44644,11 @@ char	update_buf[256];
 	button_priority = 2;
 
 	video_count = 0;
+	output_filename = NULL;
+	if(use_output_file != NULL)
+	{
+		output_filename = strdup(use_output_file);
+	}
 	strcpy(last_used_filename, "");
 	strcpy(mux_format, "mov");
 	if(in_mux_format != NULL)
@@ -44377,6 +44937,8 @@ char	update_buf[256];
 		ReadGUISettings();
 	}
 	rubberband_mode = SCROLL_MODE;
+	rubberband_record = 0;
+	rubberband_drag_mode = 0;
 	rubberband_x = -1;
 	rubberband_y = -1;
 	rubberband_w = -1;
@@ -44741,7 +45303,7 @@ char	update_buf[256];
 		}
 		audio = 1;
 	}
-	BuildMainMenu(pulse_audio_sinks, pulse_audio_sources);
+	BuildMainMenu(pulse_audio_sinks, pulse_audio_sources, menu_order);
 
 	start_win->Update("Initialize video thumbnails");
 	int nxx = 0;
@@ -44881,6 +45443,16 @@ int	loop;
 	mux_test_sudden_stop = 1;
 	testing_mux = 0;
 	Shutdown();
+	if(menu_order != NULL)
+	{
+		free(menu_order);
+		menu_order = NULL;
+	}
+	if(output_filename != NULL)
+	{
+		free(output_filename);
+		output_filename = NULL;
+	}
 	if(python_filter_code != NULL)
 	{
 		free(python_filter_code);
@@ -45154,6 +45726,17 @@ int	loop;
 		}
 	}
 	available_audio_cnt = 0;
+}
+
+void	MyWin::AuxWindow(Fl_Window *win)
+{
+	if(aux_window != NULL)
+	{
+		aux_window->hide();
+		Fl::delete_widget(aux_window);
+		aux_window = NULL;
+	}
+	aux_window = win;
 }
 
 void	MyWin::RestackPTZWindows()
@@ -45554,6 +46137,71 @@ char	*Camera::TypeString()
 	return(str);
 }
 
+int		Camera::CheckLegalResolution(int in_width, int in_height)
+{
+	int rr = 1;
+	if(type == CAMERA_TYPE_CAMERA)
+	{
+		if(ndi_capture == 0)
+		{
+			rr = 0;
+			int fd = open(path, O_RDWR);
+			if(fd != -1) 
+			{
+				struct v4l2_capability cap;
+				if(ioctl(fd, VIDIOC_QUERYCAP, &cap) != -1) 
+				{
+					v4l2_fmtdesc fmt;
+					memset(&fmt, 0, sizeof(fmt));
+					fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; 
+					while(ioctl(fd, VIDIOC_ENUM_FMT, &fmt) == 0) 
+					{
+						v4l2_frmsizeenum frmsize;
+						memset(&frmsize, 0, sizeof(frmsize));
+						frmsize.pixel_format = fmt.pixelformat;
+						while(ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize) == 0) 
+						{
+							if(frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) 
+							{
+								if((in_width == frmsize.discrete.width) && (in_height == frmsize.discrete.height))
+								{
+									rr = 1;
+								}
+								v4l2_frmivalenum frmival;
+								memset(&frmival, 0, sizeof(frmival));
+								frmival.pixel_format = fmt.pixelformat;
+								frmival.width = frmsize.discrete.width;
+								frmival.height = frmsize.discrete.height;
+							} 
+							else 
+							{
+								rr = 1;
+							}
+							frmsize.index++;
+						}
+						fmt.index++;
+					}
+				}
+				close(fd);
+			}
+		}
+		else
+		{
+			if(ndi_recv != NULL)
+			{
+				if(NDILib != NULL)
+				{
+					if((in_width == ndi_width) && (in_height == ndi_height))
+					{
+						rr = 1;
+					}
+				}
+			}
+		}
+	}
+	return(rr);
+}
+
 void	Camera::Info()
 {
 void	out_function(char *ptr);
@@ -45926,6 +46574,7 @@ int	outer, inner;
 	resize_grp = NULL;
 	recording_camera = NULL;
 	tested_mux = NULL;
+	aux_window = NULL;
 	error_message = NULL;
 	specify_url_window = NULL;
 	specify_irc_window = NULL;
@@ -45978,6 +46627,7 @@ int	outer, inner;
 	show_motion_debug_button = NULL;
 	review_button = NULL;
 	review_muxed_button = NULL;
+	play_video_file_button = NULL;
 	snapshot_button = NULL;
 	resize_detail_button = NULL;
 	zoom_box_button = NULL;
@@ -46077,6 +46727,8 @@ int	outer, inner;
 	exit_warning = 0;
 	last_button = NULL;
 	threading_object_recognition = 0;
+	default_camera = NULL;
+	default_microphone = NULL;
 	for(loop = 0;loop < 100000;loop++)
 	{
 		key[loop] = 0;
@@ -46353,6 +47005,8 @@ int	outer, inner;
 	dragging_thumb_x = 0;
 	dragging_thumb_y = 0;
 	immediate_cnt = 0;
+	rubberband_record = 0;
+	rubberband_drag_mode = 0;
 	rubberband_x = 0;
 	rubberband_y = 0;
 	rubberband_w = 0;
@@ -46488,6 +47142,8 @@ int	outer, inner;
 	power_all = 0;
 	bad_codec_combo_cnt = 0;
 	good_codec_combo_cnt = 0;
+	test_mux_force_fps = 0;
+	restore_drawing_window = 0;
 }
 
 void	MyWin::TestMuxPerform(char *container, char *filename, char *extension, int video_id, int audio_id)
@@ -46502,12 +47158,23 @@ void	MyWin::TestMuxPerform(char *container, char *filename, char *extension, int
 	strcpy(use_extension, extension);
 	use_video_codec = (AVCodecID)video_id;
 	use_audio_codec = (AVCodecID)audio_id;
+	if(tested_mux != NULL)
+	{
+		tested_mux->fast_close = 1;
+	}
 	reset_button_cb(NULL, this);
+	if(tested_mux != NULL)
+	{
+		tested_mux->fast_close = 0;
+	}
 	testing_mux = 1;
 	if(cam != NULL)
 	{
 		cam->record_error = 0;
 	}
+	test_mux_start_time = precise_time();
+	test_mux_actual_time = 0.0;
+	test_mux_force_fps = 512;
 	record_button_cb(NULL, this);
 	if(cam != NULL)
 	{
@@ -46539,16 +47206,15 @@ void	out_function(char *ptr);
 		double score = -3.0;
 		while(tested_mux->in_simple_record == 1)
 		{
-			usleep(1000);
+			usleep(100);
 		}
-		tested_mux->video_frames = 0;
 		char video_result[4096];
 		char audio_result[4096];
 		my_find_codec_by_id(0, use_video_codec, video_result);
 		my_find_codec_by_id(1, use_audio_codec, audio_result);
-		if(tested_mux->average_time_to_write_frame > 0.0)
+		if(test_mux_actual_time > 0.0)
 		{
-			score = 1.0 / tested_mux->average_time_to_write_frame;
+			score = (double)tested_mux->video_frames / test_mux_actual_time;
 		}
 		if((score < minimum_fps) || (score == 0.0))
 		{
@@ -46556,24 +47222,25 @@ void	out_function(char *ptr);
 			int good_audio = CheckGoodName(CHECK_TYPE_AUDIO, audio_result);
 			if((good_audio != 1) && (good_video != 1))
 			{
-				sprintf(buf, "@b%-16s\t%-16s %-16s %f\n", use_extension, video_result, audio_result, score); fflush(stdout);
+				sprintf(buf, "@b%-16s\t%-16s %-16s %02.2f (%d)\n", use_extension, video_result, audio_result, score, tested_mux->video_frames);
 				out_function(buf);
 				bad_codec_combo[bad_codec_combo_cnt] = new CodecCombo(use_container, use_video_codec, use_audio_codec, score);
 				bad_codec_combo_cnt++;
 			}
 			else
 			{
-				sprintf(buf, "%-16s\t%-16s %-16s %f\n", use_extension, video_result, audio_result, score); fflush(stdout);
+				sprintf(buf, "%-16s\t%-16s %-16s %02.2f (%d)\n", use_extension, video_result, audio_result, score, tested_mux->video_frames);
 				out_function(buf);
 			}
 		}
 		else
 		{
-			sprintf(buf, "%-16s\t%-16s %-16s %f\n", use_extension, video_result, audio_result, score); fflush(stdout);
+			sprintf(buf, "%-16s\t%-16s %-16s %02.2f (%d)\n", use_extension, video_result, audio_result, score, tested_mux->video_frames);
 			out_function(buf);
 			good_codec_combo[good_codec_combo_cnt] = new CodecCombo(use_container, use_video_codec, use_audio_codec, score);
 			good_codec_combo_cnt++;
 		}
+		tested_mux->video_frames = 0;
 	}
 	else
 	{
@@ -46909,6 +47576,10 @@ int	inner;
 	fprintf(fp, "\t\"snapshot entire desktop\": %d,\n", snapshot_entire_desktop);
 	fprintf(fp, "\t\"snapshot main window\": %d,\n", snapshot_main_window);
 	fprintf(fp, "\t\"last used filename\": \"%s\",\n", DQ(last_used_filename));
+	if(menu_order != NULL)
+	{
+		fprintf(fp, "\t\"menu order\": \"%s\",\n", DQ(menu_order));
+	}
 	fprintf(fp, "\t\"transparent interface\": %d,\n", transparent_interface);
 	fprintf(fp, "\t\"status color r\": %d,\n", status_color_r);
 	fprintf(fp, "\t\"status color g\": %d,\n", status_color_g);
@@ -46918,6 +47589,7 @@ int	inner;
 	fprintf(fp, "\t\"ndi streaming\": %d,\n", ndi_streaming);
 	fprintf(fp, "\t\"ndi send video format\": %d,\n", ndi_send_video_format);
 	fprintf(fp, "\t\"joystick path\": \"%s\",\n", DQ(joystick_path));
+	fprintf(fp, "\t\"crosshair mode\": %d,\n", crosshair_mode);
 	if(python_filter_function != NULL)
 	{
 		if(python_filter_code != NULL)
@@ -47148,6 +47820,10 @@ int	inner;
 	fprintf(fp, "\t\"audio thumbnail cnt\": %d,\n", audio_thumbnail_cnt);
 	fprintf(fp, "\t\"visible debug\": %d,\n", visible_debug);
 	fprintf(fp, "\t\"filename\": \"%s\",\n", DQ(filename));
+	if(output_filename != NULL)
+	{
+		fprintf(fp, "\t\"output filename\": \"%s\",\n", DQ(output_filename));
+	}
 	fprintf(fp, "\t\"interest cnt\": %d,\n", interest_cnt);
 	if(interest_cnt > 0)
 	{
@@ -47489,6 +48165,7 @@ int		outer;
 	success = json_parse_int(json, "display video", display_video);
 	success = json_parse_int(json, "command set", command_set);
 	success = json_parse_int(json, "button priority", button_priority);
+	success = json_parse_int(json, "crosshair mode", crosshair_mode);
 	success = json_parse_int(json, "record on start", record_on_start);
 	char *str = json_parse_string(json, "record on start alias");
 	if(str != NULL)
@@ -47523,6 +48200,18 @@ int		outer;
 	{
 		strcpy(last_used_filename, str);
 	}
+	str = json_parse_string(json, "menu order");
+	if(str != NULL)
+	{
+		if(menu_order != NULL)
+		{
+			free(menu_order);
+			menu_order = NULL;
+		}
+		menu_order = strdup(str);
+		button_group->LoadOrder(menu_order);
+	}
+	button_group->SaveOrder("current_menu_order.json");
 	char *local_python_filter_code = json_parse_string(json, "python filter output code");
 	if(local_python_filter_code != NULL)
 	{
@@ -47860,6 +48549,16 @@ int		outer;
 	{
 		strcpy(filename, str);
 	}
+	str = json_parse_string(json, "output filename");
+	if(str != NULL)
+	{
+		if(output_filename != NULL)
+		{
+			free(output_filename);
+			output_filename = NULL;
+		}
+		output_filename = strdup(str);
+	}
 	success = json_parse_int(json, "interest cnt", interest_cnt);
 	if(interest_cnt > 0)
 	{
@@ -48175,6 +48874,8 @@ int		loop;
 	{
 		char *name = json_parse_string(json, "name");
 		char *alias = json_parse_string(json, "alias");
+		int hidden = 0;
+		json_parse_int(json, "hidden", hidden);
 		char *use_alias = name;
 		if(alias != NULL)
 		{
@@ -48198,6 +48899,7 @@ int		loop;
 				PulseAudioButton *b = AddAudioSource(0, strdup(name), strdup(use_alias));
 				if(b != NULL)
 				{
+					b->hidden = hidden;
 					if(strcmp(name, default_name) == 0)
 					{
 						b->select_button->value(1);
@@ -48347,6 +49049,7 @@ int		loop;
 			}
 			success = json_parse_int(name, "note placement", cam->note_placement);
 			success = json_parse_int(name, "note font size", cam->note_font_size);
+			success = json_parse_int(name, "hidden", cam->hidden);
 			char *local_python_filter_code = json_parse_string(name, "python filter code");
 			if(local_python_filter_code != NULL)
 			{
@@ -48692,21 +49395,32 @@ Immediate	*MyWin::ParseJSONImmediate(cJSON *immediate, Camera *cam)
 {
 int im_type;
 int immediate_type;
+
 int sx;
 int sy;
 int sw;
 int sh;
 
+double dx;
+double dy;
+double dw;
+double dh;
+
 	Immediate *out = NULL;
 	int success = json_parse_int(immediate, "im type", im_type);
 	success = json_parse_int(immediate, "immediate_type", immediate_type);
-	success = json_parse_int(immediate, "sx", sx);
-	success = json_parse_int(immediate, "sy", sy);
-	success = json_parse_int(immediate, "sw", sw);
-	success = json_parse_int(immediate, "sh", sh);
+	success = json_parse_double(immediate, "sx", dx);
+	success = json_parse_double(immediate, "sy", dy);
+	success = json_parse_double(immediate, "sw", dw);
+	success = json_parse_double(immediate, "sh", dh);
+	sx = (dx * cam->display_width) + cam->image_sx;
+	sy = (dy * cam->display_height) + cam->image_sy;
+	sw = dw * cam->display_width;
+	sh = dh * cam->display_height;
 
 	ImmediateDrawingWindow *idw = immediate_drawing_window;
 	Immediate *im = new Immediate(this, cam, sx, sy, sw, sh);
+	im->im_type = im_type;
 	out = im;
 
 	im->idw = idw;
@@ -48767,13 +49481,29 @@ int sh;
 	}
 	success = json_parse_int(immediate, "draw it", im->draw_it);
 	success = json_parse_int(immediate, "immediate type", im->immediate_type);
-	success = json_parse_int(immediate, "initial x", im->initial_x);
-	success = json_parse_int(immediate, "initial y", im->initial_y);
+
+	double initial_x;
+	double initial_y;
+	success = json_parse_double(immediate, "initial x", initial_x);
+	success = json_parse_double(immediate, "initial y", initial_y);
+	im->initial_x = (initial_x * cam->display_width) + cam->image_sx;
+	im->initial_y = (initial_y * cam->display_height) + cam->image_sy;
+
 	success = json_parse_int(immediate, "layer", im->layer);
-	success = json_parse_int(immediate, "crop x", im->crop_x);
-	success = json_parse_int(immediate, "crop y", im->crop_y);
-	success = json_parse_int(immediate, "crop w", im->crop_w);
-	success = json_parse_int(immediate, "crop h", im->crop_h);
+
+	double crop_x;
+	double crop_y;
+	double crop_w;
+	double crop_h;
+	success = json_parse_double(immediate, "crop x", crop_x);
+	success = json_parse_double(immediate, "crop y", crop_y);
+	success = json_parse_double(immediate, "crop w", crop_w);
+	success = json_parse_double(immediate, "crop h", crop_h);
+	im->crop_x = (crop_x * cam->display_width) + cam->image_sx;
+	im->crop_y = (crop_y * cam->display_height) + cam->image_sy;
+	im->crop_w = crop_w * cam->display_width;
+	im->crop_h = crop_h * cam->display_height;
+
 	success = json_parse_double(immediate, "overall alpha", im->overall_alpha);
 	success = json_parse_int(immediate, "use as mask", im->use_as_mask);
 	if(im->text != NULL)
@@ -48793,12 +49523,26 @@ int sh;
 		{
 			if(anim_cnt < 1024)
 			{
+				im->crop_x = (crop_x * cam->display_width) + cam->image_sx;
+				im->crop_y = (crop_y * cam->display_height) + cam->image_sy;
+				im->crop_w = crop_w * cam->display_width;
+				im->crop_h = crop_h * cam->display_height;
+
 				im->anim[anim_cnt] = new ImAnim();
 				success = json_parse_int(anim, "frame", im->anim[anim_cnt]->frame);
-				success = json_parse_double(anim, "xx", im->anim[anim_cnt]->xx);
-				success = json_parse_double(anim, "yy", im->anim[anim_cnt]->yy);
-				success = json_parse_double(anim, "ww", im->anim[anim_cnt]->ww);
-				success = json_parse_double(anim, "hh", im->anim[anim_cnt]->hh);
+				double anim_xx;
+				double anim_yy;
+				double anim_ww;
+				double anim_hh;
+				success = json_parse_double(anim, "xx", anim_xx);
+				success = json_parse_double(anim, "yy", anim_yy);
+				success = json_parse_double(anim, "ww", anim_ww);
+				success = json_parse_double(anim, "hh", anim_hh);
+				im->anim[anim_cnt]->xx = (anim_xx * cam->display_width) + cam->image_sx;
+				im->anim[anim_cnt]->yy = (anim_yy * cam->display_height) + cam->image_sy;
+				im->anim[anim_cnt]->ww = anim_ww * cam->display_width;
+				im->anim[anim_cnt]->hh = anim_hh * cam->display_height;
+
 				success = json_parse_double(anim, "angle", im->anim[anim_cnt]->angle);
 				success = json_parse_double(anim, "red", im->anim[anim_cnt]->red);
 				success = json_parse_double(anim, "green", im->anim[anim_cnt]->green);
@@ -48826,29 +49570,41 @@ int sh;
 		{
 			strcpy(def->freehand_filename, freehand_filename);
 		}
-		success = json_parse_int(immediate, "width", def->width);
+		double use_width;
+		success = json_parse_double(immediate, "width", use_width);
+		def->width = use_width * cam->display_width;
+
 		success = json_parse_int(immediate, "red", def->red);
 		success = json_parse_int(immediate, "green", def->green);
 		success = json_parse_int(immediate, "blue", def->blue);
 		success = json_parse_int(immediate, "alpha", def->alpha);
 		success = json_parse_int(immediate, "style", def->style);
 		success = json_parse_int(immediate, "shape", def->shape);
-		success = json_parse_int(immediate, "use size", def->use_size);
+
+		double use_size;
+		success = json_parse_double(immediate, "use size", use_size);
+		def->use_size = use_size * cam->display_width;
+
 		success = json_parse_int(immediate, "filled", def->filled);
+		success = json_parse_int(immediate, "erase", def->erase);
 		success = json_parse_int(immediate, "square", def->square);
 		success = json_parse_int(immediate, "rounded", def->rounded);
 		success = json_parse_double(immediate, "rounding radius", def->rounding_radius);
 		success = json_parse_int(immediate, "box type", def->box_type);
 		success = json_parse_int(immediate, "normalized", def->normalized);
-		success = json_parse_int(immediate, "center x", def->center_x);
-		success = json_parse_int(immediate, "center y", def->center_y);
-		success = json_parse_int(immediate, "point cnt", def->cnt);
+
+		double center_x;
+		double center_y;
+		success = json_parse_double(immediate, "center x", center_x);
+		success = json_parse_double(immediate, "center y", center_y);
+		def->center_x = (center_x * cam->display_width) + cam->image_sx;
+		def->center_y = (center_y * cam->display_height) + cam->image_sy;
 
 		im->anim_red = def->red;
 		im->anim_green = def->green;
 		im->anim_blue = def->blue;
 		im->anim_alpha = def->alpha;
-
+		success = json_parse_int(immediate, "point cnt", def->cnt);
 		cJSON *point = NULL;
 		cJSON *points = json_parse_array(immediate, "Point");
 		if(points != NULL)
@@ -48861,8 +49617,12 @@ int sh;
 			{
 				if(pt_cnt < 128)
 				{
-					success = json_parse_int(point, "xx", def->xx[pt_cnt]);
-					success = json_parse_int(point, "yy", def->yy[pt_cnt]);
+					double xx;
+					double yy;
+					success = json_parse_double(point, "xx", xx);
+					success = json_parse_double(point, "yy", yy);
+					def->xx[pt_cnt] = xx * cam->display_width;
+					def->yy[pt_cnt] = yy * cam->display_height;
 					success = json_parse_int(point, "pt type", def->pt_type[pt_cnt]);
 					pt_cnt++;
 				}
@@ -49058,7 +49818,13 @@ ImageWindow	*MyWin::ParseJSONImageWindow(cJSON *image_window, Camera *cam, int c
 			success = json_parse_double(image_window, "dy", dy);
 			success = json_parse_double(image_window, "dw", dw);
 			success = json_parse_double(image_window, "dh", dh);
-			ImageWindow *iw = new ImageWindow(cnt, this, source_cam, cam, dx, dy, dw, dh);
+
+			double use_x = (dx * cam->display_width) + cam->image_sx;
+			double use_y = (dy * cam->display_height) + cam->image_sy;
+			double use_w = dw * cam->display_width;
+			double use_h = dh * cam->display_height;
+			ImageWindow *iw = new ImageWindow(cnt, this, source_cam, cam, use_x, use_y, use_w, use_h);
+
 			out = iw;
 			iw->camera = source_cam;
 			iw->dest_camera = cam;
@@ -49068,19 +49834,53 @@ ImageWindow	*MyWin::ParseJSONImageWindow(cJSON *image_window, Camera *cam, int c
 			success = json_parse_int(image_window, "transform", iw->transform);
 			success = json_parse_double(image_window, "width", iw->width);
 			success = json_parse_double(image_window, "height", iw->height);
-			success = json_parse_double(image_window, "orig w", iw->orig_w);
-			success = json_parse_double(image_window, "orig h", iw->orig_h);
+
+			double use_width = iw->width * cam->display_width;
+			double use_height = iw->height * cam->display_height;
+			iw->width = use_width;
+			iw->height = use_height;
+
+			double orig_w;
+			double orig_h;
+			success = json_parse_double(image_window, "orig w", orig_w);
+			success = json_parse_double(image_window, "orig h", orig_h);
+
+			double use_orig_w = orig_w * cam->display_width;
+			double use_orig_h = orig_h * cam->display_height;
+			iw->orig_w = use_orig_w;
+			iw->orig_h = use_orig_h;
+
 			success = json_parse_int(image_window, "buttonize", iw->buttonize);
 			success = json_parse_int(image_window, "buttonized x", iw->buttonized_x);
 			success = json_parse_int(image_window, "buttonized y", iw->buttonized_y);
 			success = json_parse_int(image_window, "buttonized w", iw->buttonized_w);
 			success = json_parse_int(image_window, "buttonized h", iw->buttonized_h);
-			success = json_parse_int(image_window, "crop x", iw->crop_x);
-			success = json_parse_int(image_window, "crop y", iw->crop_y);
-			success = json_parse_int(image_window, "crop w", iw->crop_w);
-			success = json_parse_int(image_window, "crop h", iw->crop_h);
-			success = json_parse_int(image_window, "trim x", iw->trim_x);
-			success = json_parse_int(image_window, "trim y", iw->trim_y);
+
+			double crop_x;
+			double crop_y;
+			double crop_w;
+			double crop_h;
+			double trim_x;
+			double trim_y;
+			success = json_parse_double(image_window, "crop x", crop_x);
+			success = json_parse_double(image_window, "crop y", crop_y);
+			success = json_parse_double(image_window, "crop w", crop_w);
+			success = json_parse_double(image_window, "crop h", crop_h);
+			success = json_parse_double(image_window, "trim x", trim_x);
+			success = json_parse_double(image_window, "trim y", trim_y);
+			double use_crop_x = (crop_x * cam->display_width) + cam->image_sx;
+			double use_crop_y = (crop_y * cam->display_height) + cam->image_sy;
+			double use_crop_w = crop_w * cam->display_width;
+			double use_crop_h = crop_h * cam->display_height;
+			double use_trim_x = (trim_x * cam->display_width) + cam->image_sx;
+			double use_trim_y = (trim_y * cam->display_height) + cam->image_sy;
+			iw->crop_x = use_crop_x;
+			iw->crop_y = use_crop_y;
+			iw->crop_w = use_crop_w;
+			iw->crop_h = use_crop_x;
+			iw->trim_x = use_trim_x;
+			iw->trim_y = use_trim_y;
+
 			success = json_parse_double(image_window, "overall alpha", iw->overall_alpha);
 			success = json_parse_int(image_window, "use as mask", iw->use_as_mask);
 			success = json_parse_double(image_window, "angle", iw->angle);
@@ -49229,6 +50029,7 @@ void	sliding_element_close_cb(void *v);
 			cam->StopDetectingObjects();
 		}
 	}
+	AuxWindow(NULL);
 	Fl::remove_timeout(sliding_element_close_cb);
 	Fl::remove_timeout(my_window_cb);
 	if(video_window != NULL)
@@ -50019,6 +50820,7 @@ void	set_output_accept_cb(Fl_Widget *w, void *v)
 	EditOutputWindow *win = (EditOutputWindow *)v;
 	win->Debrief();
 	win->hide();
+	win->my_window->SaveOutputPathList("output_paths.txt");
 	reset_button_cb(NULL, win->my_window);
 }
 
@@ -51865,6 +52667,7 @@ static char	buf2[256];
 			}
 			sprintf(buf1, "%05d", win->ptz_focus_reading);
 			win->ptz_focus_value_label->copy_label(buf1);
+			win->ptz_absolute_focus->value(win->ptz_zoom_reading);
 		}
 	}
 	if(acquire_zoom == 1)
@@ -51881,6 +52684,7 @@ static char	buf2[256];
 			}
 			sprintf(buf2, "%05d", win->ptz_zoom_reading);
 			win->ptz_zoom_value_label->copy_label(buf2);
+			win->ptz_absolute_zoom->value(win->ptz_zoom_reading);
 		}
 	}
 	if(acquire_position == 1)
@@ -51893,9 +52697,15 @@ static char	buf2[256];
 			int cnt = 0;
 			while((nn == -1) && (cnt < 10))
 			{
-				nn = (char)VISCA_get_pantilt_position(win->ptz_current_interface, win->ptz_current_camera, &win->ptz_pan_reading, &win->ptz_tilt_reading);
+				int16_t pan16 = 0;
+				int16_t tilt16 = 0;
+				nn = (char)VISCA_get_pantilt_position(win->ptz_current_interface, win->ptz_current_camera, &pan16, &tilt16);
+				win->ptz_pan_reading = (int)pan16;
+				win->ptz_tilt_reading = (int)tilt16;
 				cnt++;
 			}
+			win->ptz_absolute_pan->value((double)win->ptz_pan_reading);
+			win->ptz_absolute_tilt->value((double)win->ptz_tilt_reading);
 		}
 	}
 	ptz_window[index]->UpdatePTZButtons();
@@ -52574,6 +53384,35 @@ void	MyWin::ScaleVideoDown()
 	}
 }
 
+void	MyWin::Split()
+{
+	current_fps_window->showing = 0;
+	for(int loop = 0;loop < 128;loop++)
+	{
+		thumbnail[loop]->hide();
+	}
+	if(immediate_drawing_window->visible())
+	{
+		immediate_drawing_window->hide();
+		restore_drawing_window = 1;
+	}
+	split = 1;
+}
+
+void	MyWin::UnSplit()
+{
+	split = 0;
+	if(restore_drawing_window == 1)
+	{
+		if(rubberband_mode == IM_DRAWING_MODE)
+		{
+			immediate_drawing_window->show();
+			im_drawing_mode = 1;
+		}
+		restore_drawing_window = 0;
+	}
+}
+
 int	MyWin::DisplaySplitSelection(int nn)
 {
 	int flag = 0;
@@ -52581,7 +53420,7 @@ int	MyWin::DisplaySplitSelection(int nn)
 	{
 		current_fps_window->showing = 1;
 		DisplayCamera(nn);
-		split = 0;
+		UnSplit();
 		flag = 1;
 	}
 	return(flag);
@@ -52868,10 +53707,10 @@ int		loop;
 		{
 			if((retain_commands == 0) || (retain_cameras == 0) || (retain_audio == 0) || (retain_ptz == 0))
 			{
-				retain_commands = 1;
-				retain_cameras = 1;
-				retain_audio = 1;
-				retain_ptz = 1;
+				retain_commands = PANEL_RETAIN;
+				retain_cameras = PANEL_RETAIN;
+				retain_audio = PANEL_RETAIN;
+				retain_ptz = PANEL_RETAIN;
 				Fl::add_timeout(0.0, show_all_elements_cb, this);
 			}
 			else
@@ -53070,6 +53909,11 @@ int		loop;
 		{
 			flag = DisplaySplitSelection(9);
 		}
+		else if((key == command_key[MY_KEY_EXIT]) && (!ctrl) && (!alt) && (!shift))
+		{
+			UnSplit();
+			flag = 1;
+		}
 	}
 	return(flag);
 }
@@ -53161,7 +54005,7 @@ int	loop;
 				if(no_go == 0)
 				{
 					DisplayCamera(position);
-					split = 0;
+					UnSplit();
 					flag = 1;
 				}
 			}
@@ -53981,44 +54825,47 @@ int	loop;
 				}
 				else if(Fl::event_button() == FL_MIDDLE_MOUSE)
 				{
-					ptz_middle_mouse++;
-					if(ptz_middle_mouse > PTZ_MIDDLE_MOUSE_TRANSPARENCY)
+					if(rubberband_mode != RUBBERBAND_MODE)
 					{
-						ptz_middle_mouse = PTZ_MIDDLE_MOUSE_DIGITAL_SCALING;
+						ptz_middle_mouse++;
+						if(ptz_middle_mouse > PTZ_MIDDLE_MOUSE_TRANSPARENCY)
+						{
+							ptz_middle_mouse = PTZ_MIDDLE_MOUSE_DIGITAL_SCALING;
+						}
+						if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOMING)
+						{
+							CenterMessage("Zoom", 100);
+							ptz_window[instance]->zoom_label->labelcolor(CYAN);
+							ptz_window[instance]->focus_label->labelcolor(YELLOW);
+							ptz_zoomer = 0;
+							ptz_window[instance]->ptz_zoomer_speed = 0;
+							ViscaCommand(instance, PTZ_ZOOM_STOP);
+						}
+						else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_FOCUS)
+						{
+							CenterMessage("Focus", 100);
+							ptz_window[instance]->zoom_label->labelcolor(YELLOW);
+							ptz_window[instance]->focus_label->labelcolor(CYAN);
+							ptz_zoomer = 0;
+							ptz_window[instance]->ptz_zoomer_speed = 0;
+							ViscaCommand(instance, PTZ_ZOOM_STOP);
+						}
+						else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOM_WITH_SPEED_CONTROL)
+						{
+							CenterMessage("Zoom with speed control", 100);
+							ptz_window[instance]->zoom_label->labelcolor(CYAN);
+							ptz_window[instance]->focus_label->labelcolor(YELLOW);
+						}
+						else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_TRANSPARENCY)
+						{
+							CenterMessage("Interface Transparency", 100);
+						}
+						else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_DIGITAL_SCALING)
+						{
+							CenterMessage("Digital Scaling", 100);
+						}
+						flag = 1;
 					}
-					if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOMING)
-					{
-						CenterMessage("Zoom", 100);
-						ptz_window[instance]->zoom_label->labelcolor(CYAN);
-						ptz_window[instance]->focus_label->labelcolor(YELLOW);
-						ptz_zoomer = 0;
-						ptz_window[instance]->ptz_zoomer_speed = 0;
-						ViscaCommand(instance, PTZ_ZOOM_STOP);
-					}
-					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_FOCUS)
-					{
-						CenterMessage("Focus", 100);
-						ptz_window[instance]->zoom_label->labelcolor(YELLOW);
-						ptz_window[instance]->focus_label->labelcolor(CYAN);
-						ptz_zoomer = 0;
-						ptz_window[instance]->ptz_zoomer_speed = 0;
-						ViscaCommand(instance, PTZ_ZOOM_STOP);
-					}
-					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_ZOOM_WITH_SPEED_CONTROL)
-					{
-						CenterMessage("Zoom with speed control", 100);
-						ptz_window[instance]->zoom_label->labelcolor(CYAN);
-						ptz_window[instance]->focus_label->labelcolor(YELLOW);
-					}
-					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_TRANSPARENCY)
-					{
-						CenterMessage("Interface Transparency", 100);
-					}
-					else if(ptz_middle_mouse == PTZ_MIDDLE_MOUSE_DIGITAL_SCALING)
-					{
-						CenterMessage("Digital Scaling", 100);
-					}
-					flag = 1;
 				}
 			}
 		}
@@ -54376,7 +55223,7 @@ int	loop;
 					if(ptz_window[loop]->showing == 1)
 					{
 						ptz_window[loop]->show();
-						retain_ptz = 1;
+						retain_ptz = PANEL_RETAIN;
 					}
 				}
 				else
@@ -54399,24 +55246,31 @@ void	MyWin::ShowAudio(int xx, int yy)
 {
 	if(audio == 1)
 	{
-		if(retain_audio == 0)
+		if(retain_audio != PANEL_HIDE)
 		{
-			int bars = (audio_thumbnail_cnt / 7) + 1;
-			int show_m = 0;
-			int ny = audio_thumbnail_group->y();
-			if(ny < 0) ny = 0;
-			if(ny > h()) ny = h();
-			if((xx > audio_thumbnail_group->x()) && (yy >= ny)
-			&& (xx < audio_thumbnail_group->x() + audio_thumbnail_group->w())
-			&& (yy < ny + audio_thumbnail_group->h()))
+			if(retain_audio == 0)
 			{
-				show_m = 1;
+				int bars = (audio_thumbnail_cnt / 7) + 1;
+				int show_m = 0;
+				int ny = audio_thumbnail_group->y();
+				if(ny < 0) ny = 0;
+				if(ny > h()) ny = h();
+				if((xx > audio_thumbnail_group->x()) && (yy >= ny)
+				&& (xx < audio_thumbnail_group->x() + audio_thumbnail_group->w())
+				&& (yy < ny + audio_thumbnail_group->h()))
+				{
+					show_m = 1;
+				}
+				ReallyToggleAudio(show_m);
 			}
-			ReallyToggleAudio(show_m);
+			else
+			{
+				audio_thumbnail_group->TrueShow();
+			}
 		}
 		else
 		{
-			audio_thumbnail_group->TrueShow();
+			audio_thumbnail_group->hide();
 		}
 	}
 }
@@ -54427,30 +55281,37 @@ int	loop;
 
 	if(audio == 1)
 	{
-		if(show_m == 1)
+		if(retain_audio != PANEL_HIDE)
 		{
-			if(audio_thumbnail_group->in_motion == 0)
+			if(show_m == 1)
 			{
-				if(!audio_thumbnail_group->visible())
+				if(audio_thumbnail_group->in_motion == 0)
 				{
-					audio_thumbnail_group->show();
+					if(!audio_thumbnail_group->visible())
+					{
+						audio_thumbnail_group->show();
+					}
+				}
+			}
+			else
+			{
+				audio_thumbnail_group->hide();
+				for(loop = 0;loop < audio_thumbnail_cnt;loop++)
+				{
+					PulseAudioButton *pat = audio_thumbnail[loop];
+					if(pat != NULL)
+					{
+						if(pat->alias_in->visible())
+						{
+							pulse_audio_edit_alias(NULL, pat);
+						}
+					}
 				}
 			}
 		}
 		else
 		{
 			audio_thumbnail_group->hide();
-			for(loop = 0;loop < audio_thumbnail_cnt;loop++)
-			{
-				PulseAudioButton *pat = audio_thumbnail[loop];
-				if(pat != NULL)
-				{
-					if(pat->alias_in->visible())
-					{
-						pulse_audio_edit_alias(NULL, pat);
-					}
-				}
-			}
 		}
 	}
 }
@@ -54461,55 +55322,69 @@ int	loop;
 
 	if(audio == 1)
 	{
-		if(!audio_thumbnail_group->visible())
+		if(retain_audio != PANEL_HIDE)
 		{
-			if(audio_thumbnail_group->in_motion == 0)
+			if(!audio_thumbnail_group->visible())
 			{
-				audio_thumbnail_group->show();
-				retain_audio = 1;
+				if(audio_thumbnail_group->in_motion == 0)
+				{
+					audio_thumbnail_group->show();
+					retain_audio = PANEL_RETAIN;
+				}
+			}
+			else
+			{
+				audio_thumbnail_group->hide();
+				for(loop = 0;loop < audio_thumbnail_cnt;loop++)
+				{
+					PulseAudioButton *pat = audio_thumbnail[loop];
+					if(pat != NULL)
+					{
+						if(pat->alias_in->visible())
+						{
+							pulse_audio_edit_alias(NULL, pat);
+						}
+					}
+				}
+				retain_audio = 0;
 			}
 		}
 		else
 		{
 			audio_thumbnail_group->hide();
-			for(loop = 0;loop < audio_thumbnail_cnt;loop++)
-			{
-				PulseAudioButton *pat = audio_thumbnail[loop];
-				if(pat != NULL)
-				{
-					if(pat->alias_in->visible())
-					{
-						pulse_audio_edit_alias(NULL, pat);
-					}
-				}
-			}
-			retain_audio = 0;
 		}
 	}
 }
 
 void	MyWin::ShowVideoThumbs(int xx, int yy)
 {
-	if(retain_cameras == 0)
+	if(retain_cameras != PANEL_HIDE)
 	{
-		if(video_thumbnail_group->in_motion == 0)
+		if(retain_cameras == 0)
 		{
-			int show_m = 0;
-			int nx = video_thumbnail_group->x();
-			if(nx < 0) nx = 0;
-			if(nx > w()) nx = w();
-			if((xx >= nx) && (yy >= video_thumbnail_group->y())
-			&& (xx < nx + video_thumbnail_group->w())
-			&& (yy < video_thumbnail_group->y() + video_thumbnail_group->h()))
+			if(video_thumbnail_group->in_motion == 0)
 			{
-				show_m = 1;
+				int show_m = 0;
+				int nx = video_thumbnail_group->x();
+				if(nx < 0) nx = 0;
+				if(nx > w()) nx = w();
+				if((xx >= nx) && (yy >= video_thumbnail_group->y())
+				&& (xx < nx + video_thumbnail_group->w())
+				&& (yy < video_thumbnail_group->y() + video_thumbnail_group->h()))
+				{
+					show_m = 1;
+				}
+				ReallyToggleCameras(show_m);
 			}
-			ReallyToggleCameras(show_m);
+		}
+		else
+		{
+			video_thumbnail_group->TrueShow();
 		}
 	}
 	else
 	{
-		video_thumbnail_group->TrueShow();
+		video_thumbnail_group->hide();
 	}
 }
 
@@ -54536,7 +55411,7 @@ void	MyWin::ReallyToggleCameras()
 	if(!video_thumbnail_group->visible())
 	{
 		video_thumbnail_group->show();
-		retain_cameras = 1;
+		retain_cameras = PANEL_RETAIN;
 	}
 	else
 	{
@@ -54772,7 +55647,7 @@ int	loop;
 			}
 			else
 			{
-				if(retain_commands == 1)
+				if(retain_commands == PANEL_RETAIN)
 				{
 					if(buttons_shown == 0)
 					{
@@ -55137,10 +56012,9 @@ int	MyWin::HandleDrag(Camera *cam)
 			double use_y = (double)cam->display_height * factor;
 			if((use_x > 50) && (use_y > 50))
 			{
-				double factor_w = use_x / cam->display_width;
-				double factor_h = use_y / cam->display_height;
 				cam->display_width = use_x;
 				cam->display_height = use_y;
+				cam->DisplayScaleFactor();
 			}
 		}
 		last_resize_drag_x = xx;
@@ -55241,26 +56115,95 @@ int	MyWin::HandleDrag(Camera *cam)
 			{
 				if(Fl::event_button() == 1)
 				{
-					int diff_x = abs(x1 - x2);
-					int diff_y = abs(y1 - y2);
-					if((diff_x > 4) && (diff_y > 4))
+					if(rubberband_drag_mode == 0)
 					{
-						if(x1 > x2)
+						int diff_x = abs(x1 - x2);
+						int diff_y = abs(y1 - y2);
+						if((diff_x > 4) && (diff_y > 4))
 						{
-							int tmp = x1;
-							x1 = x2;
-							x2 = tmp;
+							if(x1 > x2)
+							{
+								int tmp = x1;
+								x1 = x2;
+								x2 = tmp;
+							}
+							if(y1 > y2)
+							{
+								int tmp = y1;
+								y1 = y2;
+								y2 = tmp;
+							}
+							rubberband_x = (x1 - cam->image_sx) / cam->scale_w;
+							rubberband_y = (y1 - cam->image_sy) / cam->scale_h;
+							rubberband_w = (x2 - x1) / cam->scale_w;
+							rubberband_h = (y2 - y1) / cam->scale_h;
 						}
-						if(y1 > y2)
+					}
+					if((rubberband_drag_mode & RUBBERBAND_DRAG_MODE_RESIZE_W) == RUBBERBAND_DRAG_MODE_RESIZE_W)
+					{
+						int use_dx = ((x2 - x1) / cam->scale_w);
+						if(((rubberband_x + use_dx) > 0) && ((rubberband_x + use_dx) < cam->width))
 						{
-							int tmp = y1;
-							y1 = y2;
-							y2 = tmp;
+							if((rubberband_w - use_dx) > 0)
+							{
+								rubberband_x += use_dx;
+								rubberband_w -= use_dx;
+							}
 						}
-						rubberband_x = x1;
-						rubberband_y = y1;
-						rubberband_w = x2 - x1;
-						rubberband_h = y2 - y1;
+						last_push_x = x2;
+						last_push_y = y2;
+					}
+					if((rubberband_drag_mode & RUBBERBAND_DRAG_MODE_RESIZE_N) == RUBBERBAND_DRAG_MODE_RESIZE_N)
+					{
+						int use_dy = ((y2 - y1) / cam->scale_h);
+						if(((rubberband_y + use_dy) > 0) && ((rubberband_y + use_dy) < cam->height))
+						{
+							if((rubberband_h - use_dy) > 0)
+							{
+								rubberband_y += use_dy;
+								rubberband_h -= use_dy;
+							}
+						}
+						last_push_x = x2;
+						last_push_y = y2;
+					}
+					if((rubberband_drag_mode & RUBBERBAND_DRAG_MODE_RESIZE_E) == RUBBERBAND_DRAG_MODE_RESIZE_E)
+					{
+						int use_dx = ((x2 - x1) / cam->scale_w);
+						if((rubberband_w + use_dx > 0) && ((rubberband_x + rubberband_w + use_dx) < cam->width))
+						{
+							rubberband_w += use_dx;
+						}
+						last_push_x = x2;
+					}
+					if((rubberband_drag_mode & RUBBERBAND_DRAG_MODE_RESIZE_S) == RUBBERBAND_DRAG_MODE_RESIZE_S)
+					{
+						int use_dy = ((y2 - y1) / cam->scale_h);
+						if((rubberband_h + use_dy > 0) && ((rubberband_y + rubberband_h + use_dy) < cam->height))
+						{
+							rubberband_h += use_dy;
+						}
+						last_push_y = y2;
+					}
+					if(rubberband_drag_mode == RUBBERBAND_DRAG_MODE_MOVE)
+					{
+						if((rubberband_x > -1)
+						&& (rubberband_y > -1)
+						&& (rubberband_w > -1)
+						&& (rubberband_h > -1))
+						{
+							int diff_x = x2 - x1;
+							int diff_y = y2 - y1;
+							if(((rubberband_x + diff_x) > -1)
+							&& ((rubberband_y + diff_y) > -1))
+							{
+								rubberband_x += diff_x;
+								rubberband_y += diff_y;
+							}
+							last_push_x = x2;
+							last_push_y = y2;
+							flag = 1;
+						}
 					}
 				}
 			}
@@ -55466,8 +56409,15 @@ int	MyWin::HandleMousewheelPTZ(Camera *cam)
 						{
 							if(ptz_zooming == 0)
 							{
+								Fl::remove_timeout(ptz_zoom_cb, this);
 								ViscaCommand(instance, PTZ_ZOOM_IN);
-								Fl::add_timeout(0.5, ptz_zoom_cb, this);
+								Fl::add_timeout(0.2, ptz_zoom_cb, this);
+								flag = 1;
+							}
+							else
+							{
+								Fl::remove_timeout(ptz_zoom_cb, this);
+								Fl::add_timeout(0.2, ptz_zoom_cb, this);
 								flag = 1;
 							}
 						}
@@ -55475,8 +56425,15 @@ int	MyWin::HandleMousewheelPTZ(Camera *cam)
 						{
 							if(ptz_zooming == 0)
 							{
+								Fl::remove_timeout(ptz_zoom_cb, this);
 								ViscaCommand(instance, PTZ_ZOOM_OUT);
-								Fl::add_timeout(0.5, ptz_zoom_cb, this);
+								Fl::add_timeout(0.2, ptz_zoom_cb, this);
+								flag = 1;
+							}
+							else
+							{
+								Fl::remove_timeout(ptz_zoom_cb, this);
+								Fl::add_timeout(0.2, ptz_zoom_cb, this);
 								flag = 1;
 							}
 						}
@@ -55572,7 +56529,7 @@ static time_t	last_time = 0;
 	{
 		no_go = 1;
 	}
-	if(no_go == 0)
+	if((no_go == 0) && (retain_audio != PANEL_HIDE))
 	{
 		if(audio_thumbnail_cnt > 0)
 		{
@@ -55707,7 +56664,9 @@ int	MyWin::PushToSelectColors(Camera *cam)
 				if((ii > -1) && (ii < cam->width)
 				&& (jj > -1) && (jj < cam->height))
 				{
-					unsigned char *colour = cam->mat.ptr(jj, ii);
+					double use_jj = (double)jj / cam->scale_h;
+					double use_ii = (double)ii / cam->scale_w;
+					unsigned char *colour = cam->mat.ptr((int)use_jj, (int)use_ii);
 					int r = colour[0];
 					int g = colour[1];
 					int b = colour[2];
@@ -55839,8 +56798,8 @@ int		loop;
 				if(strcmp(str, "Dynamic Copy") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->CropFrame(cam->mat, &local, use_x, use_y, ww, hh);
 					win->AddMiscCopy(cam, MISC_COPY_DYNAMIC, local, 0, NULL, use_x, use_y, ww, hh);
 					cam->priority++;
@@ -55848,8 +56807,8 @@ int		loop;
 				else if(strcmp(str, "Static Copy") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->CropFrame(cam->mat, &local, use_x, use_y, ww, hh);
 					win->AddMiscCopy(cam, MISC_COPY_STATIC, local, 0, NULL, use_x, use_y, ww, hh);
 				}
@@ -55865,8 +56824,8 @@ int		loop;
 					&& (win->rubberband_w > -1)
 					&& (win->rubberband_h > -1))
 					{
-						xx = win->rubberband_x - cam->image_sx;
-						yy = win->rubberband_y - cam->image_sy;
+						xx = win->rubberband_x;
+						yy = win->rubberband_y;
 						ww = win->rubberband_w;
 						hh = win->rubberband_h;
 					}
@@ -55892,8 +56851,8 @@ int		loop;
 					{
 						win->DisplayCamera(cam_n);
 						Camera *result = win->DisplayedCamera();
-						result->requested_x = xx - cam->image_sx;
-						result->requested_y = yy - cam->image_sy;
+						result->requested_x = xx;
+						result->requested_y = yy;
 						result->requested_w = ww;
 						result->requested_h = hh;
 						win->video_thumbnail_group->ScrollToDisplayed();
@@ -55907,15 +56866,15 @@ int		loop;
 				else if(strcmp(str, "Cut Out") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_MASK, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Fill") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 
 					int rr = 128;
 					int gg = 128;
@@ -55927,8 +56886,8 @@ int		loop;
 				else if(strcmp(str, "Crop") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_CROP, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Paste") == 0)
@@ -56152,8 +57111,8 @@ int		loop;
 				else if(strcmp(str, "Save Image") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->CropFrame(cam->mat, &local, use_x, use_y, ww, hh);
 					cvtColor(local, local, COLOR_RGBA2BGRA);
 
@@ -56180,8 +57139,8 @@ int		loop;
 				}
 				else if(strcmp(str, "Load Image") == 0)
 				{
-					int use_x = ux - cam->image_sx;
-					int use_y = uy - cam->image_sy;
+					int use_x = ux;
+					int use_y = uy;
 					char filename[4096];
 					int r = my_file_chooser(win, "Image File", "*", "./", filename);
 					if(r > 0)
@@ -56246,6 +57205,10 @@ int		loop;
 				{
 					immediate_quick(win->immediate_drawing_window, str);
 				}
+				else if(strcmp(str, "@C3IM Open Menu") == 0)
+				{
+					immediate_drawing_button_cb(NULL, win);
+				}
 				else if(strcmp(str, "Remove All") == 0)
 				{
 					win->MiscRemoveAll();
@@ -56257,64 +57220,64 @@ int		loop;
 				else if(strcmp(str, "Rectangle") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_RECTANGLE, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Magnify") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_MAGNIFY, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Blur") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_BLUR, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Pixelate") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_PIXELATE, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Sharpen") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_SHARPEN, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Hole") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_HOLE, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Blend") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_BLEND, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Border") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_BORDER, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Reverse") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_REVERSE, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Video Settings") == 0)
@@ -56325,8 +57288,8 @@ int		loop;
 					double hue = 1.0;
 					double intensity = 1.0;
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					int r = win->AddMiscCopy(cam, MISC_COPY_VIDEO_SETTINGS, local, 1, NULL, use_x, use_y, ww, hh, -1, -1, -1, -1, contrast, brightness, saturation, hue, intensity);
 					if(r > -1)
 					{
@@ -56337,32 +57300,40 @@ int		loop;
 				else if(strcmp(str, "Flip Horizontally") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_HFLIP, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Flip Vertically") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_VFLIP, local, 1, NULL, use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Text") == 0)
 				{
 					Mat local;
-					int use_x = xx - cam->image_sx;
-					int use_y = yy - cam->image_sy;
+					int use_x = xx;
+					int use_y = yy;
 					win->AddMiscCopy(cam, MISC_COPY_TEXT, local, 1, "Sample Text", use_x, use_y, ww, hh);
 				}
 				else if(strcmp(str, "Resize") == 0)
 				{
 					win->editing_misc_mode = EDITING_MISC_RESIZE;
 				}
+				else if(strcmp(str, "Rubberband Record") == 0)
+				{
+					win->rubberband_record = 1;
+				}
+				else if(strcmp(str, "Cease Rubberband Record") == 0)
+				{
+					win->rubberband_record = 0;
+				}
 				else if(strcmp(str, "Select All") == 0)
 				{
-					win->rubberband_x = cam->image_sx;
-					win->rubberband_y = cam->image_sy;
+					win->rubberband_x = 0;
+					win->rubberband_y = 0;
 					win->rubberband_w = cam->width;
 					win->rubberband_h = cam->height;
 				}
@@ -56426,6 +57397,473 @@ int		loop;
 	}
 }
 
+void	MyWin::RightClickMenuRubberbandOpen(Camera *cam)
+{
+	if(popup != NULL)
+	{
+		Fl::delete_widget(popup);
+	}
+	popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 60);
+	popup->browser->callback(rubberband_popup_cb, this);
+	popup->browser->clear();
+	popup->browser->add("Dynamic Copy");
+	popup->browser->add("Static Copy");
+	popup->browser->add("Copy to Clipboard");
+	if(Fl::clipboard_contains(Fl::clipboard_image)) 
+	{
+		popup->browser->add("Paste from Clipboard");
+	}
+	if(cam->source_camera == NULL)
+	{
+		popup->browser->add("Source Camera");
+	}
+	popup->browser->add("Select All");
+	popup->browser->add("Deselect All");
+	popup->browser->add("Cut Out");
+	popup->browser->add("Fill");
+	popup->browser->add("Crop");
+	popup->browser->add("Text");
+	popup->browser->add("Rectangle");
+	popup->browser->add("Border");
+	popup->browser->add("Magnify");
+	popup->browser->add("Blur");
+	popup->browser->add("Sharpen");
+	popup->browser->add("Pixelate");
+	popup->browser->add("Hole");
+	popup->browser->add("Blend");
+	popup->browser->add("Reverse");
+	popup->browser->add("Video Settings");
+	popup->browser->add("Flip Horizontally");
+	popup->browser->add("Flip Vertically");
+	popup->browser->add("Save Image");
+	if(rubberband_record == 0)
+	{
+		popup->browser->add("Rubberband Record");
+	}
+	else
+	{
+		popup->browser->add("Cease Rubberband Record");
+	}
+	popup->browser->add("Collect Immediate");
+	if(cam->CountCollected() > 0)
+	{
+		popup->browser->add("Clear Collection");
+	}
+	if(cam->type == CAMERA_TYPE_SPLIT)
+	{
+		popup->browser->add("Blank");
+	}
+	popup->browser->add("@C3Scroll Mode");
+	if(cam->zoom_box_display == 0)
+	{
+		popup->browser->add("@C3Drawing Mode");
+		popup->browser->add("@C3Layout Mode");
+		popup->browser->add("@C3Set Interest Mode");
+		popup->browser->add("@C3Dynamic Coloring");
+		popup->browser->add("@C3Reposition Mode");
+	}
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
+void	MyWin::RightClickMenuRubberbandClosed(Camera *cam, int hit)
+{
+	if(popup != NULL)
+	{
+		Fl::delete_widget(popup);
+	}
+	popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 40);
+	popup->browser->callback(rubberband_popup_cb, this);
+	popup->browser->clear();
+	if(misc_copy_cnt > 0)
+	{
+		popup->browser->add("Remove All");
+		popup->browser->add("Remove Last");
+		if(hit == 0)
+		{
+			popup->browser->add("Paste");
+			popup->browser->add("Clear Rubberband Commands");
+		}
+		else
+		{
+			if(editing_misc_outer > -1)
+			{
+				if(misc_copy[editing_misc_outer]->type == MISC_COPY_TEXT)
+				{
+					popup->browser->add("Edit Text");
+				}
+			}
+			popup->browser->add("Move");
+			popup->browser->add("Remove");
+			popup->browser->add("Resize");
+		}
+	}
+	popup->browser->add("Copy to Clipboard");
+	if(Fl::clipboard_contains(Fl::clipboard_image)) 
+	{
+		popup->browser->add("Paste from Clipboard");
+	}
+	if(cam->CountCollected() > 0)
+	{
+		popup->browser->add("Clear Collection");
+	}
+	popup->browser->add("Load Image");
+	popup->browser->add("Select All");
+	if(rubberband_record == 0)
+	{
+		popup->browser->add("Rubberband Record");
+	}
+	else
+	{
+		popup->browser->add("Cease Rubberband Record");
+	}
+	if((rubberband_x > -1)
+	|| (rubberband_y > -1)
+	|| (rubberband_w > -1)
+	|| (rubberband_h > -1))
+	{
+		popup->browser->add("Deselect All");
+	}
+	if(cam->type == CAMERA_TYPE_SPLIT)
+	{
+		popup->browser->add("Blank");
+	}
+	popup->browser->add("@C3Scroll Mode");
+	if(cam->zoom_box_display == 0)
+	{
+		popup->browser->add("@C3Drawing Mode");
+		popup->browser->add("@C3Layout Mode");
+		popup->browser->add("@C3Set Interest Mode");
+		popup->browser->add("@C3Dynamic Coloring");
+		popup->browser->add("@C3Reposition Mode");
+	}
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
+void	MyWin::RightClickMenuReposition(Camera *cam)
+{
+	if(popup != NULL)
+	{
+		Fl::delete_widget(popup);
+	}
+	popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+	popup->browser->callback(rubberband_popup_cb, this);
+	popup->browser->clear();
+	if(cam->type == CAMERA_TYPE_SPLIT)
+	{
+		popup->browser->add("Blank");
+	}
+	popup->browser->add("@C3Scroll Mode");
+	if(cam->zoom_box_display == 0)
+	{
+		popup->browser->add("@C3Drawing Mode");
+		popup->browser->add("@C3Rubberband Mode");
+		popup->browser->add("@C3Layout Mode");
+		popup->browser->add("@C3Set Interest Mode");
+		popup->browser->add("@C3Dynamic Coloring");
+	}
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
+void	MyWin::RightClickMenuDrawing(Camera *cam)
+{
+	if(popup != NULL)
+	{
+		Fl::delete_widget(popup);
+	}
+	popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+	popup->browser->callback(rubberband_popup_cb, this);
+	popup->browser->clear();
+	popup->browser->add("IM Text");
+	popup->browser->add("IM Line");
+	popup->browser->add("IM Loop");
+	popup->browser->add("IM Rectangle");
+	popup->browser->add("IM Ellipse");
+	popup->browser->add("IM Image");
+	popup->browser->add("IM Polygon");
+	popup->browser->add("IM Freehand");
+	popup->browser->add("IM Pixelate/Blur");
+	popup->browser->add("IM Delete");
+	popup->browser->add("IM Delete All");
+	popup->browser->add("IM Hide");
+	popup->browser->add("IM Hide All");
+	popup->browser->add("IM Show All");
+	if(cam->type == CAMERA_TYPE_SPLIT)
+	{
+		popup->browser->add("Blank");
+	}
+	popup->browser->add("@C3IM Open Menu");
+	popup->browser->add("");
+	popup->browser->add("@C3Scroll Mode");
+	popup->browser->add("@C3Rubberband Mode");
+	popup->browser->add("@C3Layout Mode");
+	popup->browser->add("@C3Set Interest Mode");
+	popup->browser->add("@C3Dynamic Coloring");
+	popup->browser->add("@C3Reposition Mode");
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
+void	MyWin::RightClickMenuColoring(Camera *cam)
+{
+	if(popup != NULL)
+	{
+		Fl::delete_widget(popup);
+	}
+	popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+	popup->browser->callback(rubberband_popup_cb, this);
+	popup->browser->clear();
+	if(cam->type == CAMERA_TYPE_SPLIT)
+	{
+		popup->browser->add("Blank");
+	}
+	popup->browser->add("@C3Scroll Mode");
+	if(cam->zoom_box_display == 0)
+	{
+		popup->browser->add("@C3Drawing Mode");
+		popup->browser->add("@C3Rubberband Mode");
+		popup->browser->add("@C3Layout Mode");
+		popup->browser->add("@C3Set Interest Mode");
+		popup->browser->add("@C3Reposition Mode");
+	}
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
+void	MyWin::RightClickMenuGuidelines(Camera *cam)
+{
+	if(popup != NULL)
+	{
+		Fl::delete_widget(popup);
+	}
+	popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+	popup->browser->callback(rubberband_popup_cb, this);
+	popup->browser->clear();
+	if(guideline_mode == VERTICAL_GUIDELINE)
+	{
+		popup->browser->add("Horizontal");
+	}
+	else
+	{
+		popup->browser->add("Vertical");
+	}
+	if(guideline_cnt > 0)
+	{
+		if(sweeping_guidelines == 1)
+		{
+			popup->browser->add("Sweep Off");
+		}
+		else
+		{
+			popup->browser->add("Sweep On");
+		}
+		if(hide_guidelines == 0)
+		{
+			popup->browser->add("Hide Guidelines");
+		}
+		else
+		{
+			popup->browser->add("Show Guidelines");
+		}
+		popup->browser->add("Remove Guidelines");
+	}
+	if(grid_size > 1)
+	{
+		if(hide_grid == 0)
+		{
+			popup->browser->add("Hide Grid");
+		}
+		else
+		{
+			popup->browser->add("Show Grid");
+		}
+	}
+	if(cam->image_window_cnt > 1)
+	{
+		popup->browser->add("Arrange Vertically");
+		popup->browser->add("Arrange Horizontally");
+	}
+	if(cam->type == CAMERA_TYPE_SPLIT)
+	{
+		popup->browser->add("Blank");
+	}
+	popup->browser->add("@C3Scroll Mode");
+	if(cam->zoom_box_display == 0)
+	{
+		popup->browser->add("@C3Drawing Mode");
+		popup->browser->add("@C3Rubberband Mode");
+		popup->browser->add("@C3Set Interest Mode");
+		popup->browser->add("@C3Dynamic Coloring");
+		popup->browser->add("@C3Reposition Mode");
+	}
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
+void	MyWin::RightClickMenuInterest(Camera *cam)
+{
+	if(popup != NULL)
+	{
+		Fl::delete_widget(popup);
+	}
+	popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+	popup->browser->callback(rubberband_popup_cb, this);
+	popup->browser->clear();
+	if(interest_cnt > 0)
+	{
+		popup->browser->add("Clear Interest");
+		popup->browser->add("Save Interest");
+	}
+	if(cam->type == CAMERA_TYPE_SPLIT)
+	{
+		popup->browser->add("Blank");
+	}
+	popup->browser->add("Load Interest");
+	popup->browser->add("@C3Scroll Mode");
+	if(cam->zoom_box_display == 0)
+	{
+		popup->browser->add("@C3Drawing Mode");
+		popup->browser->add("@C3Rubberband Mode");
+		popup->browser->add("@C3Layout Mode");
+		popup->browser->add("@C3Dynamic Coloring");
+		popup->browser->add("@C3Reposition Mode");
+	}
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
+void	MyWin::RightClickMenuOther(Camera *cam)
+{
+	if(popup != NULL)
+	{
+		Fl::delete_widget(popup);
+	}
+	popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
+	popup->browser->callback(rubberband_popup_cb, this);
+	popup->browser->clear();
+	if(ptz_mode != 0)
+	{
+		if(lock_ptz_mouse_move == 0)
+		{
+			popup->browser->add("Lock PTZ Mouse Move");
+		}
+		else
+		{
+			popup->browser->add("Unlock PTZ Mouse Move");
+		}
+	}
+	if(immediate_drawing_window->can_paste == 1)
+	{
+		popup->browser->add("Paste Immediate");
+	}
+	if(cam->CountCollected() > 0)
+	{
+		popup->browser->add("Clear Collection");
+	}
+	if(immediate_drawing_window != NULL)
+	{
+		if(grid_size > 1)
+		{
+			if(hide_grid == 0)
+			{
+				popup->browser->add("Hide Grid");
+			}
+			else
+			{
+				popup->browser->add("Show Grid");
+			}
+		}
+	}
+	if(cam->type == CAMERA_TYPE_SPLIT)
+	{
+		popup->browser->add("Blank");
+	}
+	if(cam->zoom_box_display == 0)
+	{
+		popup->browser->add("@C3Drawing Mode");
+		popup->browser->add("@C3Rubberband Mode");
+		popup->browser->add("@C3Layout Mode");
+		popup->browser->add("@C3Set Interest Mode");
+		popup->browser->add("@C3Dynamic Coloring");
+		popup->browser->add("@C3Reposition Mode");
+	}
+	popup->set_non_modal();
+	popup->Fit();
+	popup->show();
+}
+
+void	MyWin::ManipulateRubberband(Camera *cam)
+{
+	int top_x = rubberband_x * cam->scale_w;
+	int top_y = rubberband_y * cam->scale_h;
+	int bottom_x = (rubberband_x + rubberband_w) * cam->scale_w;
+	int bottom_y = (rubberband_y + rubberband_h) * cam->scale_h;
+	int xx = Fl::event_x();
+	int yy = Fl::event_y();
+	xx -= cam->image_sx;
+	yy -= cam->image_sy;
+	int tdx = abs(top_x - xx);
+	int tdy = abs(top_y - yy);
+	int bdx = abs(bottom_x - xx);
+	int bdy = abs(bottom_y - yy);
+	rubberband_drag_mode = 0;
+	if(tdx < 9)
+	{
+		rubberband_drag_mode |= RUBBERBAND_DRAG_MODE_RESIZE_W;
+	}
+	if(tdy < 9)
+	{
+		rubberband_drag_mode |= RUBBERBAND_DRAG_MODE_RESIZE_N;
+	}
+	if(bdx < 9)
+	{
+		rubberband_drag_mode |= RUBBERBAND_DRAG_MODE_RESIZE_E;
+	}
+	if(bdy < 9)
+	{
+		rubberband_drag_mode |= RUBBERBAND_DRAG_MODE_RESIZE_S;
+	}
+	if(rubberband_drag_mode == 0)
+	{
+		int hit_inside = 0;
+		if((rubberband_x > -1)
+		&& (rubberband_y > -1)
+		&& (rubberband_w > -1)
+		&& (rubberband_h > -1))
+		{
+			int xx = Fl::event_x();
+			int yy = Fl::event_y();
+			int off_x = (xx - cam->image_sx) / cam->scale_w;
+			int off_y = (yy - cam->image_sy) / cam->scale_h;
+			if((off_x > rubberband_x)
+			&& (off_y > rubberband_y)
+			&& (off_x < rubberband_x + rubberband_w)
+			&& (off_y < rubberband_y + rubberband_h))
+			{
+				hit_inside = 1;
+				rubberband_drag_mode = RUBBERBAND_DRAG_MODE_MOVE;
+			}
+		}
+		if(hit_inside == 0)
+		{
+			rubberband_x = -1; 
+			rubberband_y = -1;
+			rubberband_w = -1;
+			rubberband_h = -1;
+			rubberband_drag_mode = 0;
+		}
+	}
+}
+
 int	MyWin::HandleMenuPopup(int xx, int yy)
 {
 int	loop;
@@ -56446,10 +57884,12 @@ int	loop;
 				{
 					if(Fl::event_button() == FL_LEFT_MOUSE)
 					{
-						rubberband_x = -1; 
-						rubberband_y = -1;
-						rubberband_w = -1;
-						rubberband_h = -1;
+						if((!Fl::event_inside(button_group))
+						&& (!Fl::event_inside(video_thumbnail_group))
+						&& (!Fl::event_inside(audio_thumbnail_group)))
+						{
+							ManipulateRubberband(cam);
+						}
 					}
 					else if(Fl::event_button() == FL_RIGHT_MOUSE)
 					{
@@ -56458,64 +57898,7 @@ int	loop;
 						if((xx > cam->image_sx) && (yy > cam->image_sy)
 						&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
 						{
-							if(popup != NULL)
-							{
-								Fl::delete_widget(popup);
-							}
-							popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 60);
-							popup->browser->callback(rubberband_popup_cb, this);
-							popup->browser->clear();
-							popup->browser->add("Dynamic Copy");
-							popup->browser->add("Static Copy");
-							popup->browser->add("Copy to Clipboard");
-							if(Fl::clipboard_contains(Fl::clipboard_image)) 
-							{
-								popup->browser->add("Paste from Clipboard");
-							}
-							if(cam->source_camera == NULL)
-							{
-								popup->browser->add("Source Camera");
-							}
-							popup->browser->add("Select All");
-							popup->browser->add("Deselect All");
-							popup->browser->add("Cut Out");
-							popup->browser->add("Fill");
-							popup->browser->add("Crop");
-							popup->browser->add("Text");
-							popup->browser->add("Rectangle");
-							popup->browser->add("Border");
-							popup->browser->add("Magnify");
-							popup->browser->add("Blur");
-							popup->browser->add("Sharpen");
-							popup->browser->add("Pixelate");
-							popup->browser->add("Hole");
-							popup->browser->add("Blend");
-							popup->browser->add("Reverse");
-							popup->browser->add("Video Settings");
-							popup->browser->add("Flip Horizontally");
-							popup->browser->add("Flip Vertically");
-							popup->browser->add("Save Image");
-							popup->browser->add("Collect Immediate");
-							if(cam->CountCollected() > 0)
-							{
-								popup->browser->add("Clear Collection");
-							}
-							if(cam->type == CAMERA_TYPE_SPLIT)
-							{
-								popup->browser->add("Blank");
-							}
-							popup->browser->add("@C3Scroll Mode");
-							if(cam->zoom_box_display == 0)
-							{
-								popup->browser->add("@C3Drawing Mode");
-								popup->browser->add("@C3Layout Mode");
-								popup->browser->add("@C3Set Interest Mode");
-								popup->browser->add("@C3Dynamic Coloring");
-								popup->browser->add("@C3Reposition Mode");
-							}
-							popup->set_non_modal();
-							popup->Fit();
-							popup->show();
+							RightClickMenuRubberbandOpen(cam);
 							flag = 1;
 						}
 					}
@@ -56532,70 +57915,7 @@ int	loop;
 							editing_misc_outer = -1;
 							editing_misc_inner = -1;
 							int	hit = InMiscPasted(last_push_x, last_push_y, editing_misc_outer, editing_misc_inner);
-							if(popup != NULL)
-							{
-								Fl::delete_widget(popup);
-							}
-							popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 40);
-							popup->browser->callback(rubberband_popup_cb, this);
-							popup->browser->clear();
-							if(misc_copy_cnt > 0)
-							{
-								popup->browser->add("Remove All");
-								popup->browser->add("Remove Last");
-								if(hit == 0)
-								{
-									popup->browser->add("Paste");
-									popup->browser->add("Clear Rubberband Commands");
-								}
-								else
-								{
-									if(editing_misc_outer > -1)
-									{
-										if(misc_copy[editing_misc_outer]->type == MISC_COPY_TEXT)
-										{
-											popup->browser->add("Edit Text");
-										}
-									}
-									popup->browser->add("Move");
-									popup->browser->add("Remove");
-									popup->browser->add("Resize");
-								}
-							}
-							popup->browser->add("Copy to Clipboard");
-							if(Fl::clipboard_contains(Fl::clipboard_image)) 
-							{
-								popup->browser->add("Paste from Clipboard");
-							}
-							if(cam->CountCollected() > 0)
-							{
-								popup->browser->add("Clear Collection");
-							}
-							popup->browser->add("Load Image");
-							popup->browser->add("Select All");
-							if((rubberband_x > -1)
-							|| (rubberband_y > -1)
-							|| (rubberband_w > -1)
-							|| (rubberband_h > -1))
-							{
-								popup->browser->add("Deselect All");
-							}
-							if(cam->type == CAMERA_TYPE_SPLIT)
-							{
-								popup->browser->add("Blank");
-							}
-							popup->browser->add("@C3Scroll Mode");
-							if(cam->zoom_box_display == 0)
-							{
-								popup->browser->add("@C3Drawing Mode");
-								popup->browser->add("@C3Layout Mode");
-								popup->browser->add("@C3Set Interest Mode");
-								popup->browser->add("@C3Dynamic Coloring");
-								popup->browser->add("@C3Reposition Mode");
-							}
-							popup->set_non_modal();
-							popup->Fit();
-							popup->show();
+							RightClickMenuRubberbandClosed(cam, hit);
 							flag = 1;
 						}
 					}
@@ -56610,29 +57930,7 @@ int	loop;
 					if((xx > cam->image_sx) && (yy > cam->image_sy)
 					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
 					{
-						if(popup != NULL)
-						{
-							Fl::delete_widget(popup);
-						}
-						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
-						popup->browser->callback(rubberband_popup_cb, this);
-						popup->browser->clear();
-						if(cam->type == CAMERA_TYPE_SPLIT)
-						{
-							popup->browser->add("Blank");
-						}
-						popup->browser->add("@C3Scroll Mode");
-						if(cam->zoom_box_display == 0)
-						{
-							popup->browser->add("@C3Drawing Mode");
-							popup->browser->add("@C3Rubberband Mode");
-							popup->browser->add("@C3Layout Mode");
-							popup->browser->add("@C3Set Interest Mode");
-							popup->browser->add("@C3Dynamic Coloring");
-						}
-						popup->set_non_modal();
-						popup->Fit();
-						popup->show();
+						RightClickMenuReposition(cam);
 						flag = 1;
 					}
 				}
@@ -56646,40 +57944,7 @@ int	loop;
 					if((xx > cam->image_sx) && (yy > cam->image_sy)
 					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
 					{
-						if(popup != NULL)
-						{
-							Fl::delete_widget(popup);
-						}
-						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
-						popup->browser->callback(rubberband_popup_cb, this);
-						popup->browser->clear();
-						popup->browser->add("IM Text");
-						popup->browser->add("IM Line");
-						popup->browser->add("IM Loop");
-						popup->browser->add("IM Rectangle");
-						popup->browser->add("IM Ellipse");
-						popup->browser->add("IM Image");
-						popup->browser->add("IM Polygon");
-						popup->browser->add("IM Freehand");
-						popup->browser->add("IM Pixelate/Blur");
-						popup->browser->add("IM Delete");
-						popup->browser->add("IM Delete All");
-						popup->browser->add("IM Hide");
-						popup->browser->add("IM Hide All");
-						popup->browser->add("IM Show All");
-						if(cam->type == CAMERA_TYPE_SPLIT)
-						{
-							popup->browser->add("Blank");
-						}
-						popup->browser->add("@C3Scroll Mode");
-						popup->browser->add("@C3Rubberband Mode");
-						popup->browser->add("@C3Layout Mode");
-						popup->browser->add("@C3Set Interest Mode");
-						popup->browser->add("@C3Dynamic Coloring");
-						popup->browser->add("@C3Reposition Mode");
-						popup->set_non_modal();
-						popup->Fit();
-						popup->show();
+						RightClickMenuDrawing(cam);
 						flag = 1;
 					}
 				}
@@ -56693,29 +57958,7 @@ int	loop;
 					if((xx > cam->image_sx) && (yy > cam->image_sy)
 					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
 					{
-						if(popup != NULL)
-						{
-							Fl::delete_widget(popup);
-						}
-						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
-						popup->browser->callback(rubberband_popup_cb, this);
-						popup->browser->clear();
-						if(cam->type == CAMERA_TYPE_SPLIT)
-						{
-							popup->browser->add("Blank");
-						}
-						popup->browser->add("@C3Scroll Mode");
-						if(cam->zoom_box_display == 0)
-						{
-							popup->browser->add("@C3Drawing Mode");
-							popup->browser->add("@C3Rubberband Mode");
-							popup->browser->add("@C3Layout Mode");
-							popup->browser->add("@C3Set Interest Mode");
-							popup->browser->add("@C3Reposition Mode");
-						}
-						popup->set_non_modal();
-						popup->Fit();
-						popup->show();
+						RightClickMenuColoring(cam);
 						flag = 1;
 					}
 				}
@@ -56729,73 +57972,7 @@ int	loop;
 					if((xx > cam->image_sx) && (yy > cam->image_sy)
 					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
 					{
-						if(popup != NULL)
-						{
-							Fl::delete_widget(popup);
-						}
-						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
-						popup->browser->callback(rubberband_popup_cb, this);
-						popup->browser->clear();
-						if(guideline_mode == VERTICAL_GUIDELINE)
-						{
-							popup->browser->add("Horizontal");
-						}
-						else
-						{
-							popup->browser->add("Vertical");
-						}
-						if(guideline_cnt > 0)
-						{
-							if(sweeping_guidelines == 1)
-							{
-								popup->browser->add("Sweep Off");
-							}
-							else
-							{
-								popup->browser->add("Sweep On");
-							}
-							if(hide_guidelines == 0)
-							{
-								popup->browser->add("Hide Guidelines");
-							}
-							else
-							{
-								popup->browser->add("Show Guidelines");
-							}
-							popup->browser->add("Remove Guidelines");
-						}
-						if(grid_size > 1)
-						{
-							if(hide_grid == 0)
-							{
-								popup->browser->add("Hide Grid");
-							}
-							else
-							{
-								popup->browser->add("Show Grid");
-							}
-						}
-						if(cam->image_window_cnt > 1)
-						{
-							popup->browser->add("Arrange Vertically");
-							popup->browser->add("Arrange Horizontally");
-						}
-						if(cam->type == CAMERA_TYPE_SPLIT)
-						{
-							popup->browser->add("Blank");
-						}
-						popup->browser->add("@C3Scroll Mode");
-						if(cam->zoom_box_display == 0)
-						{
-							popup->browser->add("@C3Drawing Mode");
-							popup->browser->add("@C3Rubberband Mode");
-							popup->browser->add("@C3Set Interest Mode");
-							popup->browser->add("@C3Dynamic Coloring");
-							popup->browser->add("@C3Reposition Mode");
-						}
-						popup->set_non_modal();
-						popup->Fit();
-						popup->show();
+						RightClickMenuGuidelines(cam);
 						flag = 1;
 					}
 				}
@@ -56809,35 +57986,7 @@ int	loop;
 					if((xx > cam->image_sx) && (yy > cam->image_sy)
 					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
 					{
-						if(popup != NULL)
-						{
-							Fl::delete_widget(popup);
-						}
-						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
-						popup->browser->callback(rubberband_popup_cb, this);
-						popup->browser->clear();
-						if(interest_cnt > 0)
-						{
-							popup->browser->add("Clear Interest");
-							popup->browser->add("Save Interest");
-						}
-						if(cam->type == CAMERA_TYPE_SPLIT)
-						{
-							popup->browser->add("Blank");
-						}
-						popup->browser->add("Load Interest");
-						popup->browser->add("@C3Scroll Mode");
-						if(cam->zoom_box_display == 0)
-						{
-							popup->browser->add("@C3Drawing Mode");
-							popup->browser->add("@C3Rubberband Mode");
-							popup->browser->add("@C3Layout Mode");
-							popup->browser->add("@C3Dynamic Coloring");
-							popup->browser->add("@C3Reposition Mode");
-						}
-						popup->set_non_modal();
-						popup->Fit();
-						popup->show();
+						RightClickMenuInterest(cam);
 						flag = 1;
 					}
 				}
@@ -56851,62 +58000,7 @@ int	loop;
 					if((xx > cam->image_sx) && (yy > cam->image_sy)
 					&& (xx < cam->image_sx + cam->width) && (yy < cam->image_sy + cam->height))
 					{
-						if(popup != NULL)
-						{
-							Fl::delete_widget(popup);
-						}
-						popup = new PopupMenu(this, Fl::event_x_root(), Fl::event_y_root(), 160, 20);
-						popup->browser->callback(rubberband_popup_cb, this);
-						popup->browser->clear();
-						if(ptz_mode != 0)
-						{
-							if(lock_ptz_mouse_move == 0)
-							{
-								popup->browser->add("Lock PTZ Mouse Move");
-							}
-							else
-							{
-								popup->browser->add("Unlock PTZ Mouse Move");
-							}
-						}
-						if(immediate_drawing_window->can_paste == 1)
-						{
-							popup->browser->add("Paste Immediate");
-						}
-						if(cam->CountCollected() > 0)
-						{
-							popup->browser->add("Clear Collection");
-						}
-						if(immediate_drawing_window != NULL)
-						{
-							if(grid_size > 1)
-							{
-								if(hide_grid == 0)
-								{
-									popup->browser->add("Hide Grid");
-								}
-								else
-								{
-									popup->browser->add("Show Grid");
-								}
-							}
-						}
-						if(cam->type == CAMERA_TYPE_SPLIT)
-						{
-							popup->browser->add("Blank");
-						}
-						if(cam->zoom_box_display == 0)
-						{
-							popup->browser->add("@C3Drawing Mode");
-							popup->browser->add("@C3Rubberband Mode");
-							popup->browser->add("@C3Layout Mode");
-							popup->browser->add("@C3Set Interest Mode");
-							popup->browser->add("@C3Dynamic Coloring");
-							popup->browser->add("@C3Reposition Mode");
-						}
-						popup->set_non_modal();
-						popup->Fit();
-						popup->show();
+						RightClickMenuOther(cam);
 						flag = 1;
 					}
 				}
@@ -57071,9 +58165,13 @@ void	test_codec_line_cb(void *v);
 
 	MyWin *win = (MyWin *)v;
 	win->CeaseTestMux();
+	if(global_log_window != NULL)
+	{
+		global_log_window->progress++;
+	}
 	if(win->mux_test_sudden_stop == 0)
 	{
-		Fl::add_timeout(0.1, test_codec_line_cb, win);
+		Fl::add_timeout(0.01, test_codec_line_cb, win);
 	}
 }
 
@@ -57082,19 +58180,9 @@ void	codec_test_count_frames(void *v)
 	MyWin *win = (MyWin *)v;
 	if(win->tested_mux != NULL)
 	{
-		if((win->tested_mux->video_frames < 30) && (win->codec_test_timeout < 100))
-		{
-			Fl::repeat_timeout(0.01, codec_test_count_frames, win);
-		}
-		else
-		{
-			Fl::repeat_timeout(0.1, cease_test_codec_line_cb, win);
-		}
+		win->test_mux_actual_time = (double)((precise_time() - win->test_mux_start_time) / 1000000.0);
 	}
-	else
-	{
-		Fl::repeat_timeout(0.1, cease_test_codec_line_cb, win);
-	}
+	cease_test_codec_line_cb(win);
 	win->codec_test_timeout++;
 }
 
@@ -57141,12 +58229,7 @@ char	buf[256];
 		{
 			ext = cp + 1;
 		}
-		double time_it = 0.0;
 		win->TestMuxPerform(container, filename, ext, video_id, audio_id);
-		if(global_log_window != NULL)
-		{
-			global_log_window->progress++;
-		}
 		if(win->mux_test_sudden_stop == 0)
 		{
 			win->codec_test_timeout = 0;
@@ -57159,7 +58242,7 @@ char	buf[256];
 					cam->record_error = 0;
 				}
 			}
-			Fl::repeat_timeout(0.1, codec_test_count_frames, win);
+			Fl::add_timeout(3.0, codec_test_count_frames, win);
 		}
 		else
 		{
@@ -57184,6 +58267,7 @@ char	buf[256];
 			}
 			fclose(fp);
 		}
+		Fl::remove_timeout(my_window_cb, win);
 		Fl::add_timeout(0.01, my_window_cb, win);
 		win->testing_mux = 0;
 	}
@@ -57191,9 +58275,14 @@ char	buf[256];
 
 void	MyWin::RunCodecTest()
 {
+void	gather_codecs_cb(Fl_Widget *w, void *v);
 char	buf[256];
 
 	int cnt = 0;
+	if(access("test_codecs.txt", F_OK) != 0)
+	{
+		gather_codecs_cb(NULL, this);
+	}
 	testing_codec_fp = fopen("test_codecs.txt", "r");
 	if(testing_codec_fp != NULL)
 	{
@@ -57207,15 +58296,22 @@ char	buf[256];
 	{
 		global_log_window->SetCount(cnt);
 	}
-	int in_seconds = (cnt * 3);
-	int in_minutes = in_seconds / 60;
-	int in_hours = in_minutes / 60;
-	int minutes = in_minutes - (in_hours * 60);
-	int seconds = in_seconds - ((in_hours * 3600) + (minutes * 60));
+	if(cnt > 0)
+	{
+		time_t in_seconds = (time_t)(cnt * 4.1);
+		int hours = 0;
+		int minutes = 0;
+		int seconds = 0;
+		hms(in_seconds, hours, minutes, seconds);
 
-	sprintf(buf, "Testing %d combinations will take approximately %02d:%02d:%02d.\nContinue?", cnt, in_hours, minutes, seconds);
-	TestCodecChoice *tcc = new TestCodecChoice(this, buf);
-	tcc->show();
+		sprintf(buf, "Testing %d combinations will take approximately %02d:%02d:%02d.\nContinue?", cnt, hours, minutes, seconds);
+		TestCodecChoice *tcc = new TestCodecChoice(this, buf);
+		tcc->show();
+	}
+	else
+	{
+		SetErrorMessage("No codecs found.\nGather codecs before benchmarking them.\n");
+	}
 }
 
 void	MyWin::ReallyRunCodecTest()
@@ -57328,20 +58424,30 @@ Mat	out;
 		{
 			int real_ww = out.cols;
 			int real_hh = out.rows;
-			int use_x = rubberband_x - cam->image_sx;
-			int use_y = rubberband_y - cam->image_sy;
+			int use_x = rubberband_x;
+			int use_y = rubberband_y;
 			int ww = rubberband_w;
 			int hh = rubberband_h;
 			if((ww <= 0) || (hh <= 0))
 			{
-				use_x = Fl::event_x() - cam->image_sx;
-				use_y = Fl::event_y() - cam->image_sy;
+				if((ww < 0) && (hh < 0))
+				{
+					use_x = Fl::event_x() - cam->image_sx;
+					use_y = Fl::event_y() - cam->image_sy;
+				}
+				else
+				{
+					rubberband_x = -1;
+					rubberband_y = -1;
+					rubberband_w = -1;
+					rubberband_h = -1;
+				}
 				ww = real_ww;
 				hh = real_hh;
 				if((ww <= 0) || (hh <= 0))
 				{
 					ww = real_ww;
-										hh = real_hh;
+					hh = real_hh;
 				}
 			}
 			if((ww > 0) && (hh > 0))
@@ -57387,7 +58493,16 @@ int		loop;
 		{
 			if(key == 'v')
 			{
-				Fl::paste(*this, 1, Fl::clipboard_image);
+				int xx = Fl::event_x();
+				int yy = Fl::event_y();
+				if((xx > cam->image_sx) && (yy > cam->image_sy))
+				{
+					rubberband_x = (xx - cam->image_sx) / cam->scale_w;
+					rubberband_y = (yy - cam->image_sy) / cam->scale_h;
+					rubberband_w = 0;
+					rubberband_h = 0;
+					Fl::paste(*this, 1, Fl::clipboard_image);
+				}
 				flag = 1;
 			}
 			else if((key == 'c') || (key == 'x'))
@@ -57641,6 +58756,7 @@ int	MyWin::OnPush(int event, Camera *cam)
 							cam->image_sy = (h() / 2) - (cam->display_height / 2);
 							initial_video_out_x = -1000000;
 							initial_video_out_y = -1000000;
+							cam->DisplayScaleFactor();
 						}
 						else if(rubberband_mode == DYNAMIC_COLORING_MODE)
 						{
@@ -57676,6 +58792,10 @@ int	MyWin::OnPush(int event, Camera *cam)
 								last_push_y = -1;
 								flag = 1;
 							}
+						}
+						else if(lock_ptz_mouse_move == 1)
+						{
+							MoveSelectImmediate(cam, last_push_x, last_push_y);
 						}
 						if((ptz_middle_mouse > PTZ_MIDDLE_MOUSE_DIGITAL_SCALING) && (ptz_mode == 0))
 						{
@@ -58236,12 +59356,6 @@ int		loop;
 					break;
 					case(FL_KEYBOARD):
 					{
-						int key = Fl::event_key();
-						if(key == 'b')
-						{
-							effect_order_window->show();
-							flag = 1;
-						}
 						flag = OnKeyboard(event, cam);
 					}
 					break;
@@ -58332,7 +59446,7 @@ void	MyWin::ReallyToggleButtonPanel()
 		ShowButtons();
 		button_group->show();
 		buttons_shown = 1;
-		retain_commands = 1;
+		retain_commands = PANEL_RETAIN;
 	}
 	else
 	{
@@ -58554,40 +59668,71 @@ void	MyWin::DumpDirectRecording(char *in_filename, char *out_filename)
 
 void	MyWin::SetUseOutputPath(int index, char *buf, Camera *cam)
 {
-	if((index > -1) && (index < output_path_cnt))
+	char use_buf[4096];
+	strcpy(use_buf, "");
+	if(output_filename != NULL)
 	{
-		if(output_active[index] == 1)
+		int done = 0;
+		for(int loop = 0;((loop < output_path_cnt) && (done == 0));loop++)
 		{
-			char use_buf[4096];
-			strcpy(use_buf, "");
-			streaming = interpret_output_path(this, output_path[index], 4096, use_buf, NULL);
-			if(strlen(use_buf) > 1)
+			if(output_active[index] == 1)
 			{
-				if(cam != NULL)
+				if(strcmp(output_name[loop], output_filename) == 0)
 				{
-					if(streaming == STREAMING_NET)
-					{
-						sprintf(buf, "streaming_%02d_%03d.%s", cam->id, index, use_extension);
-						strcpy(stream_url, use_buf);
-					}
-					else if(streaming == STREAMING_NDI)
-					{
-						sprintf(buf, "%s_%02d_%03d", use_buf, cam->id, index);
-					}
-					else
-					{
-						sprintf(buf, "%s_%02d_%03d.%s", use_buf, cam->id, index, use_extension);
-					}
+					free(output_filename);
+					output_filename = strdup(output_path[loop]);
+					done = 1;
 				}
-				else
+			}
+		}
+		streaming = interpret_output_path(this, output_filename, 4096, use_buf, NULL);
+	}
+	else
+	{
+		if((index > -1) && (index < output_path_cnt))
+		{
+			if(output_active[index] == 1)
+			{
+				strcpy(use_buf, "");
+				streaming = interpret_output_path(this, output_path[index], 4096, use_buf, NULL);
+			}
+		}
+	}
+	if(strlen(use_buf) > 1)
+	{
+		if(cam != NULL)
+		{
+			if(streaming == STREAMING_NET)
+			{
+				sprintf(buf, "streaming_%02d_%03d.%s", cam->id, index, use_extension);
+				strcpy(stream_url, use_buf);
+			}
+			else if(streaming == STREAMING_NDI)
+			{
+				sprintf(buf, "%s_%02d_%03d", use_buf, cam->id, index);
+			}
+			else
+			{
+				sprintf(buf, "%s_%02d_%03d.%s", use_buf, cam->id, index, use_extension);
+			}
+		}
+		else
+		{
+			if(streaming == STREAMING_NET)
+			{
+				sprintf(buf, "streaming.%s", use_extension);
+				strcpy(stream_url, use_buf);
+			}
+			else if((streaming == STREAMING_NDI) || (streaming == STREAMING_VIRTUAL))
+			{
+				sprintf(buf, "%s", use_buf);
+			}
+			else
+			{
+				if(strlen(use_buf) > strlen(use_extension))
 				{
-					if(streaming == STREAMING_NET)
-					{
-						sprintf(buf, "streaming.%s", use_extension);
-						strcpy(stream_url, use_buf);
-					}
-					else if((streaming == STREAMING_NDI)
-					|| (streaming == STREAMING_VIRTUAL))
+					char *cp = use_buf + (strlen(use_buf) - strlen(use_extension));
+					if(strcmp(cp, use_extension) == 0)
 					{
 						sprintf(buf, "%s", use_buf);
 					}
@@ -58595,6 +59740,10 @@ void	MyWin::SetUseOutputPath(int index, char *buf, Camera *cam)
 					{
 						sprintf(buf, "%s.%s", use_buf, use_extension);
 					}
+				}
+				else
+				{
+					sprintf(buf, "%s.%s", use_buf, use_extension);
 				}
 			}
 		}
@@ -59046,17 +60195,29 @@ int	loop;
 	int nyy = 0;
 	int sz_w = w();
 	int sz_h = h();
-	if(source_cnt == 1)
+	int use_source_cnt = 0;
+	for(loop = 0;loop < source_cnt;loop++)
+	{
+		Camera *cam = camera[loop];
+		if(cam != NULL)
+		{
+			if(cam->hidden == 0)
+			{
+				use_source_cnt++;
+			}
+		}
+	}
+	if(use_source_cnt == 1)
 	{
 		sz_w = w();
 		sz_h = h();
 	}
-	else if(source_cnt < 5)
+	else if(use_source_cnt < 5)
 	{
 		sz_w = w() / 2;
 		sz_h = h() / 2;
 	}
-	else if(source_cnt < 10)
+	else if(use_source_cnt < 10)
 	{
 		sz_w = w() / 3;
 		sz_h = h() / 3;
@@ -59065,175 +60226,100 @@ int	loop;
 	{
 		if(camera[loop] != NULL)
 		{
-			int go = 0;
-			Mat local_mat;
-			if((power_all == 1)
-			&& (camera[loop]->power == 1) 
-			&& (camera[loop]->type != CAMERA_TYPE_DESKTOP) 
-			&& (camera[loop]->type != CAMERA_TYPE_WINDOW)
-			&& (camera[loop]->type != CAMERA_TYPE_PSEUDO)
-			&& (camera[loop]->type != CAMERA_TYPE_SLIDESHOW)
-			&& (camera[loop]->type != CAMERA_TYPE_PLUGIN))
+			if(camera[loop]->hidden == 0)
 			{
-				if(camera[loop]->type == CAMERA_TYPE_IMAGE)
+				int go = 0;
+				Mat local_mat;
+				if((power_all == 1) && (camera[loop]->power == 1)) 
 				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_BLANK)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_HTML)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_SOURCED)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_EDGE_DETECT)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_CHROMAKEY)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_ALTERNATING)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_BLEND)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_ALL)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_SPLIT)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_OSG)
-				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-				else if(camera[loop]->type == CAMERA_TYPE_AV)
-				{
-					if(camera[loop]->av_window != NULL)
+					if(camera[loop]->type == CAMERA_TYPE_AV)
 					{
-						local_mat = camera[loop]->av_window->mat.clone();
-						cvtColor(local_mat, local_mat, COLOR_BGR2RGB);
+						if(camera[loop]->av_window != NULL)
+						{
+							local_mat = camera[loop]->av_window->mat.clone();
+							go = 1;
+						}
+					}
+					else if(camera[loop]->type == CAMERA_TYPE_DESKTOP)
+					{
+						GrabDesktop();
+						local_mat = desktop_mat.clone();
+						go = 1;
+					}
+					else if(camera[loop]->type == CAMERA_TYPE_WINDOW)
+					{
+						camera[loop]->GrabWindow();
+						local_mat = camera[loop]->mat.clone();
+						go = 1;
+					}
+					else if(camera[loop]->type == CAMERA_TYPE_SLIDESHOW)
+					{
+						camera[loop]->GrabSlideshow();
+						local_mat = camera[loop]->mat.clone();
+						go = 1;
+					}
+					else
+					{
+						camera[loop]->mat.copyTo(local_mat);
 						go = 1;
 					}
 				}
-				else if((camera[loop]->type == CAMERA_TYPE_TEXT) 
-				|| (camera[loop]->type == CAMERA_TYPE_DYNAMIC_TEXT)
-				|| (camera[loop]->type == CAMERA_TYPE_ALERT)
-				|| (camera[loop]->type == CAMERA_TYPE_PIPED))
+				if(go == 1)
 				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
+					Mat new_mat;
+					cv::resize(local_mat, new_mat, cv::Size(sz_w, sz_h));
+					if((camera[loop]->flip_vertical == 1) && (camera[loop]->flip_horizontal == 0))
+					{
+						flip(new_mat, new_mat, 0);
+					}
+					else if((camera[loop]->flip_vertical == 0) && (camera[loop]->flip_horizontal == 1))
+					{
+						flip(new_mat, new_mat, 1);
+					}
+					else if((camera[loop]->flip_vertical == 1) && (camera[loop]->flip_horizontal == 1))
+					{
+						flip(new_mat, new_mat, -1);
+					}
+					int test_nxx = nxx + new_mat.cols;
+					if(test_nxx > w())
+					{
+						nxx = 0;
+						nyy += new_mat.rows;
+					}
+					if(camera[loop]->do_not_display == 0)
+					{
+						fl_draw_image((unsigned char *)new_mat.ptr(), nxx, nyy, new_mat.cols, new_mat.rows, new_mat.channels());
+						camera[loop]->displayed_mat = new_mat;
+						camera[loop]->DisplayNote(nxx, nyy, new_mat.cols, new_mat.rows);
+					}
+					fl_color(YELLOW);
+					int bx = nxx + (new_mat.cols - 25);
+					int by = nyy + 5;
+					fl_rect(bx, by, 20, 20);
+					fl_line(bx, by, bx + 20, by + 20);
+					fl_line(bx, by + 20, bx + 20, by);
+					fl_rect(nxx + 8, nyy + 8, 14, 14, YELLOW);
+					if(camera[loop]->record == 1)
+					{
+						fl_rectf(nxx + 10, nyy + 10, 10, 10, RED);
+					}
+					split_bx[loop] = bx;
+					split_by[loop] = by;
+					split_rx[loop] = nxx + 8;
+					split_ry[loop] = nyy + 8;
+					nxx += new_mat.cols;
+					if(nxx >= w())
+					{
+						nxx = 0;
+						nyy += new_mat.rows;
+					}
 				}
 				else
 				{
-					camera[loop]->mat.copyTo(local_mat);
-					go = 1;
-				}
-			}
-			else if((power_all == 1) && (camera[loop]->power == 1) && (camera[loop]->type == CAMERA_TYPE_DESKTOP))
-			{
-				GrabDesktop();
-				local_mat = desktop_mat.clone();
-				go = 1;
-			}
-			else if((power_all == 1) && (camera[loop]->power == 1) && (camera[loop]->type == CAMERA_TYPE_WINDOW))
-			{
-				camera[loop]->GrabWindow();
-				local_mat = camera[loop]->mat.clone();
-				go = 1;
-			}
-			else if((power_all == 1) && (camera[loop]->power == 1) && (camera[loop]->type == CAMERA_TYPE_SLIDESHOW))
-			{
-				camera[loop]->GrabSlideshow();
-				local_mat = camera[loop]->mat.clone();
-				go = 1;
-			}
-			else if((power_all == 1) && (camera[loop]->power == 1) && (camera[loop]->type == CAMERA_TYPE_PSEUDO))
-			{
-				local_mat = camera[loop]->mat.clone();
-				go = 1;
-			}
-			else if((power_all == 1) && (camera[loop]->power == 1) && (camera[loop]->type == CAMERA_TYPE_PLUGIN))
-			{
-				local_mat = camera[loop]->mat.clone();
-				go = 1;
-			}
-			if(go == 1)
-			{
-				Mat new_mat;
-				cv::resize(local_mat, new_mat, cv::Size(sz_w, sz_h));
-				if((camera[loop]->flip_vertical == 1) && (camera[loop]->flip_horizontal == 0))
-				{
-					flip(new_mat, new_mat, 0);
-				}
-				else if((camera[loop]->flip_vertical == 0) && (camera[loop]->flip_horizontal == 1))
-				{
-					flip(new_mat, new_mat, 1);
-				}
-				else if((camera[loop]->flip_vertical == 1) && (camera[loop]->flip_horizontal == 1))
-				{
-					flip(new_mat, new_mat, -1);
-				}
-				int test_nxx = nxx + new_mat.cols;
-				if(test_nxx > w())
-				{
-					nxx = 0;
-					nyy += new_mat.rows;
-				}
-				if(camera[loop]->do_not_display == 0)
-				{
-					fl_draw_image((unsigned char *)new_mat.ptr(), nxx, nyy, new_mat.cols, new_mat.rows, new_mat.channels());
-				}
-				fl_color(YELLOW);
-				int bx = nxx + (new_mat.cols - 25);
-				int by = nyy + 5;
-				fl_rect(bx, by, 20, 20);
-				fl_line(bx, by, bx + 20, by + 20);
-				fl_line(bx, by + 20, bx + 20, by);
-				fl_rect(nxx + 8, nyy + 8, 14, 14, YELLOW);
-				if(camera[loop]->record == 1)
-				{
-					fl_rectf(nxx + 10, nyy + 10, 10, 10, RED);
-				}
-				split_bx[loop] = bx;
-				split_by[loop] = by;
-				split_rx[loop] = nxx + 8;
-				split_ry[loop] = nyy + 8;
-				nxx += new_mat.cols;
-				if(nxx >= w())
-				{
-					nxx = 0;
-					nyy += new_mat.rows;
-				}
-			}
-			else
-			{
-				if((power_all == 1) || (camera[loop]->power == 1) && (camera[loop]->do_not_display == 0))
-				{
-					fprintf(stderr, "Error: %d FAILED TO STREAM\n", loop);
+					if((power_all == 1) || (camera[loop]->power == 1) && (camera[loop]->do_not_display == 0))
+					{
+						fprintf(stderr, "Error: %d FAILED TO STREAM\n", loop);
+					}
 				}
 			}
 		}
@@ -59894,11 +60980,56 @@ int	outer;
 
 void	MyWin::FrameForMuxer(Camera *cam, Mat in_mat)
 {
+static Mat	cropped;
 static Mat	local_mat[128];
+static int	last_used_x = -1;
+static int	last_used_y = -1;
+static int	last_used_w = -1;
+static int	last_used_h = -1;
 int			loop;
 int			inner;
 
 	pthread_mutex_lock(&mux_mutex);
+	if(rubberband_record == 1)
+	{
+		if((rubberband_x > -1)
+		&& (rubberband_y > -1)
+		&& (rubberband_w > -1)
+		&& (rubberband_h > -1)
+		&& (Fl::event_button1() == 0))
+		{
+			int old_w = in_mat.cols;
+			int old_h = in_mat.rows;
+			int use_x = rubberband_x;
+			int use_y = rubberband_y;
+			int use_w = rubberband_w;
+			int use_h = rubberband_h;
+			if(old_w > 0)
+			{
+				use_h = (use_w * old_h) / old_w;
+				if((use_h > 0) && (use_h < old_h))
+				{
+					crop_section(in_mat, cropped, use_x, use_y, use_w, use_h);
+					in_mat = cropped.clone();
+					last_used_x = use_x;
+					last_used_y = use_y;
+					last_used_w = use_w;
+					last_used_h = use_h;
+				}
+			}
+		}
+		else
+		{
+			if((last_used_x > -1)
+			&& (last_used_y > -1)
+			&& (last_used_w > -1)
+			&& (last_used_h > -1))
+			{
+				crop_section(in_mat, cropped, last_used_x, last_used_y, last_used_w, last_used_h);
+				in_mat = cropped.clone();
+			}
+		}
+	}
 	int use = cam->id;
 	if((output_width != in_mat.cols) || (output_height != in_mat.rows))
 	{
@@ -60045,6 +61176,7 @@ void	MyWin::DisplayOutput(Camera *cam, Mat in_mat, Camera *alt_cam)
 {
 	if(display_video == 1)
 	{
+		cam->DisplayScaleFactor();
 		int local_display_width = cam->display_width * image_display_scale;
 		int local_display_height = cam->display_height * image_display_scale;
 		if(alt_cam == NULL)
@@ -60316,6 +61448,707 @@ int		loop;
 	}
 }
 
+void	MyWin::DrawPanelLabels()
+{
+	fl_color(YELLOW);
+	if((!button_group->visible()) && (hide_menu == 0) && (retain_commands != PANEL_HIDE))
+	{
+		if(button_group_side == SIDE_RIGHT)
+		{
+			fl_line(w() - 1, button_group->y(), w() - 1, button_group->y() + button_group->h());
+			fl_font(FL_SCREEN, 11);
+			fl_draw("C", w() - 20, (h() / 2) - 40, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("O", w() - 20, (h() / 2) - 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("M", w() - 20, (h() / 2) - 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("M", w() - 20, (h() / 2) - 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("A", w() - 20, (h() / 2) + 0, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("N", w() - 20, (h() / 2) + 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("D", w() - 20, (h() / 2) + 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("S", w() - 20, (h() / 2) + 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+		}
+		else
+		{
+			fl_line(0, button_group->y(), 0, button_group->y() + button_group->h());
+			fl_font(FL_SCREEN, 11);
+			fl_draw("C", 10, (h() / 2) - 40, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("O", 10, (h() / 2) - 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("M", 10, (h() / 2) - 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("M", 10, (h() / 2) - 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("A", 10, (h() / 2) + 0, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("N", 10, (h() / 2) + 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("D", 10, (h() / 2) + 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			fl_draw("S", 10, (h() / 2) + 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+		}
+	}
+	if(retain_cameras != PANEL_HIDE)
+	{
+		if(!video_thumbnail_group->visible())
+		{
+			if(button_group_side == SIDE_RIGHT)
+			{
+				fl_line(0, video_thumbnail_group->y(), 0, video_thumbnail_group->y() + video_thumbnail_group->h());
+				fl_font(FL_SCREEN, 11);
+				fl_draw("C", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("A", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("M", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("E", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 0, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("R", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("A", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("S", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			}
+			else
+			{
+				fl_line(w() - 1, video_thumbnail_group->y(), w() - 1, video_thumbnail_group->y() + video_thumbnail_group->h());
+				fl_font(FL_SCREEN, 11);
+				fl_draw("C", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("A", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("M", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("E", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 0, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("R", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("A", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+				fl_draw("S", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+			}
+		}
+	}
+	if(!audio_thumbnail_group->visible())
+	{
+		if(pulse_microphone_cnt > 0)
+		{
+			if(retain_audio != PANEL_HIDE)
+			{
+				fl_line(audio_thumbnail_group->x(), 0, audio_thumbnail_group->x() + audio_thumbnail_group->w(), 0);
+				fl_font(FL_HELVETICA, 11);
+				fl_draw("AUDIO", (audio_thumbnail_group->x() + (audio_thumbnail_group->w()) / 2) - 40, 4, 80, 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+			}
+		}
+	}
+	if(retain_audio != PANEL_HIDE)
+	{
+		int cx1 = (w() / 2) - 500;
+		int cx2 = (w() / 2) + 500;
+		int cy1 = (h() - 2);
+		fl_draw("AUDIO METERS", cx1, cy1 - 21, 1000, 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+		fl_line(cx1, cy1, cx2, cy1);
+	}
+	if(retain_ptz != PANEL_HIDE)
+	{
+		for(int loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+		{
+			if(ptz_window[loop] != NULL)
+			{
+				if(ptz_window[loop]->showing == 1)
+				{
+					if(!ptz_window[loop]->visible())
+					{
+						fl_line(ptz_window[loop]->x(), h() - 1, ptz_window[loop]->x() + ptz_window[loop]->w(), h() - 1);
+						fl_font(FL_HELVETICA, 11);
+						fl_draw("PTZ", ptz_window[loop]->x(), h() - 20, ptz_window[loop]->w(), 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+					}
+				}
+			}
+		}
+	}
+}
+
+void	MyWin::DrawImmediateModeLabels()
+{
+	FrameImmediate();
+	char buf[128];
+	Camera *cam = DisplayedCamera();
+	if((cam->image_sx > 0) && (cam->image_sy > 0))
+	{
+		char *mode1 = "";
+		if(immediate_drawing_window->mode == DRAWING_MODE_NONE) mode1 = "None";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_GENERAL) mode1 = "General";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_TEXT) mode1 = "Text";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_LINE) mode1 = "Line";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_RECTANGLE) mode1 = "Rectangle";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_POLYGON) mode1 = "Polygon";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_FREEHAND) mode1 = "Freehand";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_DELETE) mode1 = "Delete";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_HIDE) mode1 = "Hide";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_LOOP) mode1 = "Loop";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_ELLIPSE) mode1 = "Ellipse";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_IMAGE) mode1 = "Image";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_PIXELATE) mode1 = "Pixelate";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_RECTANGLE_PASSTHRU) mode1 = "Rectangle Passthrough";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_POLYGON_PASSTHRU) mode1 = "Polygon Passthrough";
+		else if(immediate_drawing_window->mode == DRAWING_MODE_ELLIPSE_PASSTHRU) mode1 = "Ellipse Passthrough";
+		
+		char *mode2 = "Scroll";
+		if(rubberband_mode == RUBBERBAND_MODE) mode2 = "Rubberband";
+		else if(rubberband_mode == REPOSITION_MODE) mode2 = "Reposition";
+		else if(rubberband_mode == GUIDELINE_MODE) mode2 = "Layout";
+		else if(rubberband_mode == INTEREST_MODE) mode2 = "Set Interest";
+		else if(rubberband_mode == IM_DRAWING_MODE) mode2 = "Drawing";
+		else if(rubberband_mode == DYNAMIC_COLORING_MODE) mode2 = "Dynamic Coloring";
+		sprintf(buf, "Editing Layer: %d Mode: %s (%s)\n", cam->edit_layer, mode1, mode2);
+		fl_color(WHITE);
+		fl_font(FL_HELVETICA, 12);
+		fl_draw(buf, cam->image_sx + 20, cam->image_sy + 20, 200, 20, FL_ALIGN_LEFT);
+	}
+}
+
+void	MyWin::DrawResizeCorners(Camera *cam)
+{
+	if(move_corner == 1)
+	{
+		fl_color(YELLOW);
+		fl_rectf(cam->image_sx + 2, cam->image_sy + 2, 25, 25);
+		fl_color(BLACK);
+		fl_font(FL_HELVETICA, 7);
+		fl_draw("Move", cam->image_sx + 2, cam->image_sy + 2, 25, 25, FL_ALIGN_CENTER);
+	}
+	if(resize_corner == 1)
+	{
+		fl_color(BLUE);
+		fl_rectf(cam->image_sx + cam->display_width - 27, cam->image_sy + cam->display_height - 27, 25, 25);
+		fl_color(WHITE);
+		fl_font(FL_HELVETICA, 7);
+		fl_draw("Size", cam->image_sx + cam->display_width - 27, cam->image_sy + cam->display_height - 27, 25, 25, FL_ALIGN_CENTER);
+	}
+	if(restore_corner == 1)
+	{
+		fl_color(fl_rgb_color(0, 64, 0));
+		fl_rectf(cam->image_sx + 2, cam->image_sy + cam->display_height - 27, 25, 25);
+		fl_color(WHITE);
+		fl_font(FL_HELVETICA, 7);
+		fl_draw("Reset", cam->image_sx + 2, cam->image_sy + cam->display_height - 27, 25, 25, FL_ALIGN_CENTER);
+	}
+}
+
+void	MyWin::DrawCropOutput(Camera *cam)
+{
+	int xx = crop_output_x + cam->image_sx;
+	int yy = crop_output_y + cam->image_sy;
+	fl_rect(xx, yy, output_width, output_height, YELLOW);
+	fl_line(xx - 3, yy + 10, xx - 3, yy - 3, xx + 10, yy - 3);
+	fl_line(xx + output_width - 10, yy - 3, xx + output_width + 3, yy - 3, xx + output_width + 3, yy + 10);
+	fl_line(xx - 3, yy + output_height - 10, xx - 3, yy + output_height + 3, xx + 10, yy + output_height + 3);
+	fl_line(xx + output_width + 3, yy + output_height - 10, xx + output_width + 3, yy + output_height + 3, xx + output_width - 10, yy + output_height + 3);
+}
+
+void	MyWin::DrawGuidelines(Camera *cam)
+{
+	if(hide_guidelines == 0)
+	{
+		if(guideline_cnt > 0)
+		{
+			for(int loop = 0;loop < guideline_cnt;loop++)
+			{
+				if(guideline[loop] != NULL)
+				{
+					if(guideline[loop]->type == HORIZONTAL_GUIDELINE)
+					{
+						int use_y = guideline[loop]->pos + cam->image_sy;
+						fl_color(guideline[loop]->use_color);
+						fl_line(cam->image_sx, use_y, cam->image_sx + (int)display_width, use_y);
+					}
+					else if(guideline[loop]->type == VERTICAL_GUIDELINE)
+					{
+						int use_x = guideline[loop]->pos + cam->image_sx;
+						fl_color(guideline[loop]->use_color);
+						fl_line(use_x, cam->image_sy, use_x, cam->image_sy + (int)display_height);
+					}
+				}
+			}
+		}
+	}
+}
+
+void	MyWin::DrawTransitionProgress(Camera *cam)
+{
+	if((transition_cnt < 1.0) && (transition_cnt > 0.0))
+	{
+		fl_color(BLUE);
+		fl_line_style(FL_SOLID, 4);
+		fl_line(cam->image_sx + 3, cam->image_sy + cam->display_height, cam->image_sx + ((display_width - 6) * transition_cnt), cam->image_sy + (cam->display_height - 3));
+		fl_line_style(FL_SOLID, 1);
+	}
+}
+
+void	MyWin::DrawPTZJoystick()
+{
+	int cx = w() / 2;
+	int cy = h() / 2;
+	for(int loop = 1;loop <= 100;loop += 10)
+	{
+		fl_rect(cx - loop, cy - loop, (loop * 2), (loop * 2));
+	}
+	fl_color(YELLOW);
+	fl_rect(cx + (ptz_joystick_x - 10), cy + (ptz_joystick_y - 10), 20, 20);
+}
+
+void	MyWin::DrawCenterMessage()
+{
+	fl_color(YELLOW);
+	fl_font(FL_HELVETICA, 36);
+	int use_x = 0;
+	int use_y = 0;
+	fl_measure(center_message, use_x, use_y);
+	fl_draw(center_message, (w() / 2) - (use_x / 2), (h() / 2) - (use_y / 2));
+	center_message_timer--;
+}
+
+void	MyWin::DrawInnerMisc(int use_image_sx, int use_image_sy)
+{
+	if((magic_x > -1) && (magic_y > -1))
+	{
+		int sx = (w() / 2) - (1280 / 2) + magic_x;
+		int sy = (h() / 2) - (720 / 2) + magic_y;
+		fl_color(YELLOW);
+		fl_rect(sx, sy, 100, 100);
+	}
+	if(rubberband_mode == INTEREST_MODE)
+	{
+		MarkInterest();
+	}
+	if((zoom_boxing == 1) && (drag_start_x > -1) && (drag_start_y > -1))
+	{
+		ResizeDetail();
+	}
+	if(ptz_zoomer != 0)
+	{
+		DrawPTZZoomer(use_image_sx, use_image_sy);
+	}
+	if(ptz_joystick == 1)
+	{
+		DrawPTZJoystick();
+	}
+	if(center_message_timer > 0)
+	{
+		DrawCenterMessage();
+	}
+	if(source_cnt > 0)
+	{
+		if(video_thumbnail_group->visible())
+		{
+			DrawThumbnails();
+		}
+		DrawPIPsAfter();
+	}
+}
+
+void	MyWin::DrawOuterMisc(int use_image_sx, int use_image_sy)
+{
+	if(split == 0)
+	{
+		DrawInnerMisc(use_image_sx, use_image_sy);
+	}
+	else
+	{
+		fl_rectf(x(), y(), w(), h(), BLACK);
+		SplitScreen();
+	}
+	if((dumped_frames > 0) || (dump_type != NULL))
+	{
+		DrawDumpingMessage();
+	}
+	if(encoding > 0)
+	{
+		DrawEncodingMessage();
+	}
+	if(extracting != 0)
+	{
+		DrawExtractingMessage();
+	}
+	else
+	{
+		Camera *cam = DisplayedCamera();
+		if(cam != NULL)
+		{
+			if(cam->type == CAMERA_TYPE_AV)
+			{
+				cam->DisplayAVWindow();
+			}
+			else
+			{
+				progress_scrubber->hide();
+			}
+		}
+		else
+		{
+			progress_scrubber->hide();
+		}
+	}
+}
+
+void	MyWin::DrawDisplayedSources(Camera *cam, Camera *alt_cam, int& use_image_sx, int& use_image_sy, int someone_is_dragging, int moving_element)
+{
+	if(split == 0)
+	{
+		if(cam->zoom_box_display == 0)
+		{
+			use_image_sx = cam->image_sx;
+			use_image_sy = cam->image_sy;
+		}
+		DisplayOutput(cam, in_mat, alt_cam);
+		cam->PaintRecognizedObjects(test_recognition);
+		if((crop_output == 1) && (alt_cam == NULL))
+		{
+			if((output_width < in_mat.cols) || (output_height < in_mat.rows))
+			{
+				DrawCropOutput(cam);
+			}
+		}
+		DrawResizeCorners(cam);
+		if((buttonized_visible == 1) || (someone_is_dragging == 1))
+		{
+			cam->DrawImageWindowsAfter();
+		}
+		if(highlight_image_windows == 1)
+		{
+			cam->HighlightImageWindows();
+		}
+		if((rubberband_mode == IM_DRAWING_MODE) || (moving_element == 1))
+		{
+			if(grid_size > 1)
+			{
+				if(hide_grid == 0)
+				{
+					cam->DrawImageWindowGrid(grid_size);
+				}
+			}
+		}
+	}
+}
+
+void	MyWin::DrawPostMainImage(Camera *cam, int took_snapshot)
+{
+	if(took_snapshot == 1)
+	{
+		if((cam->display_width < w()) || (cam->display_height < h()))
+		{
+			fl_rect(cam->image_sx - 5, cam->image_sy - 5, cam->display_width + 10, cam->display_height + 10);
+		}
+		else
+		{
+			fl_rectf(0, 0, w(), h());
+		}
+	}
+	if(cam == DisplayedCamera())
+	{
+		if(split == 0)
+		{
+			DrawGuidelines(cam);
+		}
+	}
+	if(rubberband_mode == INTEREST_MODE)
+	{
+		if(split == 0)
+		{
+			MarkInterestGrid();
+		}
+	}
+	else if(cam->fps > 0.0)
+	{
+		if(audio_thumbnail_cnt > 0)
+		{
+			if(pulse_mixer != NULL)
+			{
+				if(split == 0)
+				{
+					int no_go = 0;
+					if(anim_timeline != NULL)
+					{
+						if(anim_timeline->visible())
+						{
+							no_go = 1;
+						}
+					}
+					if(no_go == 0)
+					{
+						DrawAudioGraph(cam);
+					}
+				}
+			}
+		}
+		if(cam == DisplayedCamera())
+		{
+			if(split == 0)
+			{
+				current_fps_window->showing = 1;
+				current_fps_window->draw();
+				current_fps_window->showing = 0;
+			}
+		}
+	}
+	else
+	{
+		CalcInitialFPS();
+	}
+}
+
+void	MyWin::DrawPostCapture(Camera *cam, Camera *alt_cam, int& use_image_sx, int& use_image_sy)
+{
+void		python_run_frame_filter(void *in_function, cv::Mat mat);
+
+	in_mat = cam->mat;
+	if(!in_mat.empty())
+	{
+		cam->true_total_frames++;
+		cam->local_ts = local_timestamp();
+		cam->failed = 0;
+		int moving_element = 0;
+		int someone_is_dragging = 0;
+		if(cam->record == 1)
+		{
+			if(python_filter_function != NULL)
+			{
+				python_run_frame_filter(python_filter_function, in_mat);
+			}
+			if((muxer_cnt > 0) || (follow_mode == FOLLOW_MODE_NONE) || (ndi_streaming == 1))
+			{
+				if(motion_debug == 1)
+				{
+					FrameForMuxer(cam, cam->alt_record_mat);
+				}
+				else
+				{
+					FrameForMuxer(cam, in_mat);
+				}
+			}
+			else
+			{
+				cam->Record();
+			}
+		}
+		if(global_log_window != NULL)
+		{
+			if(global_log_window->visible())
+			{
+				global_log_window->redraw();
+			}
+		}
+		if(monitor_window != NULL)
+		{
+			if(monitor_window->visible())
+			{
+				monitor_window->redraw();
+			}
+		}
+		if(transmitting == 1)
+		{
+			if(cam == DisplayedCamera())
+			{
+				cam->PrepImageForNet(in_mat);
+			}
+		}
+		int took_snapshot = 0;
+		if(cam->snapshot == 1)
+		{
+			if(cam == DisplayedCamera())
+			{
+				cam->SnapshotFrame();
+				fl_color(YELLOW);
+				took_snapshot = 1;
+				cam->snapshot = 0;
+			}
+		}
+		if(cam == DisplayedCamera())
+		{
+			DrawDisplayedSources(cam, alt_cam, use_image_sx, use_image_sy, someone_is_dragging, moving_element);
+		}
+		DrawPostMainImage(cam, took_snapshot);
+	}
+	else
+	{
+		if(cam == DisplayedCamera())
+		{
+			if(cam->failed > 30)
+			{
+				char buf[8192];
+				sprintf(buf, "%s\nNo Frame", cam->alias);
+				SetErrorMessage(buf);
+				cam->failed = 0;
+			}
+			cam->failed++;
+			usleep(30000);
+		}
+	}
+}
+
+void	MyWin::DrawRubberband()
+{
+	if(rubberband_mode == RUBBERBAND_MODE)
+	{
+		if((rubberband_x > -1)
+		&& (rubberband_y > -1)
+		&& (rubberband_w > -1)
+		&& (rubberband_h > -1))
+		{
+			fl_color(WHITE);
+			Camera *cam = DisplayedCamera();
+			int use_x = (rubberband_x * cam->scale_w) + cam->image_sx;
+			int use_y = (rubberband_y * cam->scale_h) + cam->image_sy;
+			int use_w = rubberband_w * cam->scale_w;
+			int use_h = rubberband_h * cam->scale_h;
+			fl_rect(use_x, use_y, use_w, use_h);
+			int lx = (use_x + use_w) - 8;
+			int ly = (use_y + use_h) - 8;
+			fl_color(YELLOW);
+			fl_rect(use_x - 8, use_y - 8, 16, 16);
+			fl_rect(lx, use_y - 8, 16, 16);
+			fl_rect(lx, ly, 16, 16);
+			fl_rect(use_x - 8, ly, 16, 16);
+		}
+	}
+}
+
+void	MyWin::DrawDraggingThumbnail()
+{
+	if(dragging_thumb != NULL)
+	{
+		ThumbButton *tb = dragging_thumb;
+		fl_draw_image(tb->mat.ptr(), Fl::event_x(), Fl::event_y(), tb->mat.cols, tb->mat.rows, tb->mat.channels());
+		dragging_thumb_x = Fl::event_x();
+		dragging_thumb_y = Fl::event_y();
+	}
+}
+
+void	MyWin::DrawCapture(Camera *cam, int outer, int& sx, int& sy)
+{
+	Camera *alt_cam = NULL;
+	VideoCapture *cap = cam->cap;
+	if(cap != NULL)
+	{
+		if((cap->isOpened()) || (cam->type == CAMERA_TYPE_IMAGE))
+		{
+			TriggerCamera(cam);
+		}
+	}
+	current_source = outer;
+	all_frames++;
+	if((redraw_cnt == 0) 
+	|| (outer == displayed_source) 
+	|| (split == 1) 
+	|| (cam->priority > 0) 
+	|| (cam->snapshot == 1) 
+	|| (cam == last_cam)
+	|| (cam->record == 1))
+	{
+		cam->Capture();
+		cam->focus_frame_ready = 1;
+		if(alt_displayed_source > -1)
+		{
+			alt_cam = camera[alt_displayed_source];
+			if((power_all == 1) && (alt_cam->power == 1))
+			{
+				alt_cam->Capture();	
+			}
+		}
+	}
+	if(outer == displayed_source)
+	{
+		if(embed_pip == 1)
+		{
+			if(multipip > 0)
+			{
+				cam->DrawPIP();
+			}
+			else
+			{
+				cam->DrawEmbeddedPIP();
+			}
+		}
+	}
+	DrawPostCapture(cam, alt_cam, sx, sy);
+}
+
+void	MyWin::DrawCyclingMessage()
+{
+	fl_color(WHITE);
+	fl_font(FL_HELVETICA, 11);
+	char buf[1024];
+	char *paused_str = "";
+	if(cycle_camera_pause == 1)
+	{
+		paused_str = "Paused";
+	}
+	sprintf(buf, "Cycling: %.1f %s", cycle_cameras, paused_str);
+	fl_draw(buf, 10, video_thumbnail_group->y() - 20, 100, 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+}
+
+void	MyWin::DrawExitMessage()
+{
+	if(actively_exiting == 0)
+	{
+		char buf[128];
+		time_t diff = exit_timer - time(0);
+		sprintf(buf, "%ld", diff);
+		fl_color(WHITE);
+		fl_font(FL_HELVETICA, 64);
+		fl_draw("Press Escape to Exit", 0, 0, w(), h() - 250, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+		fl_font(FL_HELVETICA, 128);
+		fl_draw(buf, 0, 0, w(), h(), FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	}
+	else
+	{
+		fl_color(WHITE);
+		fl_font(FL_HELVETICA, 42);
+		fl_draw("Exiting", 0, 0, w(), h(), FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+	}
+}
+
+void	MyWin::DrawCamera(int camera_index, int& sx, int& sy)
+{
+	if(camera[camera_index] != NULL)
+	{
+		Camera *cam = camera[camera_index];
+		if((power_all == 1) && (cam->power == 1))
+		{
+			DrawCapture(cam, camera_index, sx, sy);
+		}
+		if(camera_index == displayed_source)
+		{
+			if(split == 0)
+			{
+				cam->DisplayNote();
+			}
+		}
+		if(split == 0)
+		{
+			cam->DrawFilterDialogs();
+			cam->HighlightShapes();
+			DrawCrosshairs(cam);
+			if(transition != TRANSITION_NONE)
+			{
+				DrawTransitionProgress(cam);
+			}
+		}
+	}
+	else
+	{
+		fprintf(stderr, "Error: Current stream (%d of %d) is NULL.\n", camera_index, source_cnt);
+		CompressCameraList();
+		UpdateThumbButtons();
+	}
+}
+
+void	MyWin::DrawMiscPost()
+{
+	if(transitions_window != NULL)
+	{
+		if(transitions_window->visible())
+		{
+			transitions_window->Update();
+		}
+	}
+	DrawEmbeddedApps();
+	DrawDraggingThumbnail();
+	if(split == 0)
+	{
+		DrawRubberband();
+		if(retain_commands == 0)
+		{
+			if(mouse_moving > 0)
+			{
+				DrawPanelLabels();
+			}
+		}
+	}
+}
+
 void	MyWin::draw()
 {
 	Draw();
@@ -60323,7 +62156,6 @@ void	MyWin::draw()
 
 void	MyWin::Draw()
 {
-void		python_run_frame_filter(void *in_function, cv::Mat mat);
 struct tm	*tm;
 int			loop;
 char		buf[256];
@@ -60345,517 +62177,11 @@ int			outer;
 	{
 		for(outer = 0;outer < source_cnt;outer++)
 		{
-			if(camera[outer] != NULL)
-			{
-				Camera *cam = camera[outer];
-				if((power_all == 1) && (cam->power == 1))
-				{
-					VideoCapture *cap = cam->cap;
-					if(cap != NULL)
-					{
-						if(cap->isOpened())
-						{
-							TriggerCamera(cam);
-						}
-						else if(cam->type == CAMERA_TYPE_IMAGE)
-						{
-							TriggerCamera(cam);
-						}
-					}
-					current_source = outer;
-					all_frames++;
-					if((redraw_cnt == 0) 
-					|| (outer == displayed_source) 
-					|| (split == 1) 
-					|| (cam->priority > 0) 
-					|| (cam->snapshot == 1) 
-					|| (cam == last_cam)
-					|| (cam->record == 1))
-					{
-						cam->Capture();
-						cam->focus_frame_ready = 1;
-						if(alt_displayed_source > -1)
-						{
-							alt_cam = camera[alt_displayed_source];
-							if((power_all == 1) && (alt_cam->power == 1))
-							{
-								alt_cam->Capture();	
-							}
-						}
-					}
-					if(outer == displayed_source)
-					{
-						if(embed_pip == 1)
-						{
-							if(multipip > 0)
-							{
-								cam->DrawPIP();
-							}
-							else
-							{
-								cam->DrawEmbeddedPIP();
-							}
-						}
-					}
-					in_mat = cam->mat;
-					if(!in_mat.empty())
-					{
-						cam->true_total_frames++;
-						cam->local_ts = local_timestamp();
-						cam->failed = 0;
-						int moving_element = 0;
-						int someone_is_dragging = 0;
-						if(cam->record == 1)
-						{
-							cam->DrawImageWindowsBefore(-1, 1, in_mat, moving_element, someone_is_dragging);
-							if(python_filter_function != NULL)
-							{
-								python_run_frame_filter(python_filter_function, in_mat);
-							}
-							if((muxer_cnt > 0) || (follow_mode == FOLLOW_MODE_NONE) || (ndi_streaming == 1))
-							{
-								if(motion_debug == 1)
-								{
-									FrameForMuxer(cam, cam->alt_record_mat);
-								}
-								else
-								{
-									FrameForMuxer(cam, in_mat);
-								}
-							}
-							else
-							{
-								cam->Record();
-							}
-						}
-						if(global_log_window != NULL)
-						{
-							if(global_log_window->visible())
-							{
-								global_log_window->redraw();
-							}
-						}
-						if(monitor_window != NULL)
-						{
-							if(monitor_window->visible())
-							{
-								monitor_window->redraw();
-							}
-						}
-						if(transmitting == 1)
-						{
-							if(outer == displayed_source)
-							{
-								cam->PrepImageForNet(in_mat);
-							}
-						}
-						int took_snapshot = 0;
-						if(cam->snapshot == 1)
-						{
-							if(outer == displayed_source)
-							{
-								cam->SnapshotFrame();
-								fl_color(YELLOW);
-								took_snapshot = 1;
-								cam->snapshot = 0;
-							}
-						}
-						if(outer == displayed_source)
-						{
-							if(split == 0)
-							{
-								if(cam->zoom_box_display == 0)
-								{
-									use_image_sx = cam->image_sx;
-									use_image_sy = cam->image_sy;
-								}
-								DisplayOutput(cam, in_mat, alt_cam);
-								cam->PaintRecognizedObjects(test_recognition);
-								if((crop_output == 1) && (alt_cam == NULL))
-								{
-									if((output_width < in_mat.cols) || (output_height < in_mat.rows))
-									{
-										int xx = crop_output_x + cam->image_sx;
-										int yy = crop_output_y + cam->image_sy;
-										fl_rect(xx, yy, output_width, output_height, YELLOW);
-										fl_line(xx - 3, yy + 10, xx - 3, yy - 3, xx + 10, yy - 3);
-										fl_line(xx + output_width - 10, yy - 3, xx + output_width + 3, yy - 3, xx + output_width + 3, yy + 10);
-										fl_line(xx - 3, yy + output_height - 10, xx - 3, yy + output_height + 3, xx + 10, yy + output_height + 3);
-										fl_line(xx + output_width + 3, yy + output_height - 10, xx + output_width + 3, yy + output_height + 3, xx + output_width - 10, yy + output_height + 3);
-									}
-								}
-								if(move_corner == 1)
-								{
-									fl_color(YELLOW);
-									fl_rectf(cam->image_sx + 2, cam->image_sy + 2, 25, 25);
-									fl_color(BLACK);
-									fl_font(FL_HELVETICA, 7);
-									fl_draw("Move", cam->image_sx + 2, cam->image_sy + 2, 25, 25, FL_ALIGN_CENTER);
-								}
-								if(resize_corner == 1)
-								{
-									fl_color(BLUE);
-									fl_rectf(cam->image_sx + cam->display_width - 27, cam->image_sy + cam->display_height - 27, 25, 25);
-									fl_color(WHITE);
-									fl_font(FL_HELVETICA, 7);
-									fl_draw("Size", cam->image_sx + cam->display_width - 27, cam->image_sy + cam->display_height - 27, 25, 25, FL_ALIGN_CENTER);
-								}
-								if(restore_corner == 1)
-								{
-									fl_color(fl_rgb_color(0, 64, 0));
-									fl_rectf(cam->image_sx + 2, cam->image_sy + cam->display_height - 27, 25, 25);
-									fl_color(WHITE);
-									fl_font(FL_HELVETICA, 7);
-									fl_draw("Reset", cam->image_sx + 2, cam->image_sy + cam->display_height - 27, 25, 25, FL_ALIGN_CENTER);
-								}
-								if((buttonized_visible == 1) || (someone_is_dragging == 1))
-								{
-									cam->DrawImageWindowsAfter();
-								}
-								if(highlight_image_windows == 1)
-								{
-									cam->HighlightImageWindows();
-								}
-								if((rubberband_mode == IM_DRAWING_MODE) || (moving_element == 1))
-								{
-									if(grid_size > 1)
-									{
-										if(hide_grid == 0)
-										{
-											cam->DrawImageWindowGrid(grid_size);
-										}
-									}
-								}
-							}
-						}
-						if(took_snapshot == 1)
-						{
-							if((cam->display_width < w()) || (cam->display_height < h()))
-							{
-								fl_rect(cam->image_sx - 5, cam->image_sy - 5, cam->display_width + 10, cam->display_height + 10);
-							}
-							else
-							{
-								fl_rectf(0, 0, w(), h());
-							}
-						}
-						if(outer == displayed_source)
-						{
-							if(hide_guidelines == 0)
-							{
-								if(guideline_cnt > 0)
-								{
-									for(loop = 0;loop < guideline_cnt;loop++)
-									{
-										if(guideline[loop] != NULL)
-										{
-											if(guideline[loop]->type == HORIZONTAL_GUIDELINE)
-											{
-												int use_y = guideline[loop]->pos + cam->image_sy;
-												fl_color(guideline[loop]->use_color);
-												fl_line(cam->image_sx, use_y, cam->image_sx + (int)display_width, use_y);
-											}
-											else if(guideline[loop]->type == VERTICAL_GUIDELINE)
-											{
-												int use_x = guideline[loop]->pos + cam->image_sx;
-												fl_color(guideline[loop]->use_color);
-												fl_line(use_x, cam->image_sy, use_x, cam->image_sy + (int)display_height);
-											}
-										}
-									}
-								}
-							}
-						}
-						if(rubberband_mode == INTEREST_MODE)
-						{
-							if(split == 0)
-							{
-								MarkInterestGrid();
-							}
-						}
-						else if(cam->fps > 0.0)
-						{
-							if(audio_thumbnail_cnt > 0)
-							{
-								if(pulse_mixer != NULL)
-								{
-									if(split == 0)
-									{
-										int no_go = 0;
-										if(anim_timeline != NULL)
-										{
-											if(anim_timeline->visible())
-											{
-												no_go = 1;
-											}
-										}
-										if(no_go == 0)
-										{
-											DrawAudioGraph(cam);
-										}
-									}
-								}
-							}
-							if(cam == DisplayedCamera())
-							{
-								if(split == 0)
-								{
-									current_fps_window->showing = 1;
-									current_fps_window->draw();
-									current_fps_window->showing = 0;
-								}
-							}
-						}
-						else
-						{
-							CalcInitialFPS();
-						}
-					}
-					else
-					{
-						if(outer == displayed_source)
-						{
-							if(cam->failed > 30)
-							{
-								char buf[8192];
-								sprintf(buf, "%s\nNo Frame", cam->alias);
-								SetErrorMessage(buf);
-								cam->failed = 0;
-							}
-							cam->failed++;
-							usleep(30000);
-						}
-					}
-				}
-				if(outer == displayed_source)
-				{
-					cam->DisplayNote();
-				}
-				if(split == 0)
-				{
-					cam->DrawFilterDialogs();
-					cam->HighlightShapes();
-					DrawCrosshairs(cam);
-					if((transition_cnt < 1.0) && (transition_cnt > 0.0))
-					{
-						fl_color(BLUE);
-						fl_line_style(FL_SOLID, 4);
-						fl_line(cam->image_sx + 3, cam->image_sy + cam->display_height, cam->image_sx + ((display_width - 6) * transition_cnt), cam->image_sy + (cam->display_height - 3));
-						fl_line_style(FL_SOLID, 1);
-					}
-				}
-			}
-			else
-			{
-				fprintf(stderr, "Error: Current stream (%d of %d) is NULL.\n", outer, source_cnt);
-				CompressCameraList();
-				UpdateThumbButtons();
-			}
+			DrawCamera(outer, use_image_sx, use_image_sy);
 		}
-		if(split == 0)
-		{
-			if((magic_x > -1) && (magic_y > -1))
-			{
-				int sx = (w() / 2) - (1280 / 2) + magic_x;
-				int sy = (h() / 2) - (720 / 2) + magic_y;
-				fl_color(YELLOW);
-				fl_rect(sx, sy, 100, 100);
-			}
-			if(rubberband_mode == INTEREST_MODE)
-			{
-				MarkInterest();
-			}
-			if((zoom_boxing == 1) && (drag_start_x > -1) && (drag_start_y > -1))
-			{
-				ResizeDetail();
-			}
-			if(ptz_zoomer != 0)
-			{
-				DrawPTZZoomer(use_image_sx, use_image_sy);
-			}
-			if(ptz_joystick == 1)
-			{
-				fl_color(GRAY);
-				int cx = w() / 2;
-				int cy = h() / 2;
-				for(loop = 1;loop <= 100;loop += 10)
-				{
-					fl_rect(cx - loop, cy - loop, (loop * 2), (loop * 2));
-				}
-				fl_color(YELLOW);
-				fl_rect(cx + (ptz_joystick_x - 10), cy + (ptz_joystick_y - 10), 20, 20);
-			}
-			if(center_message_timer > 0)
-			{
-				fl_color(YELLOW);
-				fl_font(FL_HELVETICA, 36);
-				int use_x = 0;
-				int use_y = 0;
-				fl_measure(center_message, use_x, use_y);
-				fl_draw(center_message, (w() / 2) - (use_x / 2), (h() / 2) - (use_y / 2));
-				center_message_timer--;
-			}
-			if(source_cnt > 0)
-			{
-				if(video_thumbnail_group->visible())
-				{
-					DrawThumbnails();
-				}
-				DrawPIPsAfter();
-			}
-		}
-		else
-		{
-			fl_rectf(x(), y(), w(), h(), BLACK);
-			SplitScreen();
-		}
-		if((dumped_frames > 0) || (dump_type != NULL))
-		{
-			DrawDumpingMessage();
-		}
-		if(encoding > 0)
-		{
-			DrawEncodingMessage();
-		}
-		if(extracting != 0)
-		{
-			DrawExtractingMessage();
-		}
-		else
-		{
-			Camera *cam = DisplayedCamera();
-			if(cam != NULL)
-			{
-				if(cam->type == CAMERA_TYPE_AV)
-				{
-					cam->DisplayAVWindow();
-				}
-				else
-				{
-					progress_scrubber->hide();
-				}
-			}
-			else
-			{
-				progress_scrubber->hide();
-			}
-		}
+		DrawOuterMisc(use_image_sx, use_image_sy);
 		Fl_Double_Window::draw();
-		if(transitions_window != NULL)
-		{
-			if(transitions_window->visible())
-			{
-				transitions_window->Update();
-			}
-		}
-		DrawEmbeddedApps();
-		if(dragging_thumb != NULL)
-		{
-			ThumbButton *tb = dragging_thumb;
-			fl_draw_image(tb->mat.ptr(), Fl::event_x(), Fl::event_y(), tb->mat.cols, tb->mat.rows, tb->mat.channels());
-			dragging_thumb_x = Fl::event_x();
-			dragging_thumb_y = Fl::event_y();
-		}
-		if(split == 0)
-		{
-			if((rubberband_x > -1)
-			&& (rubberband_y > -1)
-			&& (rubberband_w > -1)
-			&& (rubberband_h > -1))
-			{
-				fl_color(WHITE);
-				fl_rect(rubberband_x, rubberband_y, rubberband_w, rubberband_h);
-			}
-			if(retain_commands == 0)
-			{
-				if(mouse_moving > 0)
-				{
-					fl_color(YELLOW);
-					if((!button_group->visible()) && (hide_menu == 0))
-					{
-						if(button_group_side == SIDE_RIGHT)
-						{
-							fl_line(w() - 1, button_group->y(), w() - 1, button_group->y() + button_group->h());
-							fl_font(FL_SCREEN, 11);
-							fl_draw("C", w() - 20, (h() / 2) - 40, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("O", w() - 20, (h() / 2) - 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("M", w() - 20, (h() / 2) - 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("M", w() - 20, (h() / 2) - 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("A", w() - 20, (h() / 2) + 0, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("N", w() - 20, (h() / 2) + 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("D", w() - 20, (h() / 2) + 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("S", w() - 20, (h() / 2) + 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-						}
-						else
-						{
-							fl_line(0, button_group->y(), 0, button_group->y() + button_group->h());
-							fl_font(FL_SCREEN, 11);
-							fl_draw("C", 10, (h() / 2) - 40, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("O", 10, (h() / 2) - 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("M", 10, (h() / 2) - 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("M", 10, (h() / 2) - 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("A", 10, (h() / 2) + 0, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("N", 10, (h() / 2) + 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("D", 10, (h() / 2) + 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("S", 10, (h() / 2) + 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-						}
-					}
-					if(!video_thumbnail_group->visible())
-					{
-						if(button_group_side == SIDE_RIGHT)
-						{
-							fl_line(0, video_thumbnail_group->y(), 0, video_thumbnail_group->y() + video_thumbnail_group->h());
-							fl_font(FL_SCREEN, 11);
-							fl_draw("C", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("A", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("M", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("E", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 0, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("R", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("A", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("S", 10, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-						}
-						else
-						{
-							fl_line(w() - 1, video_thumbnail_group->y(), w() - 1, video_thumbnail_group->y() + video_thumbnail_group->h());
-							fl_font(FL_SCREEN, 11);
-							fl_draw("C", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("A", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("M", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) - 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("E", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 0, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("R", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 10, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("A", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 20, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-							fl_draw("S", w() - 20, video_thumbnail_group->y() + (video_thumbnail_group->h() / 2) + 30, 20, 10, FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-						}
-					}
-					if(!audio_thumbnail_group->visible())
-					{
-						fl_line(audio_thumbnail_group->x(), 0, audio_thumbnail_group->x() + audio_thumbnail_group->w(), 0);
-						fl_font(FL_HELVETICA, 11);
-						fl_draw("AUDIO", (audio_thumbnail_group->x() + (audio_thumbnail_group->w()) / 2) - 40, 4, 80, 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-					}
-					int cx1 = (w() / 2) - 500;
-					int cx2 = (w() / 2) + 500;
-					int cy1 = (h() - 2);
-					fl_draw("AUDIO METERS", cx1, cy1 - 21, 1000, 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-					fl_line(cx1, cy1, cx2, cy1);
-					for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
-					{
-						if(ptz_window[loop] != NULL)
-						{
-							if(ptz_window[loop]->showing == 1)
-							{
-								if(!ptz_window[loop]->visible())
-								{
-									fl_line(ptz_window[loop]->x(), h() - 1, ptz_window[loop]->x() + ptz_window[loop]->w(), h() - 1);
-									fl_font(FL_HELVETICA, 11);
-									fl_draw("PTZ", ptz_window[loop]->x(), h() - 20, ptz_window[loop]->w(), 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-								}
-							}
-						}
-					}
-				}
-			}
-		}
+		DrawMiscPost();
 		redraw_cnt++;
 		if(redraw_cnt > 60)
 		{
@@ -60878,74 +62204,21 @@ int			outer;
 	}
 	if(cycle_cameras > 0.0)
 	{
-		fl_color(WHITE);
-		fl_font(FL_HELVETICA, 11);
-		char buf[1024];
-		char *paused_str = "";
-		if(cycle_camera_pause == 1)
-		{
-			paused_str = "Paused";
-		}
-		sprintf(buf, "Cycling: %.1f %s", cycle_cameras, paused_str);
-		fl_draw(buf, 10, video_thumbnail_group->y() - 20, 100, 20, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
+		DrawCyclingMessage();
 	}
 	if((frame_immediate == 1) || (immediate_drawing_window->quick_mode == 1) || (rubberband_mode > SCROLL_MODE))
 	{
-		FrameImmediate();
-		char buf[128];
-		Camera *cam = DisplayedCamera();
-		if((cam->image_sx > 0) && (cam->image_sy > 0))
+		if(actively_exiting == 0)
 		{
-			char *mode1 = "";
-			if(immediate_drawing_window->mode == DRAWING_MODE_NONE) mode1 = "None";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_GENERAL) mode1 = "General";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_TEXT) mode1 = "Text";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_LINE) mode1 = "Line";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_RECTANGLE) mode1 = "Rectangle";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_POLYGON) mode1 = "Polygon";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_FREEHAND) mode1 = "Freehand";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_DELETE) mode1 = "Delete";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_HIDE) mode1 = "Hide";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_LOOP) mode1 = "Loop";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_ELLIPSE) mode1 = "Ellipse";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_IMAGE) mode1 = "Image";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_PIXELATE) mode1 = "Pixelate";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_RECTANGLE_PASSTHRU) mode1 = "Rectangle Passthrough";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_POLYGON_PASSTHRU) mode1 = "Polygon Passthrough";
-			else if(immediate_drawing_window->mode == DRAWING_MODE_ELLIPSE_PASSTHRU) mode1 = "Ellipse Passthrough";
-		
-			char *mode2 = "Scroll";
-			if(rubberband_mode == RUBBERBAND_MODE) mode2 = "Rubberband";
-			else if(rubberband_mode == REPOSITION_MODE) mode2 = "Reposition";
-			else if(rubberband_mode == GUIDELINE_MODE) mode2 = "Layout";
-			else if(rubberband_mode == INTEREST_MODE) mode2 = "Set Interest";
-			else if(rubberband_mode == IM_DRAWING_MODE) mode2 = "Drawing";
-			else if(rubberband_mode == DYNAMIC_COLORING_MODE) mode2 = "Dynamic Coloring";
-			sprintf(buf, "Editing Layer: %d Mode: %s (%s)\n", cam->edit_layer, mode1, mode2);
-			fl_color(WHITE);
-			fl_font(FL_HELVETICA, 12);
-			fl_draw(buf, cam->image_sx + 20, cam->image_sy + 20, 200, 20, FL_ALIGN_LEFT);
+			if(split == 0)
+			{
+				DrawImmediateModeLabels();
+			}
 		}
 	}
 	if((exit_timer > 0) && (hide_menu == 0))
 	{
-		if(actively_exiting == 0)
-		{
-			char buf[128];
-			time_t diff = exit_timer - time(0);
-			sprintf(buf, "%ld", diff);
-			fl_color(WHITE);
-			fl_font(FL_HELVETICA, 64);
-			fl_draw("Press Escape to Exit", 0, 0, w(), h() - 250, FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-			fl_font(FL_HELVETICA, 128);
-			fl_draw(buf, 0, 0, w(), h(), FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-		}
-		else
-		{
-			fl_color(WHITE);
-			fl_font(FL_HELVETICA, 42);
-			fl_draw("Exiting", 0, 0, w(), h(), FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
-		}
+		DrawExitMessage();
 	}
 	else
 	{
@@ -61529,74 +62802,77 @@ int	loop;
 			}
 		}
 	}
-	if(audio_display_timer > 0)
+	if(retain_audio != PANEL_HIDE)
 	{
-		int mw = 0;
-		int mh = 0;
-		fl_font(FL_HELVETICA, 9);
-		fl_measure("(scroll to change)", mw, mh);
-		mw = ((w() / 2) - (mw / 2));
+		if(audio_display_timer > 0)
+		{
+			int mw = 0;
+			int mh = 0;
+			fl_font(FL_HELVETICA, 9);
+			fl_measure("(scroll to change)", mw, mh);
+			mw = ((w() / 2) - (mw / 2));
 
-		int start_x = (w() / 2);
-		int start_y = h() - 80;
-		fl_color(WHITE);
-		fl_font(FL_HELVETICA, 32);
-		audio_display_timer--;
-		if(((audio_display & AUDIO_DISPLAY_FREQUENCY) == AUDIO_DISPLAY_FREQUENCY)
-		&& ((audio_display & AUDIO_DISPLAY_AMPLITUDE) == AUDIO_DISPLAY_AMPLITUDE))
-		{
-			int ww = 0;
-			int hh = 0;
-			fl_measure("Frequency & Amplitude", ww, hh);
-			start_x -= (ww / 2);
-			start_y -= (hh / 2);
-			fl_draw("Frequency & Amplitude", start_x, start_y);
-			fl_font(FL_HELVETICA, 9);
-			fl_draw("(scroll to change)", mw, start_y + 24);
-		}
-		else if((audio_display & AUDIO_DISPLAY_FREQUENCY) == AUDIO_DISPLAY_FREQUENCY)
-		{
-			int ww = 0;
-			int hh = 0;
-			fl_measure("Frequency", ww, hh);
-			start_x -= (ww / 2);
-			start_y -= (hh / 2);
-			fl_draw("Frequency", start_x, start_y);
-			fl_font(FL_HELVETICA, 9);
-			fl_draw("(scroll to change)", mw, start_y + 24);
-		}
-		else if((audio_display & AUDIO_DISPLAY_AMPLITUDE) == AUDIO_DISPLAY_AMPLITUDE)
-		{
-			int ww = 0;
-			int hh = 0;
-			fl_measure("Amplitude", ww, hh);
-			start_x -= (ww / 2);
-			start_y -= (hh / 2);
-			fl_draw("Amplitude", start_x, start_y);
-			fl_font(FL_HELVETICA, 9);
-			fl_draw("(scroll to change)", mw, start_y + 24);
-		}
-		else if((audio_display & AUDIO_DISPLAY_VU) == AUDIO_DISPLAY_VU)
-		{
-			int ww = 0;
-			int hh = 0;
-			fl_measure("VU", ww, hh);
-			start_x -= (ww / 2);
-			start_y -= (hh / 2);
-			fl_draw("VU", start_x, start_y);
-			fl_font(FL_HELVETICA, 9);
-			fl_draw("(scroll to change)", mw, start_y + 24);
-		}
-		else
-		{
-			int ww = 0;
-			int hh = 0;
-			fl_measure("No Audio Display", ww, hh);
-			start_x -= (ww / 2);
-			start_y -= (hh / 2);
-			fl_draw("No Audio Display", start_x, start_y);
-			fl_font(FL_HELVETICA, 9);
-			fl_draw("(scroll to change)", mw, start_y + 24);
+			int start_x = (w() / 2);
+			int start_y = h() - 80;
+			fl_color(WHITE);
+			fl_font(FL_HELVETICA, 32);
+			audio_display_timer--;
+			if(((audio_display & AUDIO_DISPLAY_FREQUENCY) == AUDIO_DISPLAY_FREQUENCY)
+			&& ((audio_display & AUDIO_DISPLAY_AMPLITUDE) == AUDIO_DISPLAY_AMPLITUDE))
+			{
+				int ww = 0;
+				int hh = 0;
+				fl_measure("Frequency & Amplitude", ww, hh);
+				start_x -= (ww / 2);
+				start_y -= (hh / 2);
+				fl_draw("Frequency & Amplitude", start_x, start_y);
+				fl_font(FL_HELVETICA, 9);
+				fl_draw("(scroll to change)", mw, start_y + 24);
+			}
+			else if((audio_display & AUDIO_DISPLAY_FREQUENCY) == AUDIO_DISPLAY_FREQUENCY)
+			{
+				int ww = 0;
+				int hh = 0;
+				fl_measure("Frequency", ww, hh);
+				start_x -= (ww / 2);
+				start_y -= (hh / 2);
+				fl_draw("Frequency", start_x, start_y);
+				fl_font(FL_HELVETICA, 9);
+				fl_draw("(scroll to change)", mw, start_y + 24);
+			}
+			else if((audio_display & AUDIO_DISPLAY_AMPLITUDE) == AUDIO_DISPLAY_AMPLITUDE)
+			{
+				int ww = 0;
+				int hh = 0;
+				fl_measure("Amplitude", ww, hh);
+				start_x -= (ww / 2);
+				start_y -= (hh / 2);
+				fl_draw("Amplitude", start_x, start_y);
+				fl_font(FL_HELVETICA, 9);
+				fl_draw("(scroll to change)", mw, start_y + 24);
+			}
+			else if((audio_display & AUDIO_DISPLAY_VU) == AUDIO_DISPLAY_VU)
+			{
+				int ww = 0;
+				int hh = 0;
+				fl_measure("VU", ww, hh);
+				start_x -= (ww / 2);
+				start_y -= (hh / 2);
+				fl_draw("VU", start_x, start_y);
+				fl_font(FL_HELVETICA, 9);
+				fl_draw("(scroll to change)", mw, start_y + 24);
+			}
+			else
+			{
+				int ww = 0;
+				int hh = 0;
+				fl_measure("No Audio Display", ww, hh);
+				start_x -= (ww / 2);
+				start_y -= (hh / 2);
+				fl_draw("No Audio Display", start_x, start_y);
+				fl_font(FL_HELVETICA, 9);
+				fl_draw("(scroll to change)", mw, start_y + 24);
+			}
 		}
 	}
 }
@@ -61664,7 +62940,7 @@ void	record_all_muxed_thread(MyWin *in_win)
 
 void	MyWin::RecordAllMuxed()
 {
-int		simple_record(int *flag);
+int		feed_input(int *all_muxer, unsigned char *input_buf);
 char	buf[1024];
 
 	if(record_all_muxer == NULL)
@@ -61731,7 +63007,7 @@ char	buf[1024];
 			pulse_mixer->mix_ready = 1;
 			if(record_all_muxer->fresh_image == 1)
 			{
-				simple_record((int *)record_all_muxer);
+				feed_input((int *)record_all_muxer, (unsigned char *)pulse_mixer->buffer);
 			}
 		}
 	}
@@ -62086,7 +63362,7 @@ void	MyWin::Done()
 		SetAllCamerasToStop();
 		if(save_state == 1)
 		{
-			FILE *fp = fopen("default_setup.json", "w");
+			FILE *fp = fopen(default_setup_filename, "w");
 			if(fp != NULL)
 			{
 				SaveAsJSON(fp);
@@ -62914,6 +64190,7 @@ void	MyWin::HideButtons()
 		review_button->hide();
 		reset_button->hide();
 		review_muxed_button->hide();
+		play_video_file_button->hide();
 		zoom_box_button->hide();
 		split_button->hide();
 		open_standalone_button->hide();
@@ -63001,11 +64278,30 @@ void	MyWin::HideButtons()
 	}
 }
 
+int	MyWin::CountObjectsToRecognize()
+{
+int		loop;
+
+	int cnt = 0;
+	Camera *cam = DisplayedCamera();
+	if(cam != NULL)
+	{
+		for(loop = 0;loop < recognize_class_cnt;loop++)
+		{
+			if(cam->object_index[loop] == 1)
+			{
+				cnt++;
+			}
+		}
+	}
+	return(cnt);
+}
+
 void	MyWin::ShowButtons()
 {
 void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 
-	if(hide_menu == 0)
+	if((hide_menu == 0) && (retain_commands != PANEL_HIDE))
 	{
 		if(record_button != NULL)
 		{
@@ -63038,6 +64334,7 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 						reset_camera_button->hide();
 						reset_cameras_button->hide();
 						review_muxed_button->hide();
+						play_video_file_button->hide();
 						review_button->hide();
 						load_setup_button->hide();
 						video_settings_button->hide();
@@ -63083,6 +64380,7 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 						{
 							review_muxed_button->show();
 						}
+						play_video_file_button->show();
 						if(review == NULL)
 						{
 							if(CheckIfReviewFootage())
@@ -63126,10 +64424,6 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 					if((power_all == 1) && (cam->power == 1))
 					{
 						record_button->show();
-						if(cam->record_trigger != 0)
-						{
-							override_button->show();
-						}
 					}
 					if(follow_mode != FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
 					{
@@ -63159,8 +64453,16 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 				{
 					dump_button->hide();
 				}
-				show_debug_button->show();
-				test_recognition_button->show();
+				if(CountObjectsToRecognize() > 0)
+				{
+					show_debug_button->show();
+					test_recognition_button->show();
+				}
+				else
+				{
+					show_debug_button->hide();
+					test_recognition_button->hide();
+				}
 				if(cam->zoom_box_display == 1)
 				{
 					zoom_box_button->copy_label("Cease Box Zoom");
@@ -63180,8 +64482,8 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 				if(source_cnt > 1)
 				{
 					split_button->show();
-					open_standalone_button->show();
 				}
+				open_standalone_button->show();
 				new_source_button->show();
 				if(cam != NULL)
 				{
@@ -63289,7 +64591,14 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 				{
 					jpeg_streaming_button->show();
 				}
-				reset_button->show();
+				if(recorded_frames > 0)
+				{
+					reset_button->show();
+				}
+				else
+				{
+					reset_button->hide();
+				}
 				resize_capture_button->show();
 				show_motion_debug_button->show();
 				quit_button->show();
@@ -63438,6 +64747,8 @@ void	cancel_python_filter_cb(Fl_Widget *w, void *v);
 					reset_button->hide();
 				if(review_muxed_button != NULL)
 					review_muxed_button->hide();
+				if(play_video_file_button != NULL)
+					play_video_file_button->hide();
 				if(zoom_box_button != NULL)
 					zoom_box_button->hide();
 				if(split_button != NULL)
@@ -63766,6 +65077,22 @@ char	*save_description[128];
 	}
 }
 
+void	start_default_microphone_cb(void *v)
+{
+	MyWin *win = (MyWin *)v;
+	if(win->default_microphone != NULL)
+	{
+		PulseAudioButton *pat = win->default_microphone;
+		pat->Start();
+		pat->select_button->value(1);
+		if(pat->microphone != NULL)
+		{
+			pat->microphone->in_use = 1;
+		}
+		win->default_microphone = NULL;
+	}
+}
+
 void	MyWin::ScanPulse(int use_source_list)
 {
 int	loop;
@@ -63860,19 +65187,23 @@ int	loop;
 				char *str2 = description[loop];
 				if(str != NULL)
 				{
+					int hidden = 0;
+					int default_mic = 0;
 					int def = 0;
 					if(strcmp(str, def_source) == 0)
 					{
 						def = 1;
 					}
-					char *alias = NULL;
+					char alias[1024];
+					strcpy(alias, "");
 					char *cp = str;
 					while(*cp != '\0')
 					{
 						if(strncmp(cp, "[alias=", strlen("[alias=")) == 0)
 						{
 							*cp = '\0';
-							alias = cp + strlen("[alias=");
+							cp += strlen("[alias=");
+							strcpy(alias, cp);
 							char *cp2 = alias;
 							while(*cp2 != '\0')
 							{
@@ -63883,6 +65214,18 @@ int	loop;
 								cp2++;
 							}
 						}
+						if(strncmp(cp, "[hide]", strlen("[hide]")) == 0)
+						{
+							*cp = '\0';
+							cp += strlen("[hide]");
+							hidden = 1;
+						}
+						if(strncmp(cp, "[default]", strlen("[default]")) == 0)
+						{
+							*cp = '\0';
+							cp += strlen("[default]");
+							default_mic = 1;
+						}
 						cp++;
 					}
 					if((nxx + 253) > w())
@@ -63891,7 +65234,7 @@ int	loop;
 						nyy += 40;
 					}
 					char *use_str = NULL;
-					if(alias == NULL)
+					if(strlen(alias) == 0)
 					{
 						if(str2 != NULL)
 						{
@@ -63915,8 +65258,14 @@ int	loop;
 					at = new PulseAudioButton(this, str, audio_sample_rate, audio_channels, nxx, nyy, 150, 130, use_str);
 					if(at != NULL)
 					{
+						at->hidden = hidden;
 						if(at->microphone != NULL)
 						{
+							if(default_mic == 1)
+							{
+								default_microphone = at;
+							}
+							at->microphone->hidden = hidden;
 							audio_thumbnail[at_cnt] = at;
 							at_cnt++;
 							nxx += 155;
@@ -63957,6 +65306,10 @@ int	loop;
 	{
 		RunPulse(MODE_RECORD);
 		RunPulse(MODE_PLAY);
+		if(default_microphone != NULL)
+		{
+			Fl::add_timeout(5.0, start_default_microphone_cb, this);
+		}
 	}
 }
 
@@ -64889,6 +66242,7 @@ void	toggle_show_command_cb(Fl_Widget *w, void *v)
 {
 	MyWin *win = (MyWin *)v;
 	char *str = (char *)w->label();
+	Fl_Button *b = (Fl_Button *)w;
 	if(str != NULL)
 	{
 		if(strcmp(str, "Camera") == 0)
@@ -64896,10 +66250,12 @@ void	toggle_show_command_cb(Fl_Widget *w, void *v)
 			if((win->command_set & SHOW_CAMERA_COMMANDS) == SHOW_CAMERA_COMMANDS)
 			{
 				win->command_set &= ~SHOW_CAMERA_COMMANDS;
+				b->labelcolor(fl_darker(YELLOW));
 			}
 			else
 			{
 				win->command_set |= SHOW_CAMERA_COMMANDS;
+				b->labelcolor(WHITE);
 			}
 		}
 		else if(strcmp(str, "Audio") == 0)
@@ -64907,10 +66263,12 @@ void	toggle_show_command_cb(Fl_Widget *w, void *v)
 			if((win->command_set & SHOW_AUDIO_COMMANDS) == SHOW_AUDIO_COMMANDS)
 			{
 				win->command_set &= ~SHOW_AUDIO_COMMANDS;
+				b->labelcolor(fl_darker(YELLOW));
 			}
 			else
 			{
 				win->command_set |= SHOW_AUDIO_COMMANDS;
+				b->labelcolor(WHITE);
 			}
 		}
 		else if(strcmp(str, "System") == 0)
@@ -64918,17 +66276,19 @@ void	toggle_show_command_cb(Fl_Widget *w, void *v)
 			if((win->command_set & SHOW_SYSTEM_COMMANDS) == SHOW_SYSTEM_COMMANDS)
 			{
 				win->command_set &= ~SHOW_SYSTEM_COMMANDS;
+				b->labelcolor(fl_darker(YELLOW));
 			}
 			else
 			{
 				win->command_set |= SHOW_SYSTEM_COMMANDS;
+				b->labelcolor(WHITE);
 			}
 		}
 	}
 	win->ShowButtons();
 }
 
-void	MyWin::BuildMainMenu(int audio_sinks, int audio_sources)
+void	MyWin::BuildMainMenu(int audio_sinks, int audio_sources, char *use_menu_order)
 {
 int	loop;
 
@@ -64992,207 +66352,206 @@ int	loop;
 	n_spacer->callback(toggle_show_command_cb, this);
 	y_pos += y_inc;
 
-	Fl_Box *p_spacer = new Fl_Box(8, y_pos, button_sz, button_height / 4);
-	p_spacer->box(FL_NO_BOX);
-	y_pos += (y_inc / 4);
-
-	record_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Record");
-	record_button->priority = 0;
-	record_button->copy_tooltip("Toggle recording or begin testing for record-trigger conditions.");
-	record_button->callback(record_button_cb, this);
-	record_button->shortcut(FL_F + 10);
-	if(use_old == 1)
+	camera_pack = new Fl_Pack(8, y_pos, w(), 100);
+	camera_pack->spacing(2);
+	camera_pack->box(FL_NO_BOX);
 	{
-		record_button->hide();
+		record_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Record");
+		record_button->priority = 0;
+		record_button->copy_tooltip("Toggle recording or begin testing for record-trigger conditions.");
+		record_button->callback(record_button_cb, this);
+		record_button->shortcut(FL_F + 10);
+		if(use_old == 1)
+		{
+			record_button->hide();
+		}
+		y_pos += button_height;
+
+		record_all_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "All Record");
+		record_all_button->priority = 1;
+		record_all_button->copy_tooltip("Toggle recording on all cameras.");
+		record_all_button->callback(record_all_button_cb, this);
+		if(follow_mode == FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+		{
+			record_all_button->hide();
+		}
+		y_pos += button_height;
+
+		encode_speed_window = new EncodeSpeedWindow(this, 8, y_pos, button_sz, 16);
+		encode_speed_window->copy_tooltip("Set recording speed as a fraction or multiplier of normal.");
+		y_pos += y_inc;
+
+		override_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Override");
+		override_button->priority = 0;
+		override_button->copy_tooltip("Override a recording trigger and start recording immediately.");
+		override_button->callback(override_button_cb, this);
+		y_pos += y_inc;
+
+		snapshot_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Snap Photo");
+		snapshot_button->priority = 0;
+		snapshot_button->copy_tooltip("Capture the displayed camera and save it as a PNG.");
+		snapshot_button->callback(snapshot_button_cb, this);
+		y_pos += y_inc;
+
+		trigger_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Trigger Conditions");
+		trigger_button->priority = 0;
+		trigger_button->copy_tooltip("Set trigger conditions for recording.");
+		trigger_button->callback(trigger_camera_button_cb, this);
+		y_pos += y_inc;
+
+		camera_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Camera Settings");
+		camera_settings_button->priority = 0;
+		camera_settings_button->copy_tooltip("Camera settings for the currently displayed camera.");
+		camera_settings_button->callback(camera_settings_button_cb, this);
+		y_pos += y_inc;
+
+		snapshot_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Snapshot Settings");
+		snapshot_settings_button->priority = 1;
+		snapshot_settings_button->copy_tooltip("Set trigger settings for the snapshot function.\n");
+		snapshot_settings_button->callback(snapshot_settings_button_cb, this);
+		y_pos += y_inc;
+
+		native_resolution_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Display Native Resolution");
+		native_resolution_button->priority = 1;
+		native_resolution_button->copy_tooltip("Display the current camera at the receieved resolution.");
+		native_resolution_button->callback(native_resolution_button_cb, this);
+		y_pos += y_inc;
+
+		open_standalone_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Standalone Display");
+		open_standalone_button->priority = 1;
+		open_standalone_button->copy_tooltip("Open a window displaying the currently displayed camera, without controls.");
+		open_standalone_button->callback(open_standalone_cb, this);
+		y_pos += y_inc;
+
+		zoom_box_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Box Zoom");
+		zoom_box_button->priority = 2;
+		zoom_box_button->copy_tooltip("Zoom in using a draggable selection area.");
+		zoom_box_button->callback(zoom_box_button_cb, this);
+		y_pos += y_inc;
+
+		reset_camera_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Reset Camera");
+		reset_camera_button->priority = 0;
+		reset_camera_button->copy_tooltip("Reset the currently displayed camera.");
+		reset_camera_button->callback(reset_camera_button_cb, this);
+		y_pos += y_inc;
+
+		flip_horizontal_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Flip Horizontal");
+		flip_horizontal_button->priority = 2;
+		flip_horizontal_button->copy_tooltip("Flip the currently displayed camera's image horizontally.");
+		flip_horizontal_button->callback(flip_horizontal_button_cb, this);
+		y_pos += y_inc;
+
+		flip_vertical_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Flip Vertical");
+		flip_vertical_button->priority = 2;
+		flip_vertical_button->copy_tooltip("Flip the currently displayed camera's image vertically.");
+		flip_vertical_button->callback(flip_vertical_button_cb, this);
+		y_pos += y_inc;
+
+		rotate_clockwise_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Rotate 90");
+		rotate_clockwise_button->copy_tooltip("Rotate the currently displayed camera's image clockwise by 90 degrees.");
+		rotate_clockwise_button->callback(rotate_clockwise_button_cb, this);
+		y_pos += y_inc;
+
+		clear_rotate_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Clear Rotation");
+		clear_rotate_button->priority = 2;
+		clear_rotate_button->copy_tooltip("Restore rotation to zero degrees.");
+		clear_rotate_button->callback(clear_rotate_button_cb, this);
+		y_pos += y_inc;
+
+		filter_built_in_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Filters");
+		filter_built_in_button->priority = 1;
+		filter_built_in_button->copy_tooltip("Apply filters to the currently displayed camera.\n");
+		filter_built_in_button->callback(filter_built_in_button_cb, this);
+		y_pos += y_inc;
+
+		filter_plugins_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Filter Plugins");
+		filter_plugins_button->priority = 2;
+		filter_plugins_button->copy_tooltip("Apply plug-in filters to the currently displayed camera.\n");
+		filter_plugins_button->callback(filter_plugins_button_cb, this);
+		if(global_potential_filter_cnt <= 0)
+		{
+			filter_plugins_button->hide();
+		}
+		y_pos += y_inc;
+
+		python_filter_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Python Filter");
+		python_filter_button->priority = 2;
+		python_filter_button->copy_tooltip("Apply a Python program to the frames.\n");
+		python_filter_button->callback(camera_python_filter_button_cb, this);
+		y_pos += y_inc;
+
+		fltk_plugin_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "FLTK Plugin");
+		fltk_plugin_button->priority = 2;
+		fltk_plugin_button->copy_tooltip("Apply a FLTK program to the GUI. The primary FLTK class is passed to the plugin. This allows the plugin to alter the primary UI classes attached to the passed entry point.\n");
+		fltk_plugin_button->callback(fltk_plugin_button_cb, this);
+		y_pos += y_inc;
+
+		toggle_camera_effects_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Turn Off Effects");
+		toggle_camera_effects_button->priority = 1;
+		toggle_camera_effects_button->copy_tooltip("Toggle the effects that have been applied to the currently displayed camera.");
+		toggle_camera_effects_button->callback(toggle_camera_effects_button_cb, this);
+		y_pos += y_inc;
+
+		order_effects_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Order Effects");
+		order_effects_button->priority = 1;
+		order_effects_button->copy_tooltip("Order and apply effects to the currently displayed camera.");
+		order_effects_button->callback(order_effects_button_cb, this);
+		y_pos += y_inc;
+
+		save_camera_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Save Camera");
+		save_camera_button->priority = 0;
+		save_camera_button->copy_tooltip("Save the currently displayed camera's settings to a file.\n");
+		save_camera_button->callback(save_camera_button_cb, this);
+		y_pos += y_inc;
+
+		hide_video_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Hide Video");
+		hide_video_button->priority = 1;
+		hide_video_button->copy_tooltip("Hide the images coming from the currently displayed camera.");
+		hide_video_button->callback(hide_video_button_cb, this);
+		y_pos += y_inc;
+
+		freeze_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Freeze");
+		freeze_button->priority = 1;
+		freeze_button->copy_tooltip("Freeze the image coming from the currently displayed camera.");
+		freeze_button->callback(freeze_button_cb, this);
+		y_pos += y_inc;
+
+		mute_video_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Mute Video");
+		mute_video_button->priority = 1;
+		mute_video_button->copy_tooltip("Toggle the images coming from the currently displayed camera.");
+		mute_video_button->callback(mute_video_button_cb, this);
+		y_pos += y_inc;
+
+		power_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Turn Off");
+		power_button->priority = 1;
+		power_button->copy_tooltip("Toggle sampling the currently displayed camera.");
+		power_button->callback(power_button_cb, this);
+		y_pos += y_inc;
+
+		toggle_objects_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Select Objects");
+		toggle_objects_button->priority = 1;
+		toggle_objects_button->copy_tooltip("Toggle displaying objects that appear on currently displayed camera's image.");
+		toggle_objects_button->callback(toggle_objects_button_cb, this);
+		y_pos += y_inc;
 	}
-	y_pos += button_height;
-
-	record_all_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "All Record");
-	record_all_button->priority = 1;
-	record_all_button->copy_tooltip("Toggle recording on all cameras.");
-	record_all_button->callback(record_all_button_cb, this);
-	if(follow_mode == FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
-	{
-		record_all_button->hide();
-	}
-	y_pos += button_height;
-
-	encode_speed_window = new EncodeSpeedWindow(this, 8, y_pos, button_sz, 16);
-	encode_speed_window->copy_tooltip("Set recording speed as a fraction or multiplier of normal.");
-	y_pos += y_inc;
-
-	override_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Override");
-	override_button->priority = 0;
-	override_button->copy_tooltip("Override a recording trigger and start recording immediately.");
-	override_button->callback(override_button_cb, this);
-	y_pos += y_inc;
-
-	snapshot_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Snap Photo");
-	snapshot_button->priority = 0;
-	snapshot_button->copy_tooltip("Capture the displayed camera and save it as a PNG.");
-	snapshot_button->callback(snapshot_button_cb, this);
-	y_pos += y_inc;
-
-	trigger_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Trigger Conditions");
-	trigger_button->priority = 0;
-	trigger_button->copy_tooltip("Set trigger conditions for recording.");
-	trigger_button->callback(trigger_camera_button_cb, this);
-	y_pos += y_inc;
-
-	camera_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Camera Settings");
-	camera_settings_button->priority = 0;
-	camera_settings_button->copy_tooltip("Camera settings for the currently displayed camera.");
-	camera_settings_button->callback(camera_settings_button_cb, this);
-	y_pos += y_inc;
-
-	snapshot_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Snapshot Settings");
-	snapshot_settings_button->priority = 1;
-	snapshot_settings_button->copy_tooltip("Set trigger settings for the snapshot function.\n");
-	snapshot_settings_button->callback(snapshot_settings_button_cb, this);
-	y_pos += y_inc;
-
-	native_resolution_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Display Native Resolution");
-	native_resolution_button->priority = 1;
-	native_resolution_button->copy_tooltip("Display the current camera at the receieved resolution.");
-	native_resolution_button->callback(native_resolution_button_cb, this);
-	y_pos += y_inc;
-
-	open_standalone_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Standalone Display");
-	open_standalone_button->priority = 1;
-	open_standalone_button->copy_tooltip("Open a window displaying the currently displayed camera, without controls.");
-	open_standalone_button->callback(open_standalone_cb, this);
-	y_pos += y_inc;
-
-	zoom_box_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Box Zoom");
-	zoom_box_button->priority = 2;
-	zoom_box_button->copy_tooltip("Zoom in using a draggable selection area.");
-	zoom_box_button->callback(zoom_box_button_cb, this);
-	y_pos += y_inc;
-
-	reset_camera_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Reset Camera");
-	reset_camera_button->priority = 0;
-	reset_camera_button->copy_tooltip("Reset the currently displayed camera.");
-	reset_camera_button->callback(reset_camera_button_cb, this);
-	y_pos += y_inc;
-
-	flip_horizontal_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Flip Horizontal");
-	flip_horizontal_button->priority = 2;
-	flip_horizontal_button->copy_tooltip("Flip the currently displayed camera's image horizontally.");
-	flip_horizontal_button->callback(flip_horizontal_button_cb, this);
-	y_pos += y_inc;
-
-	flip_vertical_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Flip Vertical");
-	flip_vertical_button->priority = 2;
-	flip_vertical_button->copy_tooltip("Flip the currently displayed camera's image vertically.");
-	flip_vertical_button->callback(flip_vertical_button_cb, this);
-	y_pos += y_inc;
-
-	rotate_clockwise_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Rotate 90");
-	rotate_clockwise_button->copy_tooltip("Rotate the currently displayed camera's image clockwise by 90 degrees.");
-	rotate_clockwise_button->callback(rotate_clockwise_button_cb, this);
-	y_pos += y_inc;
-
-	clear_rotate_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Clear Rotation");
-	clear_rotate_button->priority = 2;
-	clear_rotate_button->copy_tooltip("Restore rotation to zero degrees.");
-	clear_rotate_button->callback(clear_rotate_button_cb, this);
-	y_pos += y_inc;
-
-	filter_built_in_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Filters");
-	filter_built_in_button->priority = 1;
-	filter_built_in_button->copy_tooltip("Apply filters to the currently displayed camera.\n");
-	filter_built_in_button->callback(filter_built_in_button_cb, this);
-	y_pos += y_inc;
-
-	filter_plugins_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Filter Plugins");
-	filter_plugins_button->priority = 2;
-	filter_plugins_button->copy_tooltip("Apply plug-in filters to the currently displayed camera.\n");
-	filter_plugins_button->callback(filter_plugins_button_cb, this);
-	if(global_potential_filter_cnt <= 0)
-	{
-		filter_plugins_button->hide();
-	}
-	y_pos += y_inc;
-
-	python_filter_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Python Filter");
-	python_filter_button->priority = 2;
-	python_filter_button->copy_tooltip("Apply a Python program to the frames.\n");
-	python_filter_button->callback(camera_python_filter_button_cb, this);
-	y_pos += y_inc;
-
-	fltk_plugin_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "FLTK Plugin");
-	fltk_plugin_button->priority = 2;
-	fltk_plugin_button->copy_tooltip("Apply a FLTK program to the GUI. The primary FLTK class is passed to the plugin. This allows the plugin to alter the primary UI classes attached to the passed entry point.\n");
-	fltk_plugin_button->callback(fltk_plugin_button_cb, this);
-	y_pos += y_inc;
-
-	toggle_camera_effects_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Turn Off Effects");
-	toggle_camera_effects_button->priority = 1;
-	toggle_camera_effects_button->copy_tooltip("Toggle the effects that have been applied to the currently displayed camera.");
-	toggle_camera_effects_button->callback(toggle_camera_effects_button_cb, this);
-	y_pos += y_inc;
-
-	order_effects_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Order Effects");
-	order_effects_button->priority = 1;
-	order_effects_button->copy_tooltip("Order and apply effects to the currently displayed camera.");
-	order_effects_button->callback(order_effects_button_cb, this);
-	y_pos += y_inc;
-
-	save_camera_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Save Camera");
-	save_camera_button->priority = 0;
-	save_camera_button->copy_tooltip("Save the currently displayed camera's settings to a file.\n");
-	save_camera_button->callback(save_camera_button_cb, this);
-	y_pos += y_inc;
-
-	hide_video_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Hide Video");
-	hide_video_button->priority = 1;
-	hide_video_button->copy_tooltip("Hide the images coming from the currently displayed camera.");
-	hide_video_button->callback(hide_video_button_cb, this);
-	y_pos += y_inc;
-
-	freeze_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Freeze");
-	freeze_button->priority = 1;
-	freeze_button->copy_tooltip("Freeze the image coming from the currently displayed camera.");
-	freeze_button->callback(freeze_button_cb, this);
-	y_pos += y_inc;
-
-	mute_video_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Mute Video");
-	mute_video_button->priority = 1;
-	mute_video_button->copy_tooltip("Toggle the images coming from the currently displayed camera.");
-	mute_video_button->callback(mute_video_button_cb, this);
-	y_pos += y_inc;
-
-	power_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Turn Off");
-	power_button->priority = 1;
-	power_button->copy_tooltip("Toggle sampling the currently displayed camera.");
-	power_button->callback(power_button_cb, this);
-	y_pos += y_inc;
-
-	toggle_objects_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Select Objects");
-	toggle_objects_button->priority = 1;
-	toggle_objects_button->copy_tooltip("Toggle displaying objects that appear on currently displayed camera's image.");
-	toggle_objects_button->callback(toggle_objects_button_cb, this);
-	y_pos += y_inc;
+	camera_pack->end();
 
 	Fl_Box *spacer2 = new Fl_Box(8, y_pos, button_sz, button_height / 2);
 	spacer2->box(FL_NO_BOX);
 	y_pos += (y_inc / 2);
 
+	Fl_Button *n_spacer2 = new Fl_Button(8, y_pos, button_sz, button_height, "Audio");
+	n_spacer2->box(FL_FLAT_BOX);
+	n_spacer2->color(fl_darker(DARK_GRAY));
+	n_spacer2->labelcolor(WHITE);
+	n_spacer2->labelsize(font_sz + 1);
+	n_spacer2->callback(toggle_show_command_cb, this);
+	y_pos += y_inc;
+
 	audio_pack = new Fl_Pack(8, y_pos, w(), 100);
+	audio_pack->spacing(2);
 	audio_pack->box(FL_NO_BOX);
 	{
-		Fl_Button *n_spacer2 = new Fl_Button(8, y_pos, button_sz, button_height, "Audio");
-		n_spacer2->box(FL_FLAT_BOX);
-		n_spacer2->color(fl_darker(DARK_GRAY));
-		n_spacer2->labelcolor(WHITE);
-		n_spacer2->labelsize(font_sz + 1);
-		n_spacer2->callback(toggle_show_command_cb, this);
-		y_pos += y_inc;
-
-		Fl_Box *p_spacer2 = new Fl_Box(8, y_pos, button_sz, button_height / 4);
-		p_spacer2->box(FL_NO_BOX);
-		y_pos += (y_inc / 4);
-
 		audio_mute_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Mute Audio");
 		audio_mute_button->priority = 0;
 		audio_mute_button->copy_tooltip("Mute all audio from the audio mixer.");
@@ -65288,259 +66647,266 @@ int	loop;
 	n_spacer3->callback(toggle_show_command_cb, this);
 	y_pos += y_inc;
 
-	Fl_Box *p_spacer3 = new Fl_Box(8, y_pos, button_sz, button_height / 4);
-	p_spacer3->box(FL_NO_BOX);
-	y_pos += (y_inc / 4);
-
-	new_source_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "New Source");
-	new_source_button->priority = 0;
-	new_source_button->copy_tooltip("Create new cameras and microphones, including several special purpose virtual devices.");
-	new_source_button->callback(new_source_button_cb, this);
-	y_pos += y_inc;
-
-	edit_source_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Edit Source");
-	edit_source_button->priority = 0;
-	edit_source_button->copy_tooltip("Edit the settings for the currently displayed video source.");
-	edit_source_button->callback(edit_source_button_cb, this);
-	y_pos += y_inc;
-
-	select_output_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Select Output");
-	select_output_button->priority = 0;
-	select_output_button->copy_tooltip("Select the outputs for the muxed audio/video stream while recording.");
-	select_output_button->callback(select_output_button_cb, this);
-	y_pos += y_inc;
-
-	edit_output_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Edit Outputs");
-	edit_output_button->priority = 0;
-	select_output_button->copy_tooltip("Define the outputs for the muxed audio/video stream while recording.");
-	edit_output_button->callback(edit_output_button_cb, this);
-	y_pos += y_inc;
-
-	save_setup_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Save Setup");
-	save_setup_button->priority = 0;
-	save_setup_button->copy_tooltip("Save the full system settings including sources.");
-	save_setup_button->callback(save_setup_button_cb, this);
-	y_pos += y_inc;
-
-	load_setup_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Load Setup");
-	load_setup_button->priority = 0;
-	load_setup_button->copy_tooltip("Load the full system settings including defined sources.");
-	load_setup_button->callback(load_setup_button_cb, this);
-	y_pos += y_inc;
-
-	power_all_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Turn Off All");
-	power_all_button->priority = 1;
-	power_all_button->copy_tooltip("Toggle sampling for all cameras.");
-	power_all_button->callback(power_button_all_cb, this);
-	y_pos += y_inc;
-
-	cycle_cameras_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Cycle Cameras");
-	cycle_cameras_button->priority = 1;
-	cycle_cameras_button->copy_tooltip("Cycle between cameras.");
-	cycle_cameras_button->callback(cycle_cameras_button_cb, this);
-	y_pos += y_inc;
-
-	transitions_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Transitions");
-	transitions_button->priority = 1;
-	transitions_button->copy_tooltip("Select between several transitions invoked when changing the recording camera.");
-	transitions_button->callback(transitions_button_cb, this);
-	y_pos += y_inc;
-
-	if(timestamp == 0)
+	system_pack = new Fl_Pack(8, y_pos, w(), 100);
+	system_pack->spacing(2);
+	system_pack->box(FL_NO_BOX);
 	{
-		timestamp_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Timestamp");
-		timestamp_button->priority = 1;
-		timestamp_button->copy_tooltip("Imprint a timestamp on the images coming in from the recording camera.");
-		timestamp_button->callback(timestamp_button_cb, this);
+		new_source_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "New Source");
+		new_source_button->priority = 0;
+		new_source_button->copy_tooltip("Create new cameras and microphones, including several special purpose virtual devices.");
+		new_source_button->callback(new_source_button_cb, this);
+		y_pos += y_inc;
+
+		edit_source_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Edit Source");
+		edit_source_button->priority = 0;
+		edit_source_button->copy_tooltip("Edit the settings for the currently displayed video source.");
+		edit_source_button->callback(edit_source_button_cb, this);
+		y_pos += y_inc;
+
+		select_output_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Select Output");
+		select_output_button->priority = 0;
+		select_output_button->copy_tooltip("Select the outputs for the muxed audio/video stream while recording.");
+		select_output_button->callback(select_output_button_cb, this);
+		y_pos += y_inc;
+
+		edit_output_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Edit Outputs");
+		edit_output_button->priority = 0;
+		select_output_button->copy_tooltip("Define the outputs for the muxed audio/video stream while recording.");
+		edit_output_button->callback(edit_output_button_cb, this);
+		y_pos += y_inc;
+
+		save_setup_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Save Setup");
+		save_setup_button->priority = 0;
+		save_setup_button->copy_tooltip("Save the full system settings including sources.");
+		save_setup_button->callback(save_setup_button_cb, this);
+		y_pos += y_inc;
+
+		load_setup_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Load Setup");
+		load_setup_button->priority = 0;
+		load_setup_button->copy_tooltip("Load the full system settings including defined sources.");
+		load_setup_button->callback(load_setup_button_cb, this);
+		y_pos += y_inc;
+
+		power_all_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Turn Off All");
+		power_all_button->priority = 1;
+		power_all_button->copy_tooltip("Toggle sampling for all cameras.");
+		power_all_button->callback(power_button_all_cb, this);
+		y_pos += y_inc;
+
+		cycle_cameras_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Cycle Cameras");
+		cycle_cameras_button->priority = 1;
+		cycle_cameras_button->copy_tooltip("Cycle between cameras.");
+		cycle_cameras_button->callback(cycle_cameras_button_cb, this);
+		y_pos += y_inc;
+
+		transitions_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Transitions");
+		transitions_button->priority = 1;
+		transitions_button->copy_tooltip("Select between several transitions invoked when changing the recording camera.");
+		transitions_button->callback(transitions_button_cb, this);
+		y_pos += y_inc;
+
+		if(timestamp == 0)
+		{
+			timestamp_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Timestamp");
+			timestamp_button->priority = 1;
+			timestamp_button->copy_tooltip("Imprint a timestamp on the images coming in from the recording camera.");
+			timestamp_button->callback(timestamp_button_cb, this);
+			y_pos += y_inc;
+		}
+		else
+		{
+			timestamp_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "No Timestamp");
+			timestamp_button->priority = 1;
+			timestamp_button->copy_tooltip("Imprint a timestamp on the images coming in from the recording camera.");
+			timestamp_button->callback(timestamp_button_cb, this);
+			y_pos += y_inc;
+		}
+		dump_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Dump Frames");
+		dump_button->priority = 1;
+		dump_button->copy_tooltip("Save the individual frames coming in from the recording camera as image files.");
+		dump_button->callback(dump_button_cb, this);
+		dump_button->hide();
+		y_pos += y_inc;
+
+		encode_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Force Encode");
+		encode_button->priority = 1;
+		encode_button->copy_tooltip("Encode frames recorded to a buffer file in the selected muxed format.");
+		encode_button->callback(encode_button_cb, this);
+		encode_button->hide();
+		y_pos += y_inc;
+
+		test_recognition_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Test Recognition");
+		test_recognition_button->priority = 1;
+		test_recognition_button->copy_tooltip("Attempt to recognize selected objects, but do not trigger recording.");
+		test_recognition_button->callback(test_recognition_button_cb, this);
+		y_pos += y_inc;
+
+		show_debug_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Record Recognition");
+		show_debug_button->priority = 2;
+		show_debug_button->copy_tooltip("Imprint onto the video graphics demonstrating recognized objects.");
+		show_debug_button->callback(show_debug_button_cb, this);
+		y_pos += y_inc;
+
+		show_motion_debug_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Record Motion");
+		show_motion_debug_button->priority = 2;
+		show_motion_debug_button->copy_tooltip("Show motion information overlayed on the viewed image signal.");
+		show_motion_debug_button->callback(show_motion_debug_button_cb, this);
+		y_pos += y_inc;
+
+		review_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Review Footage");
+		review_button->priority = 1;
+		review_button->copy_tooltip("Review buffer footage in a simple video viewer and editor.");
+		review_button->callback(review_button_cb, this);
+		y_pos += y_inc;
+
+		review_muxed_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Review Muxed");
+		review_muxed_button->priority = 1;
+		review_muxed_button->copy_tooltip("Review muxed footage in a simple video viewer.");
+		review_muxed_button->callback(review_muxed_button_cb, this);
+		y_pos += y_inc;
+
+		play_video_file_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Play Video");
+		play_video_file_button->priority = 1;
+		play_video_file_button->copy_tooltip("Play a video file.");
+		play_video_file_button->callback(select_a_video_file, this);
+		y_pos += y_inc;
+
+		jpeg_streaming_button = NULL;
+		jpeg_streaming_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "JPEG Stream");
+		jpeg_streaming_button->priority = 2;
+		jpeg_streaming_button->copy_tooltip("Enable streaming of frames as JPG to a networked server.");
+		jpeg_streaming_button->callback(jpeg_streaming_button_cb, this);
+		if(jpeg_streaming == NULL)
+		{
+			jpeg_streaming_button->hide();
+		}
+		y_pos += y_inc;
+
+		reset_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Reset Recording");
+		reset_button->priority = 0;
+		reset_button->copy_tooltip("Reset the recording. This allows you to start over to a fresh file.");
+		reset_button->callback(reset_button_cb, this);
+		y_pos += y_inc;
+
+		reset_cameras_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Reset Cameras");
+		reset_cameras_button->priority = 0;
+		reset_cameras_button->copy_tooltip("Reset all cameras.");
+		reset_cameras_button->callback(reset_cameras_button_cb, this);
+		y_pos += y_inc;
+
+		split_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Split Screen");
+		split_button->priority = 0;
+		split_button->copy_tooltip("Divide the screen up into panels, each displaying one of the available cameras.");
+		split_button->callback(split_button_cb, this);
+		y_pos += y_inc;
+
+		monitor_video_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Monitor Video");
+		monitor_video_button->priority = 0;
+		monitor_video_button->copy_tooltip("Monitor the signal coming in from the recording camera.");
+		monitor_video_button->callback(monitor_video_button_cb, this);
+		y_pos += y_inc;
+
+		resize_capture_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Resize Capture (reset)");
+		resize_capture_button->priority = 1;
+		resize_capture_button->copy_tooltip("Resize the resolution for a video source. This will cause the source to reset.");
+		resize_capture_button->callback(resize_capture_button_cb, this);
+		y_pos += y_inc;
+
+		load_camera_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Load Camera");
+		load_camera_button->priority = 0;
+		load_camera_button->copy_tooltip("Load a camera from a previously saved file.");
+		load_camera_button->callback(load_camera_button_cb, this);
+		y_pos += y_inc;
+
+		ptz_lock_window_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "PTZ Lock Camera");
+		ptz_lock_window_button->priority = 1;
+		ptz_lock_window_button->copy_tooltip("Lock a camera to a set of PTZ controls.");
+		ptz_lock_window_button->callback(ptz_lock_window_button_cb, this);
+		y_pos += y_inc;
+
+		new_ptz_window_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "New PTZ Window");
+		new_ptz_window_button->priority = 1;
+		new_ptz_window_button->copy_tooltip("Create a new set of PTZ controls.");
+		new_ptz_window_button->callback(new_ptz_window_cb, this);
+		if(fast_start == 1)
+		{
+			new_ptz_window_button->hide();
+		}
+		y_pos += y_inc;
+
+		video_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Video Settings");
+		video_settings_button->priority = 0;
+		video_settings_button->copy_tooltip("Set overall video settings.");
+		video_settings_button->callback(video_settings_button_cb, this);
+		y_pos += y_inc;
+
+		keyboard_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Keyboard Settings");
+		keyboard_settings_button->priority = 1;
+		keyboard_settings_button->copy_tooltip("Change keyboard bindings to commands.");
+		keyboard_settings_button->callback(keyboard_settings_button_cb, this);
+		y_pos += y_inc;
+
+		ui_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "UI Settings");
+		ui_settings_button->priority = 0;
+		ui_settings_button->copy_tooltip("Change user interface settings.");
+		ui_settings_button->callback(ui_settings_button_cb, this);
+		y_pos += y_inc;
+
+		codecs_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Codecs");
+		codecs_button->priority = 0;
+		codecs_button->copy_tooltip("Select the codec to be used when recording or rendering from buffers.");
+		codecs_button->callback(container_menu_cb, this);
+		if(global_my_format_cnt > 0)
+		{
+			codecs_button->show();
+		}
+		else
+		{
+			codecs_button->hide();
+		}
+		y_pos += y_inc;
+
+		external_pgm_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "External PGMs");
+		external_pgm_button->priority = 2;
+		external_pgm_button->copy_tooltip("In open an external X11 program and embed the resulting window.\n");
+		external_pgm_button->callback(external_pgm_button_cb, this);
+		y_pos += y_inc;
+
+		create_python_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Create Python Button");
+		create_python_button->priority = 2;
+		create_python_button->copy_tooltip("Create a button that invokes a Python program.\n");
+		create_python_button->callback(create_python_button_cb, this);
+		y_pos += y_inc;
+
+		python_buttons = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Toggle Python Buttons");
+		python_buttons->priority = 1;
+		python_buttons->copy_tooltip("Show a menu of buttons that invokes Python programs.\n");
+		python_buttons->callback(python_buttons_cb, this);
+		y_pos += y_inc;
+
+		python_output_filter_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Python Filter Output");
+		python_output_filter_button->priority = 2;
+		python_output_filter_button->copy_tooltip("Apply a Python program to the frame before it is sent to be muxed.\n");
+		python_output_filter_button->callback(output_python_filter_button_cb, this);
+		y_pos += y_inc;
+
+		quit_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height + 4, "Exit");
+		quit_button->priority = 0;
+		quit_button->copy_tooltip("Exit the program.");
+		quit_button->callback(quit_cb, this);
 		y_pos += y_inc;
 	}
-	else
-	{
-		timestamp_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "No Timestamp");
-		timestamp_button->priority = 1;
-		timestamp_button->copy_tooltip("Imprint a timestamp on the images coming in from the recording camera.");
-		timestamp_button->callback(timestamp_button_cb, this);
-		y_pos += y_inc;
-	}
-	dump_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Dump Frames");
-	dump_button->priority = 1;
-	dump_button->copy_tooltip("Save the individual frames coming in from the recording camera as image files.");
-	dump_button->callback(dump_button_cb, this);
-	dump_button->hide();
-	y_pos += y_inc;
-
-	encode_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Force Encode");
-	encode_button->priority = 1;
-	encode_button->copy_tooltip("Encode frames recorded to a buffer file in the selected muxed format.");
-	encode_button->callback(encode_button_cb, this);
-	encode_button->hide();
-	y_pos += y_inc;
-
-	test_recognition_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Test Recognition");
-	test_recognition_button->priority = 1;
-	test_recognition_button->copy_tooltip("Attempt to recognize selected objects, but do not trigger recording.");
-	test_recognition_button->callback(test_recognition_button_cb, this);
-	y_pos += y_inc;
-
-	show_debug_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Record Recognition");
-	show_debug_button->priority = 2;
-	show_debug_button->copy_tooltip("Imprint onto the video graphics demonstrating recognized objects.");
-	show_debug_button->callback(show_debug_button_cb, this);
-	y_pos += y_inc;
-
-	show_motion_debug_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Record Motion");
-	show_motion_debug_button->priority = 2;
-	show_motion_debug_button->copy_tooltip("Show motion information overlayed on the viewed image signal.");
-	show_motion_debug_button->callback(show_motion_debug_button_cb, this);
-	y_pos += y_inc;
-
-	review_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Review Footage");
-	review_button->priority = 1;
-	review_button->copy_tooltip("Review buffer footage in a simple video viewer and editor.");
-	review_button->callback(review_button_cb, this);
-	y_pos += y_inc;
-
-	review_muxed_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Review Muxed");
-	review_muxed_button->priority = 1;
-	review_muxed_button->copy_tooltip("Review muxed footage in a simple video viewer.");
-	review_muxed_button->callback(review_muxed_button_cb, this);
-	y_pos += y_inc;
-
-	jpeg_streaming_button = NULL;
-	jpeg_streaming_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "JPEG Stream");
-	jpeg_streaming_button->priority = 2;
-	jpeg_streaming_button->copy_tooltip("Enable streaming of frames as JPG to a networked server.");
-	jpeg_streaming_button->callback(jpeg_streaming_button_cb, this);
-	if(jpeg_streaming == NULL)
-	{
-		jpeg_streaming_button->hide();
-	}
-	y_pos += y_inc;
-
-	reset_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Reset Recording");
-	reset_button->priority = 0;
-	reset_button->copy_tooltip("Reset the recording. This allows you to start over to a fresh file.");
-	reset_button->callback(reset_button_cb, this);
-	y_pos += y_inc;
-
-	reset_cameras_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Reset Cameras");
-	reset_cameras_button->priority = 0;
-	reset_cameras_button->copy_tooltip("Reset all cameras.");
-	reset_cameras_button->callback(reset_cameras_button_cb, this);
-	y_pos += y_inc;
-
-	split_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Split Screen");
-	split_button->priority = 0;
-	split_button->copy_tooltip("Divide the screen up into panels, each displaying one of the available cameras.");
-	split_button->callback(split_button_cb, this);
-	y_pos += y_inc;
-
-	monitor_video_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Monitor Video");
-	monitor_video_button->priority = 0;
-	monitor_video_button->copy_tooltip("Monitor the signal coming in from the recording camera.");
-	monitor_video_button->callback(monitor_video_button_cb, this);
-	y_pos += y_inc;
-
-	resize_capture_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Resize Capture (reset)");
-	resize_capture_button->priority = 1;
-	resize_capture_button->copy_tooltip("Resize the resolution for a video source. This will cause the source to reset.");
-	resize_capture_button->callback(resize_capture_button_cb, this);
-	y_pos += y_inc;
-
-	load_camera_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Load Camera");
-	load_camera_button->priority = 0;
-	load_camera_button->copy_tooltip("Load a camera from a previously saved file.");
-	load_camera_button->callback(load_camera_button_cb, this);
-	y_pos += y_inc;
-
-	ptz_lock_window_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "PTZ Lock Camera");
-	ptz_lock_window_button->priority = 1;
-	ptz_lock_window_button->copy_tooltip("Lock a camera to a set of PTZ controls.");
-	ptz_lock_window_button->callback(ptz_lock_window_button_cb, this);
-	y_pos += y_inc;
-
-	new_ptz_window_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "New PTZ Window");
-	new_ptz_window_button->priority = 1;
-	new_ptz_window_button->copy_tooltip("Create a new set of PTZ controls.");
-	new_ptz_window_button->callback(new_ptz_window_cb, this);
-	if(fast_start == 1)
-	{
-		new_ptz_window_button->hide();
-	}
-	y_pos += y_inc;
-
-	video_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Video Settings");
-	video_settings_button->priority = 0;
-	video_settings_button->copy_tooltip("Set overall video settings.");
-	video_settings_button->callback(video_settings_button_cb, this);
-	y_pos += y_inc;
-
-	keyboard_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Keyboard Settings");
-	keyboard_settings_button->priority = 1;
-	keyboard_settings_button->copy_tooltip("Change keyboard bindings to commands.");
-	keyboard_settings_button->callback(keyboard_settings_button_cb, this);
-	y_pos += y_inc;
-
-	ui_settings_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "UI Settings");
-	ui_settings_button->priority = 0;
-	ui_settings_button->copy_tooltip("Change user interface settings.");
-	ui_settings_button->callback(ui_settings_button_cb, this);
-	y_pos += y_inc;
-
-	codecs_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Codecs");
-	codecs_button->priority = 0;
-	codecs_button->copy_tooltip("Select the codec to be used when recording or rendering from buffers.");
-	codecs_button->callback(container_menu_cb, this);
-	if(global_my_format_cnt > 0)
-	{
-		codecs_button->show();
-	}
-	else
-	{
-		codecs_button->hide();
-	}
-	y_pos += y_inc;
-
-	external_pgm_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "External PGMs");
-	external_pgm_button->priority = 2;
-	external_pgm_button->copy_tooltip("In open an external X11 program and embed the resulting window.\n");
-	external_pgm_button->callback(external_pgm_button_cb, this);
-	y_pos += y_inc;
-
-	create_python_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Create Python Button");
-	create_python_button->priority = 2;
-	create_python_button->copy_tooltip("Create a button that invokes a Python program.\n");
-	create_python_button->callback(create_python_button_cb, this);
-	y_pos += y_inc;
-
-	python_buttons = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Toggle Python Buttons");
-	python_buttons->priority = 1;
-	python_buttons->copy_tooltip("Show a menu of buttons that invokes Python programs.\n");
-	python_buttons->callback(python_buttons_cb, this);
-	y_pos += y_inc;
-
-	python_output_filter_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Python Filter Output");
-	python_output_filter_button->priority = 2;
-	python_output_filter_button->copy_tooltip("Apply a Python program to the frame before it is sent to be muxed.\n");
-	python_output_filter_button->callback(output_python_filter_button_cb, this);
-	y_pos += y_inc;
-
-	Fl_Box *spacer4 = new Fl_Box(8, y_pos, button_sz, button_height / 2);
-	spacer4->box(FL_NO_BOX);
-	y_pos += (y_inc / 2);
-
-	quit_button = new MenuButton(this, button_group, font_sz, 8, y_pos, button_sz, button_height, "Exit");
-	quit_button->priority = 0;
-	quit_button->copy_tooltip("Exit the program.");
-	quit_button->callback(quit_cb, this);
-	y_pos += y_inc;
-
-	p_spacer = new Fl_Box(8, y_pos, button_sz, button_height / 4);
-	p_spacer->box(FL_NO_BOX);
-
+	system_pack->end();
+	
 	button_group_pack->end();
 	button_group_scroll->end();
 	button_group->end();
+
+	if(use_menu_order != NULL)
+	{
+		button_group->LoadOrder(use_menu_order);
+	}
+	button_group->SaveOrder("current_menu_order.json");
 	if(button_group_side == SIDE_RIGHT)
 	{
 		button_group->resize(w() - button_panel_sz, 0, button_panel_sz, h());
@@ -65641,8 +67007,9 @@ int	loop;
 
 void	MyWin::FilterCommandButtons()
 {
-int	loop;
-
+	camera_pack->show();
+	audio_pack->show();
+	system_pack->show();
 	if(strlen(command_filter) > 0)
 	{
 		recursively_matches(button_group_pack, command_filter);
@@ -65650,51 +67017,17 @@ int	loop;
 	}
 	else
 	{
-		int after = 0;
-		for(loop = 0;loop < button_group_pack->children();loop++)
+		if((command_set & SHOW_CAMERA_COMMANDS) != SHOW_CAMERA_COMMANDS)
 		{
-			Fl_Widget *child = button_group_pack->child(loop);
-			if(child != NULL)
-			{
-				if(child->align() == FL_ALIGN_CENTER)
-				{
-					char *str = (char *)child->label();
-					if(str != NULL)
-					{
-						if(strcmp(str, "Camera") == 0)
-						{
-							after = 0;
-						}
-						if(strcmp(str, "Audio") == 0)
-						{
-							after = 1;
-						}
-						if(strcmp(str, "System") == 0)
-						{
-							after = 2;
-						}
-					}
-				}
-				else
-				{
-					if(child->visible())
-					{
-						child->hide();
-						if((after == 0) && ((command_set & SHOW_CAMERA_COMMANDS) == SHOW_CAMERA_COMMANDS))
-						{
-							child->show();
-						}
-						if((after == 1) && ((command_set & SHOW_AUDIO_COMMANDS) == SHOW_AUDIO_COMMANDS))
-						{
-							child->show();
-						}
-						if((after == 2) && ((command_set & SHOW_SYSTEM_COMMANDS) == SHOW_SYSTEM_COMMANDS))
-						{
-							child->show();
-						}
-					}
-				}
-			}
+			camera_pack->hide();
+		}
+		if((command_set & SHOW_AUDIO_COMMANDS) != SHOW_AUDIO_COMMANDS)
+		{
+			audio_pack->hide();
+		}
+		if((command_set & SHOW_SYSTEM_COMMANDS) != SHOW_SYSTEM_COMMANDS)
+		{
+			system_pack->hide();
 		}
 	}
 	redraw();
@@ -65899,56 +67232,71 @@ void	MyWin::DisplayCamera(Camera *cam)
 int	loop;
 int	inner;
 
+	if(default_camera != NULL)
+	{
+		cam = default_camera;
+		default_camera = NULL;
+	}
 	if(cam != NULL)
 	{
-		im_drawing_mode = 0;
-		if(trigger_select_mode == 0)
+		if(cam->hidden == 0)
 		{
-			if((follow_mode != FOLLOW_MODE_NONE) || (muxing == 1))
+			im_drawing_mode = 0;
+			if(trigger_select_mode == 0)
 			{
-				if(displayed_source > -1)
+				if((follow_mode != FOLLOW_MODE_NONE) || (muxing == 1))
 				{
-					last_cam = camera[displayed_source];
-				}
-			}
-			displayed_source = cam->id;
-			cam->ActivateBoundMics();
-			alt_displayed_source = -1;
-			if(follow_mode != FOLLOW_MODE_NONE)
-			{
-				if(last_cam != NULL)
-				{
-					if(last_cam->recording == 1)
+					if(displayed_source > -1)
 					{
-						if(follow_mode == FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+						last_cam = camera[displayed_source];
+					}
+				}
+				displayed_source = cam->id;
+				cam->ActivateBoundMics();
+				if(camera_settings_window != NULL)
+				{
+					camera_settings_window->Update();
+				}
+				alt_displayed_source = -1;
+				if(follow_mode != FOLLOW_MODE_NONE)
+				{
+					if(last_cam != NULL)
+					{
+						if(last_cam->recording == 1)
 						{
-							cam->total_frames = last_cam->total_frames;
-							last_cam->triggers_requested = 0;
-							last_cam->recording = 0;
-							cam->triggers_requested = 1;
-							cam->recording = 1;
+							if(follow_mode == FOLLOW_MODE_RECORDING_FOLLOWS_DISPLAY)
+							{
+								cam->total_frames = last_cam->total_frames;
+								last_cam->triggers_requested = 0;
+								last_cam->recording = 0;
+								cam->triggers_requested = 1;
+								cam->recording = 1;
+							}
 						}
 					}
 				}
-			}
-			if(ptz_mode == 1)
-			{
-				if(cam->ptz_lock_interface > -1)
+				if(ptz_mode == 1)
 				{
-					for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
+					if(cam->ptz_lock_interface > -1)
 					{
-						if(ptz_window[loop] != NULL)
+						for(loop = 0;loop < PTZ_WINDOW_LIMIT;loop++)
 						{
-							if((ptz_window[loop]->bound_camera == NULL) || (ptz_window[loop]->bound_camera == cam))
+							if(ptz_window[loop] != NULL)
 							{
-								ptz_window[loop]->ptz_interface_button->SetCurrent(cam->ptz_lock_interface);
-								ptz_select_interface_cb(NULL, ptz_window[loop]);
-								if(cam->ptz_lock_camera > -1)
+								if((ptz_window[loop]->bound_camera == NULL) || (ptz_window[loop]->bound_camera == cam))
 								{
-									Fl_Widget *wid = ptz_window[loop]->ptz_camera_select_button[cam->ptz_lock_camera];
-									if(wid != NULL)
+									ptz_window[loop]->ptz_interface_button->SetCurrent(cam->ptz_lock_interface);
+									if(ptz_window[loop]->bound_camera == cam)
 									{
-										ptz_select_camera_cb(wid, ptz_window[loop]);
+										ptz_select_interface_cb(NULL, ptz_window[loop]);
+									}
+									if(cam->ptz_lock_camera > -1)
+									{
+										Fl_Widget *wid = ptz_window[loop]->ptz_camera_select_button[cam->ptz_lock_camera];
+										if(wid != NULL)
+										{
+											ptz_select_camera_cb(wid, ptz_window[loop]);
+										}
 									}
 								}
 							}
@@ -65956,31 +67304,31 @@ int	inner;
 					}
 				}
 			}
-		}
-		else
-		{
-			if(cam != DisplayedCamera())
+			else
 			{
-				Camera *another = camera[displayed_source];
-				if(another != NULL)
+				if(cam != DisplayedCamera())
 				{
-					int bad = 0;
-					for(inner = 0;inner < another->trigger_cnt;inner++)
+					Camera *another = camera[displayed_source];
+					if(another != NULL)
 					{
-						if(another->trigger[inner] == cam->id)
+						int bad = 0;
+						for(inner = 0;inner < another->trigger_cnt;inner++)
 						{
-							bad = 1;
+							if(another->trigger[inner] == cam->id)
+							{
+								bad = 1;
+							}
 						}
-					}
-					if(bad == 0)
-					{
-						another->trigger[another->trigger_cnt] = cam->id;
-						another->trigger_cnt++;
+						if(bad == 0)
+						{
+							another->trigger[another->trigger_cnt] = cam->id;
+							another->trigger_cnt++;
+						}
 					}
 				}
 			}
+			ShowButtons();
 		}
-		ShowButtons();
 	}
 }
 
@@ -66663,6 +68011,7 @@ void	EditOutputWindow::Populate()
 int	loop;
 int	inner;
 
+	my_window->LoadOutputPathList("output_paths.txt");
 	pack->clear();
 	int cnt = my_window->output_path_cnt;
 	int y_pos = 5;
@@ -66918,6 +68267,9 @@ char	*sorted_list[1024];
 	}
 	object_page = 0;
 	qsort(sorted_list, my_window->recognize_class_cnt, sizeof(char *), cmpstringp);
+	Fl_Grid *grid = new Fl_Grid(10, 25, 380, h() - 50);
+	grid->layout((h() - 20) / 16, 2);
+	grid->color(DARK_GRAY);
 	for(loop = 0;loop < OBJECTS_PER_PAGE;loop++)
 	{
 		object_name_button[loop] = new MyButton(my_window, nxx, nyy, 200, 16);
@@ -66939,6 +68291,7 @@ char	*sorted_list[1024];
 			}
 		}
 	}
+	grid->end();
 	Fl_Box *box = new Fl_Box(w() - 190, 15 + new_yp, 180, 150);
 	box->color(DARK_GRAY);
 	box->box(FL_FRAME_BOX);
@@ -67125,6 +68478,10 @@ int			loop;
 			Fl::set_color(DARK_BLUE, red, green, blue);
 			json_get_colors(json, "color cyan", red, green, blue);
 			Fl::set_color(CYAN, red, green, blue);
+			json_get_colors(json, "color purple", red, green, blue);
+			Fl::set_color(PURPLE, red, green, blue);
+			json_get_colors(json, "color dark purple", red, green, blue);
+			Fl::set_color(DARK_PURPLE, red, green, blue);
 
 			char *str = json_parse_string(json, "font");
 			if(str != NULL)
@@ -69744,6 +71101,79 @@ int	loop;
 	anim_cnt = 0;
 }
 
+void	Immediate::AdaptToResolution(int old_image_sx, int old_image_sy, int old_w, int old_h, int new_image_sx, int new_image_sy, int new_w, int new_h)
+{
+	ImDefault *def = NULL;
+	if(text != NULL) def = (ImDefault *)text;
+	if(line != NULL) def = (ImDefault *)line;
+	if(rectangle != NULL) def = (ImDefault *)rectangle;
+	if(rectangle_passthru != NULL) def = (ImDefault *)rectangle_passthru;
+	if(ellipse != NULL) def = (ImDefault *)ellipse;
+	if(ellipse_passthru != NULL) def = (ImDefault *)ellipse_passthru;
+	if(freehand != NULL) def = (ImDefault *)freehand;
+	if(pixelate != NULL) def = (ImDefault *)pixelate;
+	if(image_im != NULL) def = (ImDefault *)image_im;
+
+	double use_sx = ((1.0 / old_w) * (double)(x() - old_image_sx));
+	double use_sy = ((1.0 / old_h) * (double)(y() - old_image_sy));
+	double use_sw = ((1.0 / old_w) * (double)w());
+	double use_sh = ((1.0 / old_h) * (double)h());
+	double use_initial_x = ((1.0 / old_w) * (double)(initial_x - old_image_sx));
+	double use_initial_y = ((1.0 / old_h) * (double)(initial_y - old_image_sy));
+	double use_crop_x = ((1.0 / old_w) * (double)(crop_x - old_image_sx));
+	double use_crop_y = ((1.0 / old_h) * (double)(crop_y - old_image_sy));
+	double use_crop_w = ((1.0 / old_w) * (double)crop_w);
+	double use_crop_h = ((1.0 / old_h) * (double)crop_h);
+	double use_use_size = ((1.0 / old_w) * (double)def->use_size);
+	double use_width = ((1.0 / old_w) * (double)def->width);
+
+	double new_sx = (use_sx * new_w) + new_image_sx;
+	double new_sy = (use_sy * new_h) + new_image_sy;
+	double new_sw = use_sw * new_w;
+	double new_sh = use_sh * new_h;
+	initial_x = (use_initial_x * new_w) + new_image_sx;
+	initial_y = (use_initial_y * new_h) + new_image_sy;
+	crop_x = (use_crop_x * new_w) + new_image_sx;
+	crop_y = (use_crop_y * new_h) + new_image_sy;
+	crop_w = use_crop_w * new_w;
+	crop_h = use_crop_h * new_h;
+	def->use_size = use_use_size * new_w;
+	def->width = use_width * new_w;
+	if(def->shape == DRAWING_MODE_FREEHAND)
+	{
+		for(int loop = 0;loop < def->cnt;loop++)
+		{
+			if(loop == 0)
+			{
+				double use_x = (1.0 / old_w) * (double)(def->xx[loop] - old_image_sx);
+				double use_y = (1.0 / old_h) * (double)(def->yy[loop] - old_image_sy);
+				def->xx[loop] = (use_x * new_w) + new_image_sx;
+				def->yy[loop] = (use_y * new_h) + new_image_sy;
+			}
+			else
+			{
+				double use_x = (1.0 / old_w) * (double)def->xx[loop];
+				double use_y = (1.0 / old_h) * (double)def->yy[loop];
+				def->xx[loop] = use_x * new_w;
+				def->yy[loop] = use_y * new_h;
+			}
+		}
+	}
+	else
+	{
+		for(int loop = 0;loop < def->cnt;loop++)
+		{
+			double use_x = (1.0 / old_w) * (double)def->xx[loop];
+			double use_y = (1.0 / old_h) * (double)def->yy[loop];
+			def->xx[loop] = use_x * new_w;
+			def->yy[loop] = use_y * new_h;
+		}
+	}
+	resize(new_sx, new_sy, new_sw, new_sh);
+	relative_x = x() - new_image_sx;
+	relative_y = y() - new_image_sy;
+}
+
 void	Immediate::SaveAsJSON(FILE *fp)
 {
 int	inner;
@@ -69760,20 +71190,51 @@ int	inner;
 	if(pixelate != NULL) use_default = (ImDefault *)pixelate;
 	if(image_im != NULL) use_default = (ImDefault *)image_im;
 
-	fprintf(fp, "\t\t\t\"sx\": %d,\n", x());
-	fprintf(fp, "\t\t\t\"sy\": %d,\n", y());
-	fprintf(fp, "\t\t\t\"sw\": %d,\n", w());
-	fprintf(fp, "\t\t\t\"sh\": %d,\n", h());
+	double use_sx = 0.0;
+	double use_sy = 0.0;
+	double use_sw = 0.0;
+	double use_sh = 0.0;
+	double use_initial_x = 0.0;
+	double use_initial_y = 0.0;
+	double use_crop_x = 0.0;
+	double use_crop_y = 0.0;
+	double use_crop_w = 0.0;
+	double use_crop_h = 0.0;
+	double use_center_x = 0.0;
+	double use_center_y = 0.0;
+	double use_size = 0.0;
+	double use_width = 0.0;
+	if(my_camera != NULL)
+	{
+		use_sx = ((1.0 / my_camera->display_width) * (double)(x() - my_camera->image_sx));
+		use_sy = ((1.0 / my_camera->display_height) * (double)(y() - my_camera->image_sy));
+		use_sw = ((1.0 / my_camera->display_width) * (double)w());
+		use_sh = ((1.0 / my_camera->display_height) * (double)h());
+		use_initial_x = ((1.0 / my_camera->display_width) * (double)(initial_x - my_camera->image_sx));
+		use_initial_y = ((1.0 / my_camera->display_height) * (double)(initial_y - my_camera->image_sy));
+		use_crop_x = ((1.0 / my_camera->display_width) * (double)(crop_x - my_camera->image_sx));
+		use_crop_y = ((1.0 / my_camera->display_height) * (double)(crop_y - my_camera->image_sy));
+		use_crop_w = ((1.0 / my_camera->display_width) * (double)crop_w);
+		use_crop_h = ((1.0 / my_camera->display_height) * (double)crop_h);
+		use_center_x = ((1.0 / my_camera->display_width) * (double)(use_default->center_x - my_camera->image_sx));
+		use_center_y = ((1.0 / my_camera->display_height) * (double)(use_default->center_y - my_camera->image_sy));
+		use_size = ((1.0 / my_camera->display_height) * (double)use_default->use_size);
+		use_width = ((1.0 / my_camera->display_width) * (double)use_default->width);
+	}
+	fprintf(fp, "\t\t\t\"sx\": %f,\n", use_sx);
+	fprintf(fp, "\t\t\t\"sy\": %f,\n", use_sy);
+	fprintf(fp, "\t\t\t\"sw\": %f,\n", use_sw);
+	fprintf(fp, "\t\t\t\"sh\": %f,\n", use_sh);
 	fprintf(fp, "\t\t\t\"im type\": %d,\n", im_type);
 	fprintf(fp, "\t\t\t\"draw it\": %d,\n", draw_it);
 	fprintf(fp, "\t\t\t\"immediate type\": %d,\n", immediate_type);
-	fprintf(fp, "\t\t\t\"initial x\": %d,\n", initial_x);
-	fprintf(fp, "\t\t\t\"initial y\": %d,\n", initial_y);
+	fprintf(fp, "\t\t\t\"initial x\": %f,\n", use_initial_x);
+	fprintf(fp, "\t\t\t\"initial y\": %f,\n", use_initial_y);
 	fprintf(fp, "\t\t\t\"layer\": %d,\n", layer);
-	fprintf(fp, "\t\t\t\"crop x\": %d,\n", crop_x);
-	fprintf(fp, "\t\t\t\"crop y\": %d,\n", crop_y);
-	fprintf(fp, "\t\t\t\"crop w\": %d,\n", crop_w);
-	fprintf(fp, "\t\t\t\"crop h\": %d,\n", crop_h);
+	fprintf(fp, "\t\t\t\"crop x\": %f,\n", use_crop_x);
+	fprintf(fp, "\t\t\t\"crop y\": %f,\n", use_crop_y);
+	fprintf(fp, "\t\t\t\"crop w\": %f,\n", use_crop_w);
+	fprintf(fp, "\t\t\t\"crop h\": %f,\n", use_crop_h);
 	fprintf(fp, "\t\t\t\"overall alpha\": %f,\n", overall_alpha);
 	fprintf(fp, "\t\t\t\"use as mask\": %d,\n", use_as_mask);
 	if(use_default == text)
@@ -69783,29 +71244,32 @@ int	inner;
 	}
 	fprintf(fp, "\t\t\t\"image file path\": \"%s\",\n", DQ(use_default->image_file_path));
 	fprintf(fp, "\t\t\t\"freehand filename\": \"%s\",\n", DQ(use_default->freehand_filename));
-	fprintf(fp, "\t\t\t\"width\": %d,\n", use_default->width);
+	fprintf(fp, "\t\t\t\"width\": %f,\n", use_width);
 	fprintf(fp, "\t\t\t\"red\": %d,\n", use_default->red);
 	fprintf(fp, "\t\t\t\"green\": %d,\n", use_default->green);
 	fprintf(fp, "\t\t\t\"blue\": %d,\n", use_default->blue);
 	fprintf(fp, "\t\t\t\"alpha\": %d,\n", use_default->alpha);
 	fprintf(fp, "\t\t\t\"style\": %d,\n", use_default->style);
 	fprintf(fp, "\t\t\t\"shape\": %d,\n", use_default->shape);
-	fprintf(fp, "\t\t\t\"use size\": %d,\n", use_default->use_size);
+	fprintf(fp, "\t\t\t\"use size\": %f,\n", use_size);
 	fprintf(fp, "\t\t\t\"filled\": %d,\n", use_default->filled);
+	fprintf(fp, "\t\t\t\"erase\": %d,\n", use_default->erase);
 	fprintf(fp, "\t\t\t\"square\": %d,\n", use_default->square);
 	fprintf(fp, "\t\t\t\"rounded\": %d,\n", use_default->rounded);
 	fprintf(fp, "\t\t\t\"rounding radius\": %f,\n", use_default->rounding_radius);
 	fprintf(fp, "\t\t\t\"box type\": %d,\n", use_default->box_type);
 	fprintf(fp, "\t\t\t\"normalized\": %d,\n", use_default->normalized);
-	fprintf(fp, "\t\t\t\"center x\": %d,\n", use_default->center_x);
-	fprintf(fp, "\t\t\t\"center y\": %d,\n", use_default->center_y);
+	fprintf(fp, "\t\t\t\"center x\": %f,\n", use_center_x);
+	fprintf(fp, "\t\t\t\"center y\": %f,\n", use_center_y);
 	fprintf(fp, "\t\t\t\"point cnt\": %d,\n", use_default->cnt);
 	fprintf(fp, "\t\t\t\"Point\": [\n");
 	for(inner = 0;inner < use_default->cnt;inner++)
 	{
 		fprintf(fp, "\t\t\t\t{\n");
-		fprintf(fp, "\t\t\t\t\t\"xx\": %d,\n", use_default->xx[inner]);
-		fprintf(fp, "\t\t\t\t\t\"yy\": %d,\n", use_default->yy[inner]);
+		double use_x = (1.0 / my_camera->display_width) * (double)use_default->xx[inner];
+		double use_y = (1.0 / my_camera->display_height) * (double)use_default->yy[inner];
+		fprintf(fp, "\t\t\t\t\t\"xx\": %f,\n", use_x);
+		fprintf(fp, "\t\t\t\t\t\"yy\": %f,\n", use_y);
 		fprintf(fp, "\t\t\t\t\t\"pt type\": %d\n", use_default->pt_type[inner]);
 		if(inner == use_default->cnt - 1)
 		{
@@ -69839,10 +71303,14 @@ int	inner;
 			{
 				ImAnim *my_anim = anim[inner];
 				fprintf(fp, "\t\t\t\t\t\"frame\": %d,\n", my_anim->frame);
-				fprintf(fp, "\t\t\t\t\t\"xx\": %f,\n", my_anim->xx);
-				fprintf(fp, "\t\t\t\t\t\"yy\": %f,\n", my_anim->yy);
-				fprintf(fp, "\t\t\t\t\t\"ww\": %f,\n", my_anim->ww);
-				fprintf(fp, "\t\t\t\t\t\"hh\": %f,\n", my_anim->hh);
+				double use_sx = ((1.0 / my_camera->display_width) * (double)(my_anim->xx - my_camera->image_sx));
+				double use_sy = ((1.0 / my_camera->display_height) * (double)(my_anim->yy - my_camera->image_sy));
+				double use_sw = ((1.0 / my_camera->display_width) * (double)my_anim->ww);
+				double use_sh = ((1.0 / my_camera->display_height) * (double)my_anim->hh);
+				fprintf(fp, "\t\t\t\t\t\"xx\": %f,\n", use_sx);
+				fprintf(fp, "\t\t\t\t\t\"yy\": %f,\n", use_sy);
+				fprintf(fp, "\t\t\t\t\t\"ww\": %f,\n", use_sw);
+				fprintf(fp, "\t\t\t\t\t\"hh\": %f,\n", use_sh);
 				fprintf(fp, "\t\t\t\t\t\"angle\": %f,\n", my_anim->angle);
 				fprintf(fp, "\t\t\t\t\t\"red\": %f,\n", my_anim->red);
 				fprintf(fp, "\t\t\t\t\t\"green\": %f,\n", my_anim->green);
@@ -70292,25 +71760,6 @@ char	buf[256];
 				sprintf(buf, "%d", layer);
 				fl_draw(buf, x(), y(), w(), h(), FL_ALIGN_INSIDE | FL_ALIGN_CENTER);
 			}
-		}
-	}
-	if(idw != NULL)
-	{
-		if(my_window->grid_size > 1)
-		{
-			fl_color(GRAY);
-			int sx = my_camera->image_sx;
-			int sy = my_camera->image_sy;
-			fl_line_style(FL_DOT);
-			for(loop = 0;loop < my_camera->mat.cols;loop += my_window->grid_size)
-			{
-				fl_line(sx + loop, sy, sx + loop, sy + my_camera->mat.rows);
-			}
-			for(loop = 0;loop < my_camera->mat.rows;loop += my_window->grid_size)
-			{
-				fl_line(sx, sy + loop, sx + my_camera->mat.cols, sy + loop);
-			}
-			fl_line_style(FL_SOLID);
 		}
 	}
 }
@@ -71250,7 +72699,7 @@ int		loop;
 	}
 }
 
-void	Immediate::ShowPopup()
+void	Immediate::RightClickMenu()
 {
 	if(my_camera == my_window->DisplayedCamera())
 	{
@@ -71423,7 +72872,7 @@ int		loop;
 				}
 				else if(Fl::event_button() == FL_RIGHT_MOUSE)
 				{
-					ShowPopup();
+					RightClickMenu();
 					flag = 1;
 				}
 			}
@@ -71446,7 +72895,7 @@ int		loop;
 				}
 				else if(Fl::event_button() == FL_RIGHT_MOUSE)
 				{
-					ShowPopup();
+					RightClickMenu();
 				}
 			}
 			else if(event == FL_DRAG)
@@ -72711,9 +74160,16 @@ int	loop;
 	vlc_window = NULL;
 	if(in_win->last_muxed_list[0] != NULL)
 	{
-		vlc_window = new VLC_Window(in_win->last_muxed_list[0], ww, hh);
-		Fl::add_timeout(0.1, vlc_window_start_cb, vlc_window);
-		Fl::add_timeout(0.1, mux_preview_refresh_cb, this);
+		vlc_window = new VLC_Window(in_win->last_muxed_list[0], 1, ww, hh);
+		if(vlc_window->creation_failed == 0)
+		{
+			Fl::add_timeout(0.1, vlc_window_start_cb, vlc_window);
+			Fl::add_timeout(0.1, mux_preview_refresh_cb, this);
+		}
+		else
+		{
+			my_window->SetErrorMessage("AV Camera creation failed");
+		}
 	}
 	progress_scrubber = new ProgressScrubber(in_win, this, 30, hh - 60, ww - 60, 40);
 	progress_scrubber->box(FL_NO_BOX);
@@ -72753,9 +74209,16 @@ void	MuxPreviewWindow::ResetMedia(char *path)
 		delete vlc_window;
 		vlc_window = NULL;
 	}
-	vlc_window = new VLC_Window(path, w(), h());
-	Fl::add_timeout(0.1, vlc_window_start_cb, vlc_window);
-	Fl::add_timeout(0.1, mux_preview_refresh_cb, this);
+	vlc_window = new VLC_Window(path, 1, w(), h());
+	if(vlc_window->creation_failed == 0)
+	{
+		Fl::add_timeout(0.1, vlc_window_start_cb, vlc_window);
+		Fl::add_timeout(0.1, mux_preview_refresh_cb, this);
+	}
+	else
+	{
+		my_window->SetErrorMessage("AV Camera creation failed");
+	}
 }
 
 void	MuxPreviewWindow::draw()
@@ -72789,6 +74252,37 @@ char	buf[256];
 	Fl_Double_Window::draw();
 }
 
+void	MuxPreviewWindow::RightClickMenu()
+{
+	if(popup == NULL)
+	{
+		popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 260, 300);
+		popup->browser->callback(load_mux_video_popup_cb, this);
+	}
+	else
+	{
+		popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	}
+	if(popup != NULL)
+	{
+		popup->browser->clear();
+		for(int loop = 0;loop < 64;loop++)
+		{
+   			if(my_window->last_muxed_list[loop] != NULL)
+			{
+				if(access(my_window->last_muxed_list[loop], F_OK) == 0)
+				{
+					popup->browser->add(my_window->last_muxed_list[loop]);
+				}
+			}
+		}
+		popup->browser->add("Cancel");
+		popup->set_non_modal();
+		popup->Fit();
+		popup->show();
+	}
+}
+
 int	MuxPreviewWindow::handle(int event)
 {
 int	loop;
@@ -72810,40 +74304,14 @@ int	loop;
 			flag = 1;
 		}
 	}
-	if((event == FL_PUSH)
+	else if((event == FL_PUSH)
 	|| (event == FL_RELEASE)
 	|| (event == FL_DRAG)
 	|| (event == FL_MOUSEWHEEL))
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
 		{
-			if(popup == NULL)
-			{
-				popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 260, 300);
-				popup->browser->callback(load_mux_video_popup_cb, this);
-			}
-			else
-			{
-				popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-			}
-			if(popup != NULL)
-			{
-				popup->browser->clear();
-				for(loop = 0;loop < 64;loop++)
-				{
-   					if(my_window->last_muxed_list[loop] != NULL)
-					{
-						if(access(my_window->last_muxed_list[loop], F_OK) == 0)
-						{
-							popup->browser->add(my_window->last_muxed_list[loop]);
-						}
-					}
-				}
-				popup->browser->add("Cancel");
-				popup->set_non_modal();
-				popup->Fit();
-				popup->show();
-			}
+			RightClickMenu();
 		}
 		else
 		{
@@ -72948,6 +74416,28 @@ TitleBox::~TitleBox()
 {
 }
 
+void	TitleBox::RightClickMenu()
+{
+	if(popup == NULL)
+	{
+		popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 260, 300);
+		popup->browser->callback(titlebox_popup_cb, this);
+	}
+	else
+	{
+		popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	}
+	if(popup != NULL)
+	{
+		popup->browser->clear();
+		popup->browser->add("Change Font and Color");
+		popup->browser->add("Cancel");
+		popup->set_modal();
+		popup->Fit();
+		popup->show();
+	}
+}
+
 int	TitleBox::handle(int event)
 {
 	int flag = 0;
@@ -72960,24 +74450,7 @@ int	TitleBox::handle(int event)
 			init_y = Fl::event_y();
 			if(Fl::event_button() == FL_RIGHT_MOUSE)
 			{
-				if(popup == NULL)
-				{
-					popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 260, 300);
-					popup->browser->callback(titlebox_popup_cb, this);
-				}
-				else
-				{
-					popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-				}
-				if(popup != NULL)
-				{
-					popup->browser->clear();
-					popup->browser->add("Change Font and Color");
-					popup->browser->add("Cancel");
-					popup->set_modal();
-					popup->Fit();
-					popup->show();
-				}
+				RightClickMenu();
 			}
 			else
 			{
@@ -73526,6 +74999,225 @@ int	loop;
 	return(flag);
 }
 
+void	ReviewWin::RightClickMenu()
+{
+	if(popup == NULL)
+	{
+		popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 260, 300);
+		popup->browser->callback(load_used_mux_video_popup_cb, this);
+	}
+	else
+	{
+		popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	}
+	if(popup != NULL)
+	{
+		popup->browser->clear();
+		for(int loop = 0;loop < 64;loop++)
+		{
+   			if(my_window->last_muxed_list[loop] != NULL)
+			{
+				if(access(my_window->last_muxed_list[loop], F_OK) == 0)
+				{
+					popup->browser->add(my_window->last_muxed_list[loop]);
+				}
+			}
+		}
+		popup->browser->add("Cancel");
+		popup->set_modal();
+		popup->Fit();
+		popup->show();
+	}
+}
+
+int		ReviewWin::OnKeyboard(int key)
+{
+	int flag = 0;
+	if((key == '.') || (key == FL_Up))
+	{
+		if(current_frame < (frame_cnt - 1))
+		{
+			single_frame = 1;
+			playing = 1;
+			current_frame++;
+			redraw();
+		}
+		flag = 1;
+	}
+	if((key == ',') || (key == FL_Down))
+	{
+		if(current_frame > 0)
+		{
+			single_frame = 1;
+			playing = 1;
+			current_frame--;
+			redraw();
+		}
+		flag = 1;
+	}
+	if(key == ' ')
+	{
+		if(playing == 1)
+		{
+			playing = 0;
+		}
+		else
+		{
+			playing = 1;
+		}
+		flag = 1;
+	}
+	return(flag);
+}
+
+int		ReviewWin::OnPush()
+{
+	int flag = 0;
+	if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
+	{
+		RightClickMenu();
+	}
+	else
+	{
+		if(crop_activated == 1)
+		{
+			if((current_frame > -1) && (current_frame < frame_cnt))
+			{
+				int xx = Fl::event_x();
+				int yy = Fl::event_y();
+				if(yy < (h() - 52))
+				{
+					xx -= 360;
+					yy -= 240;
+					if(xx < 0) xx = 0;
+					if(yy < 0) yy = 0;
+					if((xx + 360) > w()) xx = w() - 640;
+					if((yy + 240) > h()) yy = h() - 480;
+					for(int loop = current_frame;loop < frame_cnt;loop++)
+					{
+						crop_x[loop] = xx;
+						crop_y[loop] = yy;
+					}
+					flag = 1;
+					redraw();
+				}
+			}
+		}
+		else if(add_text != 0)
+		{
+			int xx = Fl::event_x();
+			int yy = Fl::event_y();
+			if(yy < (h() - 52))
+			{
+				int no_go = 0;
+				for(int loop = 0;((loop < title_box_cnt) && (flag == 0));loop++)
+				{
+					if(title_box[loop] != NULL)
+					{
+						if(Fl::event_inside(title_box[loop]))
+						{
+							no_go = 1;
+						}
+					}
+				}
+				if(no_go == 0)
+				{
+					if(title_box_cnt < 1023)
+					{
+						TitleBox *title = new TitleBox(my_window, this, xx, yy, current_frame, frame_cnt - 1);
+						add(title);
+						title->show();
+						int done = 0;
+						for(int loop = 0;((loop < title_box_cnt) && (done == 0));loop++)
+						{
+							if(title_box[loop] == NULL)
+							{
+								title_box[loop] = title;
+								done = 1;
+							}
+						}
+						if(done == 0)
+						{
+							title_box[title_box_cnt] = title;
+							title_box_cnt++;
+						}
+						add_text = 2;
+						add_text_button->color(BLACK);
+						add_text_button->labelcolor(WHITE);
+					}
+					flag = 1;
+				}
+			}
+		}
+		int xx = Fl::event_x();
+		int yy = Fl::event_y();
+		if((xx > w() - 20) && (xx < w() - 10) && (yy > 10) && (yy < 20))
+		{
+			int done = 0;
+			for(int loop = title_image_cnt - 1;((loop >= 0) && (done == 0));loop--)
+			{
+				if(title_image[loop] != NULL)
+				{
+					if((current_frame >= title_image[loop]->start_frame)
+					&& (current_frame < title_image[loop]->end_frame))
+					{
+						title_image[loop]->end_frame = current_frame;
+						done = 1;
+						redraw();
+					}
+				}
+			}
+		}
+	}
+	return(flag);
+}
+
+int		ReviewWin::OnMousewheel()
+{
+	int flag = 0;
+	if(add_text == 0)
+	{
+		int amount = 1;
+		char *text = (char *)Fl::event_text();
+		if(text != NULL)
+		{
+			char key = *text;
+			if(key == 'S')
+			{
+				amount = (int)fps;
+			}
+			else if(key == 'M')
+			{
+				amount = (int)(fps * 60);
+			}
+		}
+		int direction = Fl::event_dy();
+		if(direction > 0)
+		{
+			if(current_frame < (frame_cnt - amount))
+			{
+				single_frame = 1;
+				playing = 1;
+				current_frame += amount;
+				redraw();
+			}
+			flag = 1;
+		}
+		else if(direction < 0)
+		{
+			if(current_frame >= amount)
+			{
+				single_frame = 1;
+				playing = 1;
+				current_frame -= amount;
+				redraw();
+			}
+			flag = 1;
+		}
+	}
+	return(flag);
+}
+
 int	ReviewWin::handle(int event)
 {
 int	loop;
@@ -73555,211 +75247,18 @@ int	loop;
 			if(no_go == 0)
 			{
 				int key = Fl::event_key();
-				if((key == '.') || (key == FL_Up))
-				{
-					if(current_frame < (frame_cnt - 1))
-					{
-						single_frame = 1;
-						playing = 1;
-						current_frame++;
-						redraw();
-					}
-					flag = 1;
-				}
-				if((key == ',') || (key == FL_Down))
-				{
-					if(current_frame > 0)
-					{
-						single_frame = 1;
-						playing = 1;
-						current_frame--;
-						redraw();
-					}
-					flag = 1;
-				}
-				if(key == ' ')
-				{
-					if(playing == 1)
-					{
-						playing = 0;
-					}
-					else
-					{
-						playing = 1;
-					}
-					flag = 1;
-				}
+				flag = OnKeyboard(key);
 			}
 		}
 		break;
 		case(FL_PUSH):
 		{
-			if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
-			{
-				if(popup == NULL)
-				{
-					popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 260, 300);
-					popup->browser->callback(load_used_mux_video_popup_cb, this);
-				}
-				else
-				{
-					popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-				}
-				if(popup != NULL)
-				{
-					popup->browser->clear();
-					for(loop = 0;loop < 64;loop++)
-					{
-   						if(my_window->last_muxed_list[loop] != NULL)
-						{
-							if(access(my_window->last_muxed_list[loop], F_OK) == 0)
-							{
-								popup->browser->add(my_window->last_muxed_list[loop]);
-							}
-						}
-					}
-					popup->browser->add("Cancel");
-					popup->set_modal();
-					popup->Fit();
-					popup->show();
-				}
-			}
-			else
-			{
-				if(crop_activated == 1)
-				{
-					if((current_frame > -1) && (current_frame < frame_cnt))
-					{
-						int xx = Fl::event_x();
-						int yy = Fl::event_y();
-						if(yy < (h() - 52))
-						{
-							xx -= 360;
-							yy -= 240;
-							if(xx < 0) xx = 0;
-							if(yy < 0) yy = 0;
-							if((xx + 360) > w()) xx = w() - 640;
-							if((yy + 240) > h()) yy = h() - 480;
-							for(loop = current_frame;loop < frame_cnt;loop++)
-							{
-								crop_x[loop] = xx;
-								crop_y[loop] = yy;
-							}
-							flag = 1;
-							redraw();
-						}
-					}
-				}
-				else if(add_text != 0)
-				{
-					int xx = Fl::event_x();
-					int yy = Fl::event_y();
-					if(yy < (h() - 52))
-					{
-						int no_go = 0;
-						for(loop = 0;((loop < title_box_cnt) && (flag == 0));loop++)
-						{
-							if(title_box[loop] != NULL)
-							{
-								if(Fl::event_inside(title_box[loop]))
-								{
-									no_go = 1;
-								}
-							}
-						}
-						if(no_go == 0)
-						{
-							if(title_box_cnt < 1023)
-							{
-								TitleBox *title = new TitleBox(my_window, this, xx, yy, current_frame, frame_cnt - 1);
-								add(title);
-								title->show();
-								int done = 0;
-								for(loop = 0;((loop < title_box_cnt) && (done == 0));loop++)
-								{
-									if(title_box[loop] == NULL)
-									{
-										title_box[loop] = title;
-										done = 1;
-									}
-								}
-								if(done == 0)
-								{
-									title_box[title_box_cnt] = title;
-									title_box_cnt++;
-								}
-								add_text = 2;
-								add_text_button->color(BLACK);
-								add_text_button->labelcolor(WHITE);
-							}
-							flag = 1;
-						}
-					}
-				}
-				int xx = Fl::event_x();
-				int yy = Fl::event_y();
-				if((xx > w() - 20) && (xx < w() - 10) && (yy > 10) && (yy < 20))
-				{
-					int done = 0;
-					for(loop = title_image_cnt - 1;((loop >= 0) && (done == 0));loop--)
-					{
-						if(title_image[loop] != NULL)
-						{
-							if((current_frame >= title_image[loop]->start_frame)
-							&& (current_frame < title_image[loop]->end_frame))
-							{
-								title_image[loop]->end_frame = current_frame;
-								done = 1;
-								redraw();
-							}
-						}
-					}
-				}
-			}
+			flag = OnPush();
 		}
 		break;
 		case(FL_MOUSEWHEEL):
 		{
-			if(add_text == 0)
-			{
-				int amount = 1;
-				char *text = (char *)Fl::event_text();
-				if(text != NULL)
-				{
-					char key = *text;
-					if(key == 'S')
-					{
-						amount = (int)fps;
-					}
-					else if(key == 'M')
-					{
-						amount = (int)(fps * 60);
-					}
-				}
-				int direction = Fl::event_dy();
-				if(direction > 0)
-				{
-					if(current_frame < (frame_cnt - amount))
-					{
-						single_frame = 1;
-						playing = 1;
-						current_frame += amount;
-						redraw();
-					}
-					flag = 1;
-				}
-				else if(direction < 0)
-				{
-					if(current_frame >= amount)
-					{
-						single_frame = 1;
-						playing = 1;
-						current_frame -= amount;
-						redraw();
-					}
-					flag = 1;
-				}
-			}
+			flag = OnMousewheel();
 		}
 		break;
 	}
@@ -74301,7 +75800,7 @@ int		loop;
 
 	int hh = items * 112;;
 	int limit = DISPLAYED_THUMB_CNT * 112;
-	if(hh < limit)
+	if(hh <= limit)
 	{
 		resize(x(), y(), w(), hh);
 	}
@@ -74359,41 +75858,72 @@ int	loop;
 
 void	VideoThumbnailGroup::CycleDownThumbgroup()
 {
-	int nn = my_window->displayed_source;
-	nn++;
-	if(nn >= my_window->source_cnt)
+	int done = 0;
+	int attempts = 0;
+	while((done == 0) && (attempts < 128))
 	{
-		nn = 0;
-		start_thumbgroup = 0;
-	}
-	if(nn >= (start_thumbgroup + DISPLAYED_THUMB_CNT))
-	{
-		start_thumbgroup++;
-		if(start_thumbgroup >= my_window->source_cnt)
+		int nn = my_window->displayed_source;
+		nn++;
+		if(nn >= my_window->source_cnt)
 		{
+			nn = 0;
 			start_thumbgroup = 0;
 		}
+		my_window->DisplayCamera(nn);
+		if(my_window->displayed_source == nn)
+		{
+			done = 1;
+		}
+		if(done == 1)
+		{
+			if(nn >= (start_thumbgroup + DISPLAYED_THUMB_CNT))
+			{
+				start_thumbgroup++;
+				if(start_thumbgroup >= my_window->source_cnt)
+				{
+					start_thumbgroup = 0;
+				}
+			}
+		}
+		attempts++;
 	}
-	my_window->DisplayCamera(nn);
 }
 
 void	VideoThumbnailGroup::CycleUpThumbgroup()
 {
-	int nn = my_window->displayed_source;
-	nn--;
-	if(nn < 0)
+	int done = 0;
+	int attempts = 0;
+	while((done == 0) && (attempts < 128))
 	{
-		nn = my_window->source_cnt - 1;
-		while(nn >= (start_thumbgroup + DISPLAYED_THUMB_CNT))
+		int scroll_it = 0;
+		int nn = my_window->displayed_source;
+		nn--;
+		if(nn < 0)
 		{
-			start_thumbgroup++;
+			nn = my_window->source_cnt - 1;
+			scroll_it = 1;
 		}
+		my_window->DisplayCamera(nn);
+		if(my_window->displayed_source == nn)
+		{
+			done = 1;
+		}
+		if(done == 1)
+		{
+			if(scroll_it == 1)
+			{
+				while(nn >= (start_thumbgroup + DISPLAYED_THUMB_CNT))
+				{
+					start_thumbgroup++;
+				}
+			}
+			if(nn < start_thumbgroup)
+			{
+				start_thumbgroup = nn;
+			}
+		}
+		attempts++;
 	}
-	if(nn < start_thumbgroup)
-	{
-		start_thumbgroup = nn;
-	}
-	my_window->DisplayCamera(nn);
 }
 
 void	VideoThumbnailGroup::ScrollDownThumbgroup()
@@ -74419,16 +75949,29 @@ int	VideoThumbnailGroup::DisplayThumbgroup(int nn)
 	int flag = 0;
 	if((nn >= 0) && (nn < my_window->source_cnt))
 	{
-		while(nn < start_thumbgroup)
-		{
-			start_thumbgroup--;
-		}
-		while(nn >= (start_thumbgroup + DISPLAYED_THUMB_CNT))
-		{
-			start_thumbgroup++;
-		}
+		int done = 0;
+		int retain_old = my_window->displayed_source;
 		my_window->DisplayCamera(nn);
-		flag = 1;
+		if(my_window->displayed_source == nn)
+		{
+			done = 1;
+		}
+		if(done == 1)
+		{
+			while(nn < start_thumbgroup)
+			{
+				start_thumbgroup--;
+			}
+			while(nn >= (start_thumbgroup + DISPLAYED_THUMB_CNT))
+			{
+				start_thumbgroup++;
+			}
+			flag = 1;
+		}
+		else
+		{
+			my_window->DisplayCamera(retain_old);
+		}
 	}
 	return(flag);
 }
@@ -74506,7 +76049,9 @@ int	loop;
 	MyWin *win = (MyWin *)v;
 	if(win->trigger_select_mode == 0)
 	{
-		ThumbButton *tb = (ThumbButton *)w;
+		Fl_Button *b = (Fl_Button *)w;
+		ThumbGroup *tg = (ThumbGroup *)b->parent();
+		ThumbButton *tb = tg->thumb_button;
 		Camera *cam = tb->camera;
 		if(cam != NULL)
 		{
@@ -74811,6 +76356,13 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	{
 		cam = win->camera[index];
 	}
+	if(cam != NULL)
+	{
+		if(cam->hidden == 1)
+		{
+			hidden = 1;
+		}
+	}
 	align(FL_ALIGN_BOTTOM | FL_ALIGN_CENTER);
 	labelcolor(YELLOW);
 	labelsize(16);
@@ -74827,6 +76379,7 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	thumb_button->box(FL_NO_BOX);
 	thumb_button->copy_tooltip("Select to view this camera");
 	thumb_button->callback(thumbnail_cb, win);
+	thumb_button->camera = cam;
 
 	char *str = "";
 	if(cam != NULL)
@@ -74938,9 +76491,9 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	set_text_color->callback(thumb_text_color_button_cb, win);
 	set_text_color->hide();
 
-	pause_av = new MyButton(my_window, 157, 20, 16, 16, "Pause");
+	pause_av = new MyButton(my_window, 157, 54, 16, 16, "Pause");
 	pause_av->box(FL_FRAME_BOX);
-	pause_av->color(YELLOW);
+	pause_av->color(BLACK);
 	pause_av->align(FL_ALIGN_RIGHT);
 	pause_av->labelcolor(WHITE);
 	pause_av->labelsize(8);
@@ -74948,9 +76501,9 @@ ThumbGroup::ThumbGroup(MyWin *win, int idx, int xx, int yy, int ww, int hh) : Fl
 	pause_av->callback(thumb_pause_av_button_cb, win);
 	pause_av->hide();
 
-	mute_av = new MyButton(my_window, 157, 38, 16, 16, "Mute");
+	mute_av = new MyButton(my_window, 157, 70, 16, 16, "Mute");
 	mute_av->box(FL_FRAME_BOX);
-	mute_av->color(YELLOW);
+	mute_av->color(BLACK);
 	mute_av->align(FL_ALIGN_RIGHT);
 	mute_av->labelcolor(WHITE);
 	mute_av->labelsize(8);
@@ -75199,6 +76752,14 @@ int	loop;
 					MyWin *win = iw->my_window;
 					win->video_thumbnail_group->CameraMoveDown(iw->thumb_button->camera);
 				}
+				else if(strcmp(str, "Hide") == 0)
+				{
+					Camera *cam = iw->thumb_button->camera;
+					if(cam != NULL)
+					{
+						cam->hidden = 1;
+					}
+				}
 				else if(strcmp(str, "Hide Camera Group") == 0)
 				{
 					MyWin *win = iw->my_window;
@@ -75207,10 +76768,107 @@ int	loop;
 				else if(strcmp(str, "Lock Camera Group") == 0)
 				{
 					MyWin *win = iw->my_window;
-					win->retain_cameras = 1;
+					win->retain_cameras = PANEL_RETAIN;
 				}
 			}
 		}
+	}
+}
+
+void	ThumbGroup::RightClickMenu(Camera *cam)
+{
+	if(popup == NULL)
+	{
+		popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
+		popup->browser->callback(thumbgroup_popup_cb, this);
+	}
+	else
+	{
+		popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	}
+	if(popup != NULL)
+	{
+		popup->browser->clear();
+		if(my_window->alt_displayed_source != index)
+		{
+			if(my_window->displayed_source != index)
+			{
+				popup->browser->add("View");
+			}
+		}
+		else
+		{
+			popup->browser->add("Cease Viewing");
+		}
+		popup->browser->add("View Standalone");
+		if(my_window->displayed_source != index)
+		{
+			popup->browser->add("Blend");
+		}
+		int	nn = my_window->CountVisibleThumbs();
+		if(nn > 1)
+		{
+			popup->browser->add("Hide");
+		}
+		nn = my_window->CountHiddenThumbs();
+		if(nn > 0)
+		{
+			popup->browser->add("Show All");
+		}
+		popup->browser->add("Snapshot");
+		if(cam->do_not_display == 1)
+		{
+			popup->browser->add("Display");
+		}
+		else
+		{
+			popup->browser->add("Cease Displaying");
+		}
+		if(my_window->multipip > 0)
+		{
+			popup->browser->add("Toggle PIP");
+		}
+		else
+		{
+			if(cam->keep_pip == 0)
+			{
+				popup->browser->add("Lock PIP");
+			}
+			else
+			{
+				popup->browser->add("Unlock PIP");
+			}
+		}
+		if(cam->show_alias == 0)
+		{
+			popup->browser->add("Show Alias");
+		}
+		else
+		{
+			popup->browser->add("Hide Alias");
+		}
+		popup->browser->add("Camera Info");
+		if(cam->id > 0)
+		{
+			popup->browser->add("Move Up");
+		}
+		if(cam->id < (my_window->source_cnt - 1))
+		{
+			popup->browser->add("Move Down");
+		}
+		popup->browser->add("Remove");
+		popup->browser->add("Hide");
+		if(my_window->retain_cameras == PANEL_RETAIN)
+		{
+			popup->browser->add("Hide Camera Group");
+		}
+		else
+		{
+			popup->browser->add("Lock Camera Group");
+		}
+		popup->set_non_modal();
+		popup->Fit();
+		popup->show();
 	}
 }
 
@@ -75231,98 +76889,7 @@ int	ThumbGroup::handle(int event)
 				Camera *cam = thumb_button->camera;
 				if(cam != NULL)
 				{
-					if(popup == NULL)
-					{
-						popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
-						popup->browser->callback(thumbgroup_popup_cb, this);
-					}
-					else
-					{
-						popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-					}
-					if(popup != NULL)
-					{
-						popup->browser->clear();
-						if(my_window->alt_displayed_source != index)
-						{
-							if(my_window->displayed_source != index)
-							{
-								popup->browser->add("View");
-							}
-						}
-						else
-						{
-							popup->browser->add("Cease Viewing");
-						}
-						popup->browser->add("View Standalone");
-						if(my_window->displayed_source != index)
-						{
-							popup->browser->add("Blend");
-						}
-						int	nn = my_window->CountVisibleThumbs();
-						if(nn > 1)
-						{
-							popup->browser->add("Hide");
-						}
-						nn = my_window->CountHiddenThumbs();
-						if(nn > 0)
-						{
-							popup->browser->add("Show All");
-						}
-						popup->browser->add("Snapshot");
-						if(cam->do_not_display == 1)
-						{
-							popup->browser->add("Display");
-						}
-						else
-						{
-							popup->browser->add("Cease Displaying");
-						}
-						if(my_window->multipip > 0)
-						{
-							popup->browser->add("Toggle PIP");
-						}
-						else
-						{
-							if(cam->keep_pip == 0)
-							{
-								popup->browser->add("Lock PIP");
-							}
-							else
-							{
-								popup->browser->add("Unlock PIP");
-							}
-						}
-						if(cam->show_alias == 0)
-						{
-							popup->browser->add("Show Alias");
-						}
-						else
-						{
-							popup->browser->add("Hide Alias");
-						}
-						popup->browser->add("Camera Info");
-						if(cam->id > 0)
-						{
-							popup->browser->add("Move Up");
-						}
-						if(cam->id < (my_window->source_cnt - 1))
-						{
-							popup->browser->add("Move Down");
-						}
-						popup->browser->add("Remove");
-						if(my_window->retain_cameras == 1)
-						{
-							popup->browser->add("Hide Camera Group");
-						}
-						else
-						{
-							popup->browser->add("Lock Camera Group");
-						}
-						popup->set_non_modal();
-						popup->Fit();
-						popup->show();
-					}
+					RightClickMenu(cam);
 				}
 				flag = 1;
 			}
@@ -75337,6 +76904,17 @@ int	ThumbGroup::handle(int event)
 
 void	ThumbGroup::draw()
 {
+	if(index > -1)
+	{
+		Camera *cam = my_window->camera[index];
+		if(cam != NULL)
+		{
+			if(cam->hidden == 1)
+			{
+				hidden = 1;
+			}
+		}
+	}
 	if(hidden == 0)
 	{
 		Fl_Group::draw();
@@ -75444,6 +77022,69 @@ ThumbButton::~ThumbButton()
 	camera = NULL;
 }
 
+int		ThumbButton::OnRelease(Camera *cam)
+{
+	int flag = 0;
+	if(dragging == 1)
+	{
+		if(my_window->dragging_thumb != NULL)
+		{
+			int dtx = my_window->dragging_thumb_x;
+			int dty = my_window->dragging_thumb_y;
+			if(Fl::event_inside(my_window->video_thumbnail_group))
+			{
+				for(int loop = 0;loop < my_window->video_thumbnail_group->children();loop++)
+				{
+					ThumbGroup *grp = (ThumbGroup *)my_window->video_thumbnail_group->child(loop);
+					if(grp != NULL)
+					{
+						if(grp->visible())
+						{
+							if(this != grp->thumb_button)
+							{
+								if(Fl::event_inside(grp))
+								{
+									Camera *dest_cam = grp->thumb_button->camera;
+									if((camera != NULL) && (dest_cam != NULL))
+									{
+										camera->InsertAfter(dest_cam);
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			else
+			{
+				int did_it = 0;
+				if((dtx > my_window->video_thumbnail_group->x())
+				&& (dtx < my_window->video_thumbnail_group->x() + my_window->video_thumbnail_group->w()))
+				{
+					if(dty < my_window->video_thumbnail_group->y())
+					{
+						camera->InsertAsZero();
+						did_it = 1;
+					}
+				}
+				if(did_it == 0)
+				{
+					if((dtx > cam->image_sx) && (dtx < cam->image_sx + cam->mat.cols)
+					&& (dty > cam->image_sy) && (dty < cam->image_sy + cam->mat.rows))
+					{
+						ThumbGroup *tg = (ThumbGroup *)parent();
+						thumb_place_button_cb(tg->place, my_window);
+					}
+				}
+			}
+			my_window->dragging_thumb = NULL;
+		}
+		dragging = 0;
+		flag = 1;
+	}
+	return(flag);
+}
+
 int	ThumbButton::handle(int event)
 {
 int	loop;
@@ -75503,62 +77144,7 @@ int	inner;
 			}
 			else if(event == FL_RELEASE)
 			{
-				if(dragging == 1)
-				{
-					if(my_window->dragging_thumb != NULL)
-					{
-						int dtx = my_window->dragging_thumb_x;
-						int dty = my_window->dragging_thumb_y;
-						if(Fl::event_inside(my_window->video_thumbnail_group))
-						{
-							for(loop = 0;loop < my_window->video_thumbnail_group->children();loop++)
-							{
-								ThumbGroup *grp = (ThumbGroup *)my_window->video_thumbnail_group->child(loop);
-								if(grp != NULL)
-								{
-									if(grp->visible())
-									{
-										if(this != grp->thumb_button)
-										{
-											if(Fl::event_inside(grp))
-											{
-												Camera *dest_cam = grp->thumb_button->camera;
-												if((camera != NULL) && (dest_cam != NULL))
-												{
-													camera->InsertAfter(dest_cam);
-												}
-											}
-										}
-									}
-								}
-							}
-						}
-						else
-						{
-							int did_it = 0;
-							if((dtx > my_window->video_thumbnail_group->x())
-							&& (dtx < my_window->video_thumbnail_group->x() + my_window->video_thumbnail_group->w()))
-							{
-								if(dty < my_window->video_thumbnail_group->y())
-								{
-									camera->InsertAsZero();
-									did_it = 1;
-								}
-							}
-							if(did_it == 0)
-							{
-								if((dtx > cam->image_sx) && (dtx < cam->image_sx + cam->mat.cols)
-								&& (dty > cam->image_sy) && (dty < cam->image_sy + cam->mat.rows))
-								{
-									thumb_place_button_cb(this, my_window);
-								}
-							}
-						}
-						my_window->dragging_thumb = NULL;
-					}
-					dragging = 0;
-					flag = 1;
-				}
+				flag = OnRelease(cam);
 			}
 			else if(event == FL_KEYBOARD)
 			{
@@ -75731,7 +77317,7 @@ void	standalone_window_popup_cb(Fl_Widget *w, void *v)
 	}
 }
 
-StandaloneDisplay::StandaloneDisplay(MyWin *in_win, Camera *in_cam, int ww, int hh, char *lbl) : DragWindow(in_win, ww, hh, lbl)
+StandaloneDisplay::StandaloneDisplay(MyWin *in_win, Camera *in_cam, int ww, int hh, char *lbl) : SimpleDragWindow(in_win, ww, hh, lbl)
 {
 	end();
 	my_window = in_win;
@@ -75746,8 +77332,10 @@ StandaloneDisplay::StandaloneDisplay(MyWin *in_win, Camera *in_cam, int ww, int 
 	border(1);
 	show();
 
-	// This allows the window to remain up even if the main window minimizes
+	// This makes the window stay on top of the main window
 	XDeleteProperty(fl_display, fl_xid(this), XA_WM_TRANSIENT_FOR);
+	// This allows the window to remain up even if the main window minimizes
+	XSetTransientForHint(fl_display, fl_xid(this), fl_xid(my_window));
 
 	Fl::add_timeout(0.1, update_standalone_cb, this);
 }
@@ -75775,7 +77363,7 @@ int	loop;
 
 void	StandaloneDisplay::draw()
 {
-	DragWindow::draw();
+	SimpleDragWindow::draw();
 	if(cam != NULL)
 	{
 		if(frozen == 0)
@@ -75799,6 +77387,53 @@ void	StandaloneDisplay::draw()
 	}
 }
 
+void	StandaloneDisplay::RightClickMenu()
+{
+	if(popup == NULL)
+	{
+		popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
+		popup->browser->callback(standalone_window_popup_cb, this);
+	}
+	else
+	{
+		popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	}
+	if(popup != NULL)
+	{
+		int show_select = 1;
+		if(cam != NULL)
+		{
+			MyWin *win = cam->my_window;
+			if(win != NULL)	
+			{
+				if(win->DisplayedCamera() == cam)
+				{
+					show_select = 0;
+				}
+			}
+		}
+		popup->browser->clear();
+		if(show_select == 1)
+		{
+			popup->browser->add("Select");
+		}
+		popup->browser->add("Toggle Border");
+		if(frozen == 0)
+		{
+			popup->browser->add("Freeze");
+		}
+		else
+		{
+			popup->browser->add("Defrost");
+		}
+		popup->browser->add("Hide");
+		popup->set_non_modal();
+		popup->Fit();
+		popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+		popup->show();
+	}
+}
+
 int		StandaloneDisplay::handle(int event)
 {
 	int flag = 0;
@@ -75808,56 +77443,14 @@ int		StandaloneDisplay::handle(int event)
 		{
 			if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
 			{
-				if(popup == NULL)
-				{
-					popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
-					popup->browser->callback(standalone_window_popup_cb, this);
-				}
-				else
-				{
-					popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-				}
-				if(popup != NULL)
-				{
-					int show_select = 1;
-					if(cam != NULL)
-					{
-						MyWin *win = cam->my_window;
-						if(win != NULL)	
-						{
-							if(win->DisplayedCamera() == cam)
-							{
-								show_select = 0;
-							}
-						}
-					}
-					popup->browser->clear();
-					if(show_select == 1)
-					{
-						popup->browser->add("Select");
-					}
-					popup->browser->add("Toggle Border");
-					if(frozen == 0)
-					{
-						popup->browser->add("Freeze");
-					}
-					else
-					{
-						popup->browser->add("Defrost");
-					}
-					popup->browser->add("Hide");
-					popup->set_non_modal();
-					popup->Fit();
-					popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-					popup->show();
-				}
+				RightClickMenu();
 			}
 		}
 		break;
 	}
 	if(flag == 0)
 	{
-		flag = DragWindow::handle(event);
+		flag = SimpleDragWindow::handle(event);
 	}
 	return(flag);
 }
@@ -75987,6 +77580,116 @@ char	buf[256];
 	}
 }
 
+int		MyScrubber::OnPush()
+{
+	int flag = 0;
+	int nx = Descale(Fl::event_x());
+	int ny = Fl::event_y();
+	if(ny < h())
+	{
+		Value(nx);
+		mode = 0;
+	}
+	else if(trim_cnt > 0)
+	{
+		int done = -1;
+		selected_trim = -1;
+		for(int loop = 0;((loop < trim_cnt) && (done == -1));loop++)
+		{
+			if((nx >= start_trim[loop] - 5) && (nx <= start_trim[loop] + 5))
+			{
+				done = loop;
+				mode = 1;
+			}
+			else if((nx >= end_trim[loop] - 5) && (nx <= end_trim[loop] + 5))
+			{
+				done = loop;
+				mode = 2;
+			}
+		}
+		if(done > -1)
+		{
+			selected_trim = done;
+		}
+		if(selected_trim == -1)
+		{
+			Value(nx);
+			mode = 0;
+		}
+	}
+	redraw();
+	flag = 1;
+	return(flag);
+}
+
+int		MyScrubber::OnDrag()
+{
+	int flag = 0;
+	int nx = Fl::event_x();
+	int ny = Fl::event_y();
+	if((nx > 0) && (nx < w()))
+	{
+		nx = Descale(nx);
+		if(mode == 0)
+		{
+			Value(nx);
+		}
+		else if((mode == 1) || (mode == 2))
+		{
+			if(selected_trim > -1)
+			{
+				int ok = CheckTrim(selected_trim, nx);
+				if(ok == 1)
+				{
+					if(mode == 1)
+					{
+						if(nx < end_trim[selected_trim] - 6)
+						{
+							start_trim[selected_trim] = nx;
+						}
+					}
+					else if(mode == 2)
+					{
+						if(nx > start_trim[selected_trim] + 6)
+						{
+							end_trim[selected_trim] = nx;
+						}
+					}
+				}
+			}
+		}
+	}
+	redraw();
+	flag = 1;
+	return(flag);
+}
+
+int		MyScrubber::OnMove()
+{
+	int flag = 0;
+	int nx = Fl::event_x();
+	int ny = Fl::event_y();
+	if((nx > 0) && (nx < w()))
+	{
+		nx = Descale(nx);
+		hot_trim = -1;
+		for(int loop = 0;loop < trim_cnt;loop++)
+		{
+			if((nx >= start_trim[loop] - 5) && (nx <= start_trim[loop] + 5))
+			{
+				hot_trim = loop;
+			}
+			else if((nx >= end_trim[loop] - 5) && (nx <= end_trim[loop] + 5))
+			{
+				hot_trim = loop;
+			}
+		}
+		redraw();
+	}
+	flag = 1;
+	return(flag);
+}
+
 int	MyScrubber::handle(int event)
 {
 int	loop;
@@ -75996,106 +77699,17 @@ int	loop;
 	{
 		case(FL_PUSH):
 		{
-			int nx = Descale(Fl::event_x());
-			int ny = Fl::event_y();
-			if(ny < h())
-			{
-				Value(nx);
-				mode = 0;
-			}
-			else if(trim_cnt > 0)
-			{
-				int flag = -1;
-				selected_trim = -1;
-				for(loop = 0;((loop < trim_cnt) && (flag == -1));loop++)
-				{
-					if((nx >= start_trim[loop] - 5) && (nx <= start_trim[loop] + 5))
-					{
-						flag = loop;
-						mode = 1;
-					}
-					else if((nx >= end_trim[loop] - 5) && (nx <= end_trim[loop] + 5))
-					{
-						flag = loop;
-						mode = 2;
-					}
-				}
-				if(flag > -1)
-				{
-					selected_trim = flag;
-				}
-				if(selected_trim == -1)
-				{
-					Value(nx);
-					mode = 0;
-				}
-			}
-			redraw();
-			flag = 1;
+			flag = OnPush();
 		}
 		break;
 		case(FL_DRAG):
 		{
-			int nx = Fl::event_x();
-			int ny = Fl::event_y();
-			if((nx > 0) && (nx < w()))
-			{
-				nx = Descale(nx);
-				if(mode == 0)
-				{
-					Value(nx);
-				}
-				else if((mode == 1) || (mode == 2))
-				{
-					if(selected_trim > -1)
-					{
-						int ok = CheckTrim(selected_trim, nx);
-						if(ok == 1)
-						{
-							if(mode == 1)
-							{
-								if(nx < end_trim[selected_trim] - 6)
-								{
-									start_trim[selected_trim] = nx;
-								}
-							}
-							else if(mode == 2)
-							{
-								if(nx > start_trim[selected_trim] + 6)
-								{
-									end_trim[selected_trim] = nx;
-								}
-							}
-						}
-					}
-				}
-			}
-			redraw();
-			flag = 1;
+			flag = OnDrag();
 		}
 		break;
 		case(FL_MOVE):
 		{
-			int nx = Fl::event_x();
-			int ny = Fl::event_y();
-			if((nx > 0) && (nx < w()))
-			{
-				nx = Descale(nx);
-				hot_trim = -1;
-				for(loop = 0;loop < trim_cnt;loop++)
-				{
-					if((nx >= start_trim[loop] - 5) && (nx <= start_trim[loop] + 5))
-					{
-						hot_trim = loop;
-					}
-					else if((nx >= end_trim[loop] - 5) && (nx <= end_trim[loop] + 5))
-					{
-						hot_trim = loop;
-					}
-				}
-				redraw();
-			}
-			flag = 1;
+			flag = OnMove();
 		}
 		break;
 	}
@@ -76928,6 +78542,7 @@ int		loop;
 	initial_value = 0.0;
 	type(FL_HOR_NICE_SLIDER);
 	align(FL_ALIGN_LEFT);
+
 	color(BLACK);
 	labelcolor(WHITE);
 	box(FL_FLAT_BOX);
@@ -76997,7 +78612,13 @@ char	buf[256];
 
 	int sub = h() / 3;
 	fl_push_clip(x(), y(), w(), h());
-	fl_color(BLACK);
+
+	fl_color(color());
+	Fl_Group *p = parent();
+	if(p != NULL)
+	{
+		fl_color(p->color());
+	}
 	fl_rectf(x(), y(), w(), h());
 	if(in_slider == 0)
 	{
@@ -77041,6 +78662,119 @@ char	buf[256];
 	fl_pop_clip();
 }
 
+void	MySlider::RightClickMenu()
+{
+	popup = new PopupMenu(my_window, x(), y(), 160, 300);
+	popup->browser->callback(my_slider_popup_cb, this);
+	popup->browser->add("Assign Shortcut", this);
+	popup->browser->add("Cancel", this);
+
+	popup->Fit();
+	popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	popup->set_modal();
+	Fl_Group *grp = Fl_Group::current();
+	Fl_Group::current(0);
+	popup->show();
+}
+
+int		MySlider::OnMousewheel()
+{
+	int flag = 0;
+	if(in_slider == 1)
+	{
+		int nn = Fl::event_dy();
+		if(nn > 0)
+		{
+			double val = value();
+			if(val < maximum())
+			{
+				val += (maximum() - minimum()) / w();
+				value(val);
+				redraw();
+			}
+			flag = 1;
+		}
+		else if(nn < 0)
+		{
+			double val = value();
+			if(val > minimum())
+			{
+				val -= (maximum() - minimum()) / w();
+				value(val);
+				redraw();
+			}
+			flag = 1;
+		}
+	}
+	return(flag);
+}
+
+int		MySlider::OnKeyboard(int key)
+{
+	int flag = 0;
+	if((key == shortcut_down) || (key == FL_Left))
+	{
+		double dec = step();
+		if(dec == 0.0)
+		{
+			dec = (maximum() - minimum()) / w();
+		}
+		double val = value();
+		val -= dec;
+		value(val);
+		do_callback();
+		flag = 1;
+	}
+	else if((key == shortcut_up) || (key == FL_Right))
+	{
+		double inc = step();
+		if(inc == 0.0)
+		{
+			inc = (maximum() - minimum()) / w();
+		}
+		double val = value();
+		val += inc;
+		value(val);
+		do_callback();
+		flag = 1;
+	}
+	else if(key == FL_Home)
+	{
+		value(initial_value);
+		do_callback();
+		flag = 1;
+	}
+	else if(key == FL_Page_Up)
+	{
+		double inc = step();
+		if(inc == 0.0)
+		{
+			inc = (maximum() - minimum()) / w();
+		}
+		inc *= 4.0;
+		double val = value();
+		val += inc;
+		value(val);
+		do_callback();
+		flag = 1;
+	}
+	else if(key == FL_Page_Down)
+	{
+		double dec = step();
+		if(dec == 0.0)
+		{
+			dec = (maximum() - minimum()) / w();
+		}
+		dec *= 4.0;
+		double val = value();
+		val -= dec;
+		value(val);
+		do_callback();
+		flag = 1;
+	}
+	return(flag);
+}
+
 int	MySlider::handle(int event)
 {
 	int flag = 0;
@@ -77071,114 +78805,20 @@ int	MySlider::handle(int event)
 	}
 	else if(event == FL_MOUSEWHEEL)
 	{
-		if(in_slider == 1)
-		{
-			int nn = Fl::event_dy();
-			if(nn > 0)
-			{
-				double val = value();
-				if(val < maximum())
-				{
-					val += (maximum() - minimum()) / w();
-					value(val);
-					redraw();
-				}
-				flag = 1;
-			}
-			else if(nn < 0)
-			{
-				double val = value();
-				if(val > minimum())
-				{
-					val -= (maximum() - minimum()) / w();
-					value(val);
-					redraw();
-				}
-				flag = 1;
-			}
-		}
+		flag = OnMousewheel();
 	}
 	else if(event == FL_PUSH)
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
 		{
-			popup = new PopupMenu(my_window, x(), y(), 160, 300);
-			popup->browser->callback(my_slider_popup_cb, this);
-			popup->browser->add("Assign Shortcut", this);
-			popup->browser->add("Cancel", this);
-
-			popup->Fit();
-			popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-			popup->set_modal();
-			Fl_Group *grp = Fl_Group::current();
-			Fl_Group::current(0);
-			popup->show();
+			RightClickMenu();
 			flag = 1;
 		}
 	}
 	else if(event == FL_KEYBOARD)
 	{
 		int key = Fl::event_key();
-		if((key == shortcut_down) || (key == FL_Left))
-		{
-			double dec = step();
-			if(dec == 0.0)
-			{
-				dec = (maximum() - minimum()) / w();
-			}
-			double val = value();
-			val -= dec;
-			value(val);
-			do_callback();
-			flag = 1;
-		}
-		else if((key == shortcut_up) || (key == FL_Right))
-		{
-			double inc = step();
-			if(inc == 0.0)
-			{
-				inc = (maximum() - minimum()) / w();
-			}
-			double val = value();
-			val += inc;
-			value(val);
-			do_callback();
-			flag = 1;
-		}
-		else if(key == FL_Home)
-		{
-			value(initial_value);
-			do_callback();
-			flag = 1;
-		}
-		else if(key == FL_Page_Up)
-		{
-			double inc = step();
-			if(inc == 0.0)
-			{
-				inc = (maximum() - minimum()) / w();
-			}
-			inc *= 4.0;
-			double val = value();
-			val += inc;
-			value(val);
-			do_callback();
-			flag = 1;
-		}
-		else if(key == FL_Page_Down)
-		{
-			double dec = step();
-			if(dec == 0.0)
-			{
-				dec = (maximum() - minimum()) / w();
-			}
-			dec *= 4.0;
-			double val = value();
-			val -= dec;
-			value(val);
-			do_callback();
-			flag = 1;
-		}
+		flag = OnKeyboard(key);
 	}
 	if(flag == 0)
 	{
@@ -77212,6 +78852,8 @@ int	MySlider::ShortcutUp()
 
 void	fps_slider_cb(Fl_Widget *w, void *v)
 {
+int		loop;
+
 	MyWin *win = (MyWin *)v;
 	if(win != NULL)
 	{
@@ -77221,6 +78863,14 @@ void	fps_slider_cb(Fl_Widget *w, void *v)
 			double nn = slide->value();
 			double rr = nn;
 			win->forced_fps = (int)rr;
+			for(loop = 0;loop < win->source_cnt;loop++)
+			{
+				Camera *cam = win->camera[loop];
+				if(cam != NULL)
+				{
+					cam->fps = win->forced_fps;
+				}
+			}
 		}
 	}
 }
@@ -77599,7 +79249,12 @@ void	terminate_global_log_window_cb(Fl_Widget *w, void *v);
 	count = in_count;
 	start_time = 0;
 	progress = 0;
-	Fl_Browser *browser = new Fl_Browser(0, 0, 1200, 800);
+	hours = 0; 
+	minutes = 0; 
+	seconds = 0; 
+	color(BLACK);
+	box(FL_FLAT_BOX);
+	browser = new Fl_Browser(0, 0, 1200, 800);
 	browser->color(BLACK);
 	browser->textcolor(WHITE);
 	browser->textfont(FL_COURIER);
@@ -77629,11 +79284,14 @@ char	buf[256];
 		fl_color(BLUE);
 		fl_rectf(12, 12, (int)use, 16);
 		fl_color(WHITE);
-		time_t now = time(0);
-		time_t elapsed = time(0) - start_time;
-		int hours = elapsed / 3600;
-		int minutes = (elapsed % 3600) / 60;
-		int seconds = elapsed % 60;
+		if(progress < count)
+		{
+			time_t now = time(0);
+			time_t elapsed = time(0) - start_time;
+			hours = elapsed / 3600;
+			minutes = (elapsed % 3600) / 60;
+			seconds = elapsed % 60;
+		}
 		sprintf(buf, "%d of %d - %02d:%02d:%02d", progress, count, hours, minutes, seconds);
 		fl_font(FL_HELVETICA, 9);
 		fl_draw(buf, 10, 11, w() - 10, 20, FL_ALIGN_CENTER);
@@ -77650,6 +79308,7 @@ void	LogWindow::SetCount(int in_count)
 	count = in_count;
 	progress = 0;
 	start_time = 0;
+	browser->resize(0, 40, 1280, 760);
 }
 
 void	LogWindow::SetStartTime()
@@ -77675,9 +79334,239 @@ void	terminate_global_log_window_cb(Fl_Widget *w, void *v)
 	Fl::add_timeout(1.0, revive_global_log_window_cb, (void *)win);
 }
 
+void	container_select_cb(Fl_Widget *w, void *v)
+{
+void	enumerate_codecs(int list_cnt = 0, char **list = NULL);
+void	enumerate_test(MyWin *in_win, void (*output_cb)(char *), int test_w, int test_h, int test_fps, int test_hz);
+char	*list[1024];
+
+	ContainerSelectWindow *csw = (ContainerSelectWindow *)v;
+	MyWin *win = csw->my_window;
+	int cnt = 0;
+	int all_flag = 0;
+	for(int loop = 1;loop < csw->container_browser->size();loop++)
+	{
+		if(csw->container_browser->selected(loop))
+		{
+			char *text = (char *)csw->container_browser->text(loop);
+			list[cnt] = text;
+			if(strcmp(list[cnt], "All") == 0)
+			{
+				all_flag = 1;
+			}
+			cnt++;
+		}
+	}
+	if(cnt < 1)
+	{
+		all_flag = 1;
+	}
+	if(win != NULL)
+	{
+		for(int loop = 0;loop < global_my_format_cnt;loop++)
+		{
+			MyFormat *mf = global_my_format[loop];
+			delete mf;
+			global_my_format[loop] = NULL;
+		}
+		win->mux_test_sudden_stop = 0;
+		if(global_log_window != NULL)
+		{
+			global_log_window->SetColumnWidth(450);
+		}
+		global_my_format_cnt = 0;
+		if(all_flag == 1)
+		{
+			enumerate_codecs();
+		}
+		else
+		{
+			enumerate_codecs(cnt, list);
+		}
+		enumerate_test(win, out_function, win->output_width, win->output_height, win->minimum_fps, win->streaming_audio_quality);
+		out_function("@bDONE GATHERING CODECS\t\n");
+	}
+	csw->hide();
+	Fl::delete_widget(csw);
+}
+
+void	container_select_codecs_cb(Fl_Widget *w, void *v)
+{
+void	supporting_containers(char *codec_name, int& container_cnt, char **container_list);
+
+	ContainerSelectWindow *csw = (ContainerSelectWindow *)v;
+	MyWin *win = csw->my_window;
+	int final_cnt = 0;
+	char *final_list[1024];
+	for(int loop = 1;loop < csw->codec_browser->size();loop++)
+	{
+		if(csw->codec_browser->selected(loop))
+		{
+			char *codec_name = (char *)csw->codec_browser->text(loop);
+			int container_cnt = 1024;
+			char *container_list[1024];
+			supporting_containers(codec_name, container_cnt, container_list);
+			for(int inner = 0;inner < container_cnt;inner++)
+			{
+				if(final_cnt < 1024)
+				{
+					int no_go = 0;
+					for(int n = 0;n < final_cnt;n++)
+					{
+						if(strcmp(final_list[n], container_list[inner]) == 0)
+						{
+							no_go = 1;
+						}
+					}
+					if(no_go == 0)
+					{
+						final_list[final_cnt] = strdup(container_list[inner]);
+						final_cnt++;
+					}
+					free(container_list[inner]);
+				}
+			}
+		}
+	}
+	csw->container_browser->clear();
+	csw->container_browser->add("All");
+	if(final_cnt > 0)
+	{
+		for(int loop = 0;loop < final_cnt;loop++)
+		{
+			if(final_list[loop] != NULL)
+			{
+				csw->container_browser->add(final_list[loop]);
+				free(final_list[loop]);
+			}
+		}
+		for(int loop = 2;loop <= csw->container_browser->size();loop++)
+		{
+			csw->container_browser->select(loop, 1);
+		}
+	}
+	else
+	{
+		for(int loop = 0;loop < csw->container_list_cnt;loop++)
+		{
+			if(csw->container_list[loop] != NULL)
+			{
+				csw->container_browser->add(csw->container_list[loop]);
+			}
+		}
+	}
+}
+
+ContainerSelectWindow::ContainerSelectWindow(MyWin *in_win) : Dialog(in_win, 400, 800, "Select Containers")
+{
+void	list_containers(int& list_cnt, char **list);
+void	list_codecs(int& list_cnt, char **list);
+
+	Fl_Box *box = new Fl_Box(2, 20, w() - 4, 20);
+	box->box(FL_FLAT_BOX);
+	box->color(BLACK);
+	box->labelcolor(WHITE);
+	box->labelsize(9);
+	box->label("Select containers or select codecs to automatically select\nthe containers supportings those codecs.");
+
+	my_window = in_win;
+	container_browser = new Fl_Multi_Browser(2, 80, 194, 660, "Containers");
+	container_browser->color(BLACK);
+	container_browser->box(FL_FLAT_BOX);
+	container_browser->textcolor(WHITE);
+	container_browser->labelcolor(WHITE);
+	container_browser->textsize(11);
+	container_browser->labelsize(13);
+	container_browser->align(FL_ALIGN_TOP | FL_ALIGN_CENTER);
+
+	codec_browser = new Fl_Multi_Browser(200, 80, 194, 660, "Codecs");
+	codec_browser->color(BLACK);
+	codec_browser->box(FL_FLAT_BOX);
+	codec_browser->textcolor(WHITE);
+	codec_browser->labelcolor(WHITE);
+	codec_browser->textsize(11);
+	codec_browser->labelsize(13);
+	codec_browser->align(FL_ALIGN_TOP | FL_ALIGN_CENTER);
+	codec_browser->when(FL_WHEN_CHANGED);
+	codec_browser->callback(container_select_codecs_cb, this);
+
+	container_list_cnt = 1024;
+	list_containers(container_list_cnt, container_list);
+	container_browser->add("All");
+	if(container_list_cnt > 0)
+	{
+		for(int loop = 0;loop < container_list_cnt;loop++)
+		{
+			if(container_list[loop] != NULL)
+			{
+				container_browser->add(container_list[loop]);
+			}
+		}
+	}
+	codec_list_cnt = 1024;
+	list_codecs(codec_list_cnt, codec_list);
+	if(codec_list_cnt > 0)
+	{
+		for(int loop = 0;loop < codec_list_cnt;loop++)
+		{
+			if(codec_list[loop] != NULL)
+			{
+				codec_browser->add(codec_list[loop]);
+			}
+		}
+	}
+	int yp = 775;
+	MyButton *accept = new MyButton(in_win, ((w() / 2) - (w() / 4)) - 30, yp, 60, 20, "Accept");
+	accept->box(FL_FRAME_BOX);
+	accept->color(BLACK);
+	accept->labelcolor(YELLOW);
+	accept->labelsize(9);
+	accept->align(FL_ALIGN_CENTER);
+	accept->callback(container_select_cb, this);
+
+	MyButton *cancel = new MyButton(in_win, ((w() / 2) + (w() / 4)) - 30, yp, 60, 20, "Cancel");
+	cancel->box(FL_FRAME_BOX);
+	cancel->color(BLACK);
+	cancel->labelcolor(YELLOW);
+	cancel->labelsize(9);
+	cancel->align(FL_ALIGN_CENTER);
+	cancel->callback(generic_cancel_cb, this);
+	end();
+	show();
+}
+
+ContainerSelectWindow::~ContainerSelectWindow()
+{
+	for(int loop = 0;loop < container_list_cnt;loop++)
+	{
+		if(container_list[loop] != NULL)
+		{
+			free(container_list[loop]);
+		}
+	}
+	for(int loop = 0;loop < codec_list_cnt;loop++)
+	{
+		if(codec_list[loop] != NULL)
+		{
+			free(codec_list[loop]);
+		}
+	}
+}
+
+void	pre_gather_codecs_cb(Fl_Widget *w, void *v)
+{
+	MyButton *b = (MyButton *)w;
+	MyWin *win = (MyWin *)v;
+	if(win != NULL)
+	{
+		ContainerSelectWindow *csw = new ContainerSelectWindow(win);
+		csw->show();
+	}
+}
+
 void	gather_codecs_cb(Fl_Widget *w, void *v)
 {
-void	enumerate_codecs();
+void	enumerate_codecs(int list_cnt = 0, char **list = NULL);
 void	enumerate_test(MyWin *in_win, void (*output_cb)(char *), int test_w, int test_h, int test_fps, int test_hz);
 int		loop;
 
@@ -77697,11 +79586,8 @@ int		loop;
 			global_log_window->SetColumnWidth(450);
 		}
 		global_my_format_cnt = 0;
-		if(global_my_format_cnt == 0)
-		{
-			enumerate_codecs();
-			enumerate_test(win, out_function, win->output_width, win->output_height, win->minimum_fps, win->streaming_audio_quality);
-		}
+		enumerate_codecs();
+		enumerate_test(win, out_function, win->output_width, win->output_height, win->minimum_fps, win->streaming_audio_quality);
 		out_function("@bDONE GATHERING CODECS\t\n");
 	}
 }
@@ -77712,7 +79598,6 @@ void	benchmark_codecs_cb(Fl_Widget *w, void *v)
 	MyWin *win = (MyWin *)v;
 	if(win != NULL)
 	{
-		gather_codecs_cb(w, v);
 		win->RunCodecTest();
 	}
 }
@@ -77954,9 +79839,49 @@ int	loop;
 			if((ww > 0) && (hh > 0))
 			{
 				cam->Resize(ww, hh);
+				if((cam->width != ww) || (cam->height != hh))
+				{
+					sw->hardware_w->value(cam->width);
+					sw->hardware_h->value(cam->height);
+				}
 			}
 		}
 	}
+	sw->redraw();
+}
+
+void	camera_settings_copy_input_resolution_cb(Fl_Widget *w, void *v)
+{
+	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
+	MyWin *win = sw->my_window;
+	char *str = (char *)sw->hardware_w->value();
+	if(str != NULL)
+	{
+		sw->display_w->value(str);
+	}
+	str = (char *)sw->hardware_h->value();
+	if(str != NULL)
+	{
+		sw->display_h->value(str);
+	}
+	sw->redraw();
+}
+
+void	camera_settings_copy_display_resolution_cb(Fl_Widget *w, void *v)
+{
+	CameraSettingsWindow *sw = (CameraSettingsWindow *)v;
+	MyWin *win = sw->my_window;
+	char *str = (char *)sw->display_w->value();
+	if(str != NULL)
+	{
+		sw->hardware_w->value(str);
+	}
+	str = (char *)sw->display_h->value();
+	if(str != NULL)
+	{
+		sw->hardware_h->value(str);
+	}
+	sw->redraw();
 }
 
 void	camera_settings_resolution_cb(Fl_Widget *w, void *v)
@@ -77972,6 +79897,10 @@ int	loop;
 			Camera *cam = win->camera[loop];
 			if(cam != NULL)
 			{
+				int old_image_sx = cam->image_sx;
+				int old_image_sy = cam->image_sy;
+				int old_w = cam->display_width;
+				int old_h = cam->display_height;
 				char *str = (char *)sw->display_w->value();
 				if(str != NULL)
 				{
@@ -77979,6 +79908,7 @@ int	loop;
 					if(nn > 0)
 					{
 						cam->display_width = nn;
+						cam->DisplayScaleFactor();
 					}
 				}
 				str = (char *)sw->display_h->value();
@@ -77988,6 +79918,14 @@ int	loop;
 					if(nn > 0)
 					{
 						cam->display_height = nn;
+						cam->DisplayScaleFactor();
+					}
+				}
+				for(int loop = 0;loop < cam->immediate_cnt;loop++)
+				{
+					if(cam->immediate_list[loop] != NULL)
+					{
+						cam->immediate_list[loop]->AdaptToResolution(old_image_sx, old_image_sy, old_w, old_h, 0, 0, cam->display_width, cam->display_height);
 					}
 				}
 			}
@@ -77996,6 +79934,10 @@ int	loop;
 	else
 	{
 		Camera *cam = win->DisplayedCamera();
+		int old_image_sx = cam->image_sx;
+		int old_image_sy = cam->image_sy;
+		int old_w = cam->display_width;
+		int old_h = cam->display_height;
 		char *str = (char *)sw->display_w->value();
 		if(str != NULL)
 		{
@@ -78003,6 +79945,7 @@ int	loop;
 			if(nn > 0)
 			{
 				cam->display_width = nn;
+				cam->DisplayScaleFactor();
 			}
 		}
 		str = (char *)sw->display_h->value();
@@ -78012,6 +79955,21 @@ int	loop;
 			if(nn > 0)
 			{
 				cam->display_height = nn;
+				cam->DisplayScaleFactor();
+			}
+		}
+		for(int loop = 0;loop < cam->immediate_cnt;loop++)
+		{
+			if(cam->immediate_list[loop] != NULL)
+			{
+				cam->immediate_list[loop]->AdaptToResolution(old_image_sx, old_image_sy, old_w, old_h, 0, 0, cam->display_width, cam->display_height);
+			}
+		}
+		for(int loop = 0;loop < cam->image_window_cnt;loop++)
+		{
+			if(cam->image_window[loop] != NULL)
+			{
+				cam->image_window[loop]->AdaptToResolution(old_image_sx, old_image_sy, old_w, old_h, 0, 0, cam->display_width, cam->display_height);
 			}
 		}
 	}
@@ -78060,12 +80018,14 @@ void	video_settings_copy_to_display(Fl_Widget *w, void *v)
 		{
 			int val = atoi(sww);
 			cam->display_width = val;
+			cam->DisplayScaleFactor();
 		}
 		char *shh = (char *)sw->output_h->value();
 		if(shh != NULL)
 		{
 			int val = atoi(shh);
 			cam->display_height = val;
+			cam->DisplayScaleFactor();
 		}
 	}
 }
@@ -78097,7 +80057,7 @@ char	buf[256];
 	warn_box->copy_label("Warning: Changing the output resolution will cause a video recording reset.\nAdditionally, the resolution will automaticall adjust to be evenly divisible by two.");
 	yp += 32;
 
-	output_w = new Fl_Int_Input(200, yp, 60, 20, "Output Size");
+	output_w = new IntInput(200, yp, 60, 20, "Output Size");
 	output_w->box(FL_FRAME_BOX);
 	output_w->color(BLACK);
 	output_w->labelcolor(YELLOW);
@@ -78110,7 +80070,7 @@ char	buf[256];
 	output_w->copy_tooltip("Width of the output stream");
 	output_w->callback(video_settings_resolution_cb, this);
 
-	output_h = new Fl_Int_Input(262, yp, 60, 20, "");
+	output_h = new IntInput(262, yp, 60, 20, "");
 	output_h->box(FL_FRAME_BOX);
 	output_h->color(BLACK);
 	output_h->labelcolor(YELLOW);
@@ -78209,7 +80169,7 @@ char	buf[256];
 	tf_box->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 	yp += 40;
 
-	timestamp_font_size = new Fl_Int_Input(200, yp, 60, 20, "Timestamp Font Size");
+	timestamp_font_size = new IntInput(200, yp, 60, 20, "Timestamp Font Size");
 	timestamp_font_size->box(FL_FRAME_BOX);
 	timestamp_font_size->color(BLACK);
 	timestamp_font_size->textcolor(WHITE);
@@ -78222,7 +80182,7 @@ char	buf[256];
 	timestamp_font_size->copy_tooltip("Change the font size of the timestamp");
 	timestamp_font_size->callback(timestamp_font_size_cb, this);
 
-	timestamp_position_x = new Fl_Int_Input(400, yp, 60, 20, "Timestamp Position");
+	timestamp_position_x = new IntInput(400, yp, 60, 20, "Timestamp Position");
 	timestamp_position_x->box(FL_FRAME_BOX);
 	timestamp_position_x->color(BLACK);
 	timestamp_position_x->textcolor(WHITE);
@@ -78235,7 +80195,7 @@ char	buf[256];
 	timestamp_position_x->copy_tooltip("Horizontal position of the timestamp");
 	timestamp_position_x->callback(timestamp_position_cb, this);
 
-	timestamp_position_y = new Fl_Int_Input(470, yp, 60, 20, "");
+	timestamp_position_y = new IntInput(470, yp, 60, 20, "");
 	timestamp_position_y->box(FL_FRAME_BOX);
 	timestamp_position_y->color(BLACK);
 	timestamp_position_y->textcolor(WHITE);
@@ -78250,7 +80210,7 @@ char	buf[256];
 	yp += 35;
 
 	fps_slider = new MySlider(my_window, 200, yp, 500, 25, "FPS");
-	fps_slider->range(0.0, 100.0);
+	fps_slider->range(0.0, 128.0);
 	fps_slider->value(0.0);
 	fps_slider->step(0.5);
 	fps_slider->initial_value = 0.0;
@@ -78319,7 +80279,7 @@ char	buf[256];
 	virtual_output_format_group->end();
 	yp += 22;
 
-	virtual_output_w = new Fl_Int_Input(200, yp, 60, 20, "Virtual Output Size");
+	virtual_output_w = new IntInput(200, yp, 60, 20, "Virtual Output Size");
 	virtual_output_w->box(FL_FRAME_BOX);
 	virtual_output_w->color(BLACK);
 	virtual_output_w->labelcolor(YELLOW);
@@ -78333,7 +80293,7 @@ char	buf[256];
 	virtual_output_w->copy_tooltip("Width of the virtual camera output stream");
 	virtual_output_w->callback(video_settings_virtual_output_resolution_cb, this);
 
-	virtual_output_h = new Fl_Int_Input(262, yp, 60, 20, "");
+	virtual_output_h = new IntInput(262, yp, 60, 20, "");
 	virtual_output_h->box(FL_FRAME_BOX);
 	virtual_output_h->color(BLACK);
 	virtual_output_h->labelcolor(YELLOW);
@@ -78376,7 +80336,7 @@ char	buf[256];
 	gather_codecs_button->labelsize(9);
 	gather_codecs_button->align(FL_ALIGN_CENTER);
 	gather_codecs_button->copy_tooltip("Query and test codec combinations");
-	gather_codecs_button->callback(gather_codecs_cb, my_window);
+	gather_codecs_button->callback(pre_gather_codecs_cb, my_window);
 	yp += 22;
 	benchmark_codecs_button = new MyButton(my_window, 200, yp, 120, 20, "Benchmark Codecs");
 	benchmark_codecs_button->box(FL_FRAME_BOX);
@@ -78824,6 +80784,7 @@ int loop;
 		}
 	}
 }
+
 void	notes_font_size_cb(Fl_Widget *w, void *v)
 {
 int loop;
@@ -78996,7 +80957,8 @@ int loop;
 					if(slide != NULL)
 					{
 						double nn = slide->value();
-						cam->hot_delay = (int)nn;
+						int ii = (int)(nn * 1000000.0);
+						cam->hot_delay = ii;
 					}
 				}
 			}
@@ -79010,7 +80972,8 @@ int loop;
 				if(slide != NULL)  
 				{
 					double nn = slide->value();
-					cam->hot_delay = (int)nn;
+					int ii = (int)(nn * 1000000.0);
+					cam->hot_delay = ii;
 				}
 			}
 		}
@@ -79601,12 +81564,56 @@ int loop;
 	}
 }
 
+void	camera_settings_crosshair_cb(Fl_Widget *w, void *v)
+{
+	MyToggleButton *b = (MyToggleButton *)w;
+	CameraSettingsWindow *win = (CameraSettingsWindow *)v;
+	win->my_window->crosshair_mode = 0;
+	if(b == win->crosshair_box)
+	{
+		win->my_window->crosshair_mode = BOX_CROSSHAIR_MODE;
+	}
+	else if(b == win->crosshair_cross)
+	{
+		win->my_window->crosshair_mode = CROSS_CROSSHAIR_MODE;
+	}
+	else if(b == win->crosshair_boxes)
+	{
+		win->my_window->crosshair_mode = BOXES_CROSSHAIR_MODE;
+	}
+	else if(b == win->crosshair_crosses)
+	{
+		win->my_window->crosshair_mode = CROSSES_CROSSHAIR_MODE;
+	}
+	else if(b == win->crosshair_grid5)
+	{
+		win->my_window->crosshair_mode = GRID5_CROSSHAIR_MODE;
+	}
+	else if(b == win->crosshair_grid10)
+	{
+		win->my_window->crosshair_mode = GRID10_CROSSHAIR_MODE;
+	}
+	else if(b == win->crosshair_grid20)
+	{
+		win->my_window->crosshair_mode = GRID20_CROSSHAIR_MODE;
+	}
+	else if(b == win->crosshair_ruler)
+	{
+		win->my_window->crosshair_mode = RULER_CROSSHAIR_MODE;
+	}
+	else if(b == win->crosshair_measure)
+	{
+		win->my_window->crosshair_mode = MEASURE_CROSSHAIR_MODE;
+	}
+}
+
 CameraSettingsWindow::CameraSettingsWindow(MyWin *in_win) : Dialog(in_win, 360, 200, 800, 795, "Camera Settings")
 {
 char	buf[256];
 
 	my_window = in_win;
 	Camera *cam = my_window->DisplayedCamera();
+	my_camera = cam;
 	Fl_Window::label("Camera Settings");
 
 	int new_yp = 20;
@@ -79642,7 +81649,7 @@ char	buf[256];
 	cam_alias->callback(camera_settings_alias_cb, this);
 	yp += 25;
 
-	display_w = new Fl_Int_Input(200, yp, 60, 20, "Display Size");
+	display_w = new IntInput(200, yp, 60, 20, "Display Size");
 	display_w->box(FL_FRAME_BOX);
 	display_w->color(BLACK);
 	display_w->textcolor(WHITE);
@@ -79656,9 +81663,7 @@ char	buf[256];
 		sprintf(buf, "%d", (int)cam->display_width);
 		display_w->value(buf);
 	}
-	display_w->callback(camera_settings_resolution_cb, this);
-
-	display_h = new Fl_Int_Input(262, yp, 60, 20, "");
+	display_h = new IntInput(262, yp, 60, 20, "");
 	display_h->box(FL_FRAME_BOX);
 	display_h->color(BLACK);
 	display_h->textcolor(WHITE);
@@ -79672,9 +81677,31 @@ char	buf[256];
 		sprintf(buf, "%d", (int)cam->display_height);
 		display_h->value(buf);
 	}
-	display_h->callback(camera_settings_resolution_cb, this);
+	MyButton *set_display_resolution_button = new MyButton(my_window, 322, yp, 40, 20, "Set");
+	set_display_resolution_button->box(FL_FRAME_BOX);
+	set_display_resolution_button->color(BLACK);
+	set_display_resolution_button->labelcolor(YELLOW);
+	set_display_resolution_button->labelsize(font_sz - 1);
+	set_display_resolution_button->copy_tooltip("Set the display resolution.");
+	set_display_resolution_button->callback(camera_settings_resolution_cb, this);
 
-	hardware_w = new Fl_Int_Input(430, yp, 60, 20, "Input Resolution");
+	MyButton *set_display_resolution_to_input_button = new MyButton(my_window, 382, yp, 20, 20, "@<");
+	set_display_resolution_to_input_button->box(FL_FRAME_BOX);
+	set_display_resolution_to_input_button->color(BLACK);
+	set_display_resolution_to_input_button->labelcolor(YELLOW);
+	set_display_resolution_to_input_button->labelsize(font_sz - 1);
+	set_display_resolution_to_input_button->copy_tooltip("Copy the input resolution to the display resolution.");
+	set_display_resolution_to_input_button->callback(camera_settings_copy_input_resolution_cb, this);
+
+	MyButton *set_input_resolution_to_display_button = new MyButton(my_window, 402, yp, 20, 20, "@>");
+	set_input_resolution_to_display_button->box(FL_FRAME_BOX);
+	set_input_resolution_to_display_button->color(BLACK);
+	set_input_resolution_to_display_button->labelcolor(YELLOW);
+	set_input_resolution_to_display_button->labelsize(font_sz - 1);
+	set_input_resolution_to_display_button->copy_tooltip("Copy the display resolution to the input resolution.");
+	set_input_resolution_to_display_button->callback(camera_settings_copy_display_resolution_cb, this);
+
+	hardware_w = new IntInput(530, yp, 60, 20, "Input Resolution");
 	hardware_w->box(FL_FRAME_BOX);
 	hardware_w->color(BLACK);
 	hardware_w->textcolor(WHITE);
@@ -79688,7 +81715,7 @@ char	buf[256];
 		sprintf(buf, "%d", (int)cam->width);
 		hardware_w->value(buf);
 	}
-	hardware_h = new Fl_Int_Input(492, yp, 60, 20, "");
+	hardware_h = new IntInput(592, yp, 60, 20, "");
 	hardware_h->box(FL_FRAME_BOX);
 	hardware_h->color(BLACK);
 	hardware_h->textcolor(WHITE);
@@ -79702,7 +81729,7 @@ char	buf[256];
 		sprintf(buf, "%d", (int)cam->height);
 		hardware_h->value(buf);
 	}
-	MyButton *set_hardware_resolution_button = new MyButton(my_window, 555, yp, 40, 20, "Set");
+	MyButton *set_hardware_resolution_button = new MyButton(my_window, 655, yp, 40, 20, "Set");
 	set_hardware_resolution_button->box(FL_FRAME_BOX);
 	set_hardware_resolution_button->color(BLACK);
 	set_hardware_resolution_button->labelcolor(YELLOW);
@@ -79854,13 +81881,13 @@ char	buf[256];
 
 	yp += 25;
 	retrieve_interval_slider = new MySlider(my_window, 200, yp, 500, 25, "Retrieve Interval");
-	retrieve_interval_slider->range(1.0, 1000000.0);
-	retrieve_interval_slider->value(10000.0);
-	retrieve_interval_slider->step(10000.0);
-	retrieve_interval_slider->initial_value = 10000.0;
+	retrieve_interval_slider->range(0.0, 10.0);
+	retrieve_interval_slider->value(0.01);
+	retrieve_interval_slider->step(0.01);
+	retrieve_interval_slider->initial_value = 0.01;
 	retrieve_interval_slider->labelsize(font_sz + 1);
 	retrieve_interval_slider->labelcolor(YELLOW);
-	retrieve_interval_slider->copy_tooltip("How often this camera is sampled at all.");
+	retrieve_interval_slider->copy_tooltip("How often this camera is sampled.");
 	retrieve_interval_slider->callback(retrieve_interval_cb, this);
 	yp += 45;
 
@@ -79919,7 +81946,7 @@ char	buf[256];
 	note_placement_group->end();
 	note_placement_group->tooltip("Select where you want the note to appear on the screen");
 	yp += 100;
-	notes_font_size = new Fl_Int_Input(200, yp, 60, 20, "Note Font Size");
+	notes_font_size = new IntInput(200, yp, 60, 20, "Note Font Size");
 	notes_font_size->box(FL_FRAME_BOX);
 	notes_font_size->color(BLACK);
 	notes_font_size->textcolor(WHITE);
@@ -79930,14 +81957,69 @@ char	buf[256];
 	notes_font_size->copy_tooltip("The font size of the note appearing on the screen.");
 	notes_font_size->value("11");
 	notes_font_size->callback(notes_font_size_cb, this);
+	yp += 42;
 
-	yp += 44;
-	apply_to_all_button = new MyToggleButton(my_window, 70, yp, 100, 22, "Apply to All");
+	Fl_Group *crosshair_group = new Fl_Group(200, yp, 350, 44, "Crosshairs\n(every camera, does not record)");
+	crosshair_group->box(FL_FLAT_BOX);
+	crosshair_group->color(BLACK);
+	crosshair_group->labelsize(11);
+	crosshair_group->labelcolor(YELLOW);
+	crosshair_group->align(FL_ALIGN_LEFT_TOP);
+		int sub_yp = 0;
+		int sub_xp = 200;
+		crosshair_none = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "None");
+		chb[0] = crosshair_none;
+		sub_xp += 70;
+		crosshair_box = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Box");
+		chb[1] = crosshair_box;
+		sub_xp += 70;
+		crosshair_cross = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Cross");
+		chb[2] = crosshair_cross;
+		sub_xp += 70;
+		crosshair_boxes = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Boxes");
+		chb[3] = crosshair_boxes;
+		sub_xp += 70;
+		crosshair_crosses = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Crosses");
+		chb[4] = crosshair_crosses;
+		sub_xp = 200;
+		sub_yp += 22;
+		crosshair_grid5 = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Grid 5");
+		chb[5] = crosshair_grid5;
+		sub_xp += 70;
+		crosshair_grid10 = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Grid 10");
+		chb[6] = crosshair_grid10;
+		sub_xp += 70;
+		crosshair_grid20 = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Grid 20");
+		chb[7] = crosshair_grid20;
+		sub_xp += 70;
+		crosshair_ruler = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Ruler");
+		chb[8] = crosshair_ruler;
+		sub_xp += 70;
+		crosshair_measure = new MyToggleButton(my_window, sub_xp, yp + sub_yp, 70, 22, "Measure");
+		chb[9] = crosshair_measure;
+	crosshair_group->end();
+	for(int loop = 0;loop < 10;loop++)
+	{
+		chb[loop]->box(FL_FRAME_BOX);
+		chb[loop]->color(BLACK);
+		chb[loop]->labelcolor(YELLOW);
+		chb[loop]->labelsize(font_sz + 1);
+		chb[loop]->type(FL_RADIO_BUTTON);
+		chb[loop]->value(0);
+		chb[loop]->callback(camera_settings_crosshair_cb, this);
+	}
+	if((my_window->crosshair_mode >= 0) && (my_window->crosshair_mode < 10))
+	{
+		chb[my_window->crosshair_mode]->value(1);
+	}
+	yp += 64;
+	apply_to_all_button = new MyLightButton(my_window, 70, yp, 100, 22, "Apply to All");
 	apply_to_all_button->box(FL_FRAME_BOX);
 	apply_to_all_button->color(BLACK);
 	apply_to_all_button->labelcolor(YELLOW);
 	apply_to_all_button->labelsize(font_sz + 1);
-	apply_to_all_button->copy_tooltip("Apply subsequent changes to all active cameras.");
+	apply_to_all_button->align(FL_ALIGN_CENTER);
+	apply_to_all_button->copy_tooltip("Toggles the application of subsequent changes to all active cameras.");
 
 	load_from = new MyButton(my_window, 170, yp, 100, 22, "Load");
 	load_from->box(FL_FRAME_BOX);
@@ -79948,13 +82030,14 @@ char	buf[256];
 	load_from->callback(load_from_saved_camera_cb, this);
 	yp += 24;
 
-	MyButton *close = new MyButton(my_window, 70, yp + 2, 100, 22, "Close");
-	close->box(FL_FRAME_BOX);
-	close->color(BLACK);
-	close->labelcolor(YELLOW);
-	close->labelsize(font_sz + 1);
-	close->copy_tooltip("Close the dialog.");
-	close->callback(hide_window_cb, this);
+	retain_close_position = yp + 2;
+	close_button = new MyButton(my_window, 70, yp + 2, 100, 22, "Close");
+	close_button->box(FL_FRAME_BOX);
+	close_button->color(BLACK);
+	close_button->labelcolor(YELLOW);
+	close_button->labelsize(font_sz + 1);
+	close_button->copy_tooltip("Close the dialog.");
+	close_button->callback(hide_window_cb, this);
 	end();
 	resize(x(), y(), w(), yp + 60);
 }
@@ -79980,6 +82063,10 @@ int	CameraSettingsWindow::handle(int event)
 		|| (event == FL_UNFOCUS))
 		{
 			flag = 1;
+		}
+		else if(event == FL_SHOW)
+		{
+			my_camera = my_window->DisplayedCamera();
 		}
 		else if(event == FL_KEYBOARD)
 		{
@@ -80057,7 +82144,7 @@ char	buf[256];
 			recognition_threshold_slider->value(cam->recognition_threshold);
 			recognition_interval_slider->value(cam->recognize_interval);
 			capture_interval_slider->value(cam->capture_interval);
-			retrieve_interval_slider->value(cam->hot_delay);
+			retrieve_interval_slider->value(cam->hot_delay / 1000000.0);
 			if(cam->note != NULL)
 			{
 				notes->value(cam->note);
@@ -80074,8 +82161,27 @@ char	buf[256];
 			else if(cam->note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_RIGHT) bottom_right->value(1);
 			else if(cam->note_placement == CAMERA_NOTE_PLACEMENT_TOP_CENTER) top_center->value(1);
 			else if(cam->note_placement == CAMERA_NOTE_PLACEMENT_BOTTOM_CENTER) bottom_center->value(1);
+			if(my_window->source_cnt < 2)
+			{
+				apply_to_all_button->hide();
+				close_button->resize(close_button->x(), retain_close_position - 26, close_button->w(), close_button->h());
+			}
+			else
+			{
+				apply_to_all_button->show();
+				close_button->resize(close_button->x(), retain_close_position, close_button->w(), close_button->h());
+			}
 		}
 	}
+	for(int loop = 0;loop < 10;loop++)
+	{
+		chb[loop]->value(0);
+	}
+	if((my_window->crosshair_mode >= 0) && (my_window->crosshair_mode < 10))
+	{
+		chb[my_window->crosshair_mode]->value(1);
+	}
+	redraw();
 }
 
 // SECTION ************************************** SNAPSHOT SETTINGS WINDOW *******************************************************
@@ -80579,10 +82685,10 @@ char	buf[256];
 	}
 	if(gsw->retain_all_button->value())
 	{
-		gsw->my_window->retain_commands = 1;
-		gsw->my_window->retain_cameras = 1;
-		gsw->my_window->retain_audio = 1;
-		gsw->my_window->retain_ptz = 1;
+		gsw->my_window->retain_commands = PANEL_RETAIN;
+		gsw->my_window->retain_cameras = PANEL_RETAIN;
+		gsw->my_window->retain_audio = PANEL_RETAIN;
+		gsw->my_window->retain_ptz = PANEL_RETAIN;
 	}
 	gsw->my_window->use_tooltips = gsw->use_tooltips_button->value();
 	if(gsw->my_window->use_tooltips == 1)
@@ -80623,6 +82729,8 @@ char	buf[256];
 	Fl::set_color(BLUE, gsw->blue_color_r, gsw->blue_color_g, gsw->blue_color_b, gsw->blue_color_a);
 	Fl::set_color(DARK_BLUE, gsw->dark_blue_color_r, gsw->dark_blue_color_g, gsw->dark_blue_color_b, gsw->dark_blue_color_a);
 	Fl::set_color(CYAN, gsw->cyan_color_r, gsw->cyan_color_g, gsw->cyan_color_b, gsw->cyan_color_a);
+	Fl::set_color(PURPLE, gsw->purple_color_r, gsw->purple_color_g, gsw->purple_color_b, gsw->purple_color_a);
+	Fl::set_color(DARK_PURPLE, gsw->dark_purple_color_r, gsw->dark_purple_color_g, gsw->dark_purple_color_b, gsw->dark_purple_color_a);
 
 	MyWin *win = gsw->my_window;
 	char *font_name = "Sans";
@@ -80744,6 +82852,10 @@ char	buf[256];
 		fprintf(fp, "\t\"color dark blue\": [%d,%d,%d],\n", red, green, blue);
 		Fl::get_color(CYAN, red, green, blue);
 		fprintf(fp, "\t\"color cyan\": [%d,%d,%d],\n", red, green, blue);
+		Fl::get_color(PURPLE, red, green, blue);
+		fprintf(fp, "\t\"color purple\": [%d,%d,%d],\n", red, green, blue);
+		Fl::get_color(DARK_PURPLE, red, green, blue);
+		fprintf(fp, "\t\"color dark purple\": [%d,%d,%d],\n", red, green, blue);
 		fprintf(fp, "\t\"font\": \"%s\"\n", DQ(font_name));
 		fprintf(fp, "}\n");
 		fclose(fp);
@@ -80982,10 +83094,46 @@ void	ui_setting_cyan_color_cb(Fl_Widget *w, void *v)
 	}
 }
 
-void	generic_cancel_cb(Fl_Widget *w, void *v)
+void	ui_setting_purple_color_cb(Fl_Widget *w, void *v)
 {
-	Fl_Window *win = (Fl_Window *)v;
-	win->hide();
+	MyButton *b = (MyButton *)w;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
+	int red = gsw->purple_color_r;
+	int green = gsw->purple_color_g;
+	int blue = gsw->purple_color_b;
+	int alpha = gsw->purple_color_a;
+	if(my_color_chooser(win, "Purple Color", red, green, blue, alpha))
+	{
+		gsw->purple_color_r = red;
+		gsw->purple_color_g = green;
+		gsw->purple_color_b = blue;
+		gsw->purple_color_a = alpha;
+		b->color(fl_rgb_color(red, green, blue));
+		b->redraw();
+	}
+}
+
+void	ui_setting_dark_purple_color_cb(Fl_Widget *w, void *v)
+{
+	MyButton *b = (MyButton *)w;
+	UI_SettingsWindow *gsw = (UI_SettingsWindow *)v;
+	MyWin *win = gsw->my_window;
+
+	int red = gsw->dark_purple_color_r;
+	int green = gsw->dark_purple_color_g;
+	int blue = gsw->dark_purple_color_b;
+	int alpha = gsw->dark_purple_color_a;
+	if(my_color_chooser(win, "Dakr Purple Color", red, green, blue, alpha))
+	{
+		gsw->dark_purple_color_r = red;
+		gsw->dark_purple_color_g = green;
+		gsw->dark_purple_color_b = blue;
+		gsw->dark_purple_color_a = alpha;
+		b->color(fl_rgb_color(red, green, blue));
+		b->redraw();
+	}
 }
 
 void	transparent_panels_cb(Fl_Widget *w, void *v)
@@ -81071,6 +83219,8 @@ int	loop;
 	Fl::get_color(BLUE, blue_color_r, blue_color_g, blue_color_b, blue_color_a);
 	Fl::get_color(DARK_BLUE, dark_blue_color_r, dark_blue_color_g, dark_blue_color_b, dark_blue_color_a);
 	Fl::get_color(CYAN, cyan_color_r, cyan_color_g, cyan_color_b, cyan_color_a);
+	Fl::get_color(PURPLE, purple_color_r, purple_color_g, purple_color_b, purple_color_a);
+	Fl::get_color(DARK_PURPLE, dark_purple_color_r, dark_purple_color_g, dark_purple_color_b, dark_purple_color_a);
 
 	int yp = new_yp + 10;
 
@@ -81314,6 +83464,28 @@ int	loop;
 	cyan_color_button->box(FL_FRAME_BOX);
 	cyan_color_button->color(fl_rgb_color(cyan_color_r, cyan_color_g, cyan_color_b));
 	cyan_color_button->callback(ui_setting_cyan_color_cb, this);
+	yp += 22;
+	purple_color_box = new Fl_Box(10, yp, 135, 20, "Purple Color");
+	purple_color_box->box(FL_FLAT_BOX);
+	purple_color_box->color(BLACK);
+	purple_color_box->labelcolor(WHITE);
+	purple_color_box->labelsize(9);
+	purple_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	purple_color_button = new MyButton(my_window, 150, yp, 20, 20);
+	purple_color_button->box(FL_FRAME_BOX);
+	purple_color_button->color(fl_rgb_color(purple_color_r, purple_color_g, purple_color_b));
+	purple_color_button->callback(ui_setting_purple_color_cb, this);
+	yp += 22;
+	dark_purple_color_box = new Fl_Box(10, yp, 135, 20, "Dark Purple Color");
+	dark_purple_color_box->box(FL_FLAT_BOX);
+	dark_purple_color_box->color(BLACK);
+	dark_purple_color_box->labelcolor(WHITE);
+	dark_purple_color_box->labelsize(9);
+	dark_purple_color_box->align(FL_ALIGN_RIGHT | FL_ALIGN_INSIDE);
+	dark_purple_color_button = new MyButton(my_window, 150, yp, 20, 20);
+	dark_purple_color_button->box(FL_FRAME_BOX);
+	dark_purple_color_button->color(fl_rgb_color(dark_purple_color_r, dark_purple_color_g, dark_purple_color_b));
+	dark_purple_color_button->callback(ui_setting_dark_purple_color_cb, this);
 	yp += 42;
 
 	sample = new MyInput(my_window, 60, yp, 245, 20, "Sample");
@@ -81548,6 +83720,101 @@ FilterButton::~FilterButton()
 	}
 }
 
+int		FilterButton::OnMoveDrag()
+{
+	int flag = 0;
+	if(dragging == 1)
+	{
+		int xx = Fl::event_x();
+		int yy = Fl::event_y();
+		int pyy = yy - my_window->use->y();
+		int py = pyy / 20;
+		int col_flag = 1;
+		if(x() < 100)
+		{
+			col_flag = 2;
+			my_window->available->box(FL_FRAME);
+			my_window->use->box(FL_NO_BOX);
+		}
+		else
+		{
+			my_window->available->box(FL_NO_BOX);
+			my_window->use->box(FL_FRAME);
+		}
+		my_window->Arrange(col_flag, py);
+		window()->add(this);
+		resize(xx - offset_x, yy - offset_y, w(), h());
+		redraw();
+		window()->redraw();
+	}
+	return(flag);
+}
+
+int		FilterButton::OnRelease()
+{
+	int flag = 0;
+	int yy = Fl::event_y();
+	int pyy = yy - my_window->use->y();
+	int py = pyy / 20;
+	if(x() > 100)
+	{
+		if(parent() == my_window)
+		{
+			my_window->use->insert(*this, py);
+			if(my_window->filter_type == FILTER_TYPE_VIDEO_BUILT_IN)
+			{
+				int cnt = my_window->available->children();
+				int do_not_add = 0;
+				for(int loop = 0;loop < cnt;loop++)
+				{
+					Fl_Widget *b = my_window->available->child(loop);
+					if(b != NULL)
+					{
+						char *lbl = (char *)b->label();
+						if(lbl != NULL)
+						{
+							if(strcmp(label(), lbl) == 0)
+							{
+								do_not_add = 1;
+							}
+						}
+					}
+				}
+				if(do_not_add == 0)
+				{
+					FilterButton *filter_button = new FilterButton(my_window, my_window->available->x(), my_window->available->y() + (cnt * 20), 120, 20, (char *)label());
+					my_window->available->add(filter_button);
+				}
+			}
+		}
+	}
+	else
+	{
+		if(my_window->filter_type == FILTER_TYPE_VIDEO_BUILT_IN)
+		{
+			if(parent() == my_window)
+			{
+				my_window->use->remove(this);
+				hide();
+			}
+		}
+		else
+		{
+			if(parent() == my_window)
+			{
+				my_window->available->insert(*this, py);
+			}
+		}
+	}
+	my_window->Arrange();
+	my_window->available->box(FL_NO_BOX);
+	my_window->use->box(FL_NO_BOX);
+	window()->redraw();
+	dragging = 0;
+	flag = 1;
+	return(flag);
+}
+
 int	FilterButton::handle(int event)
 {
 int		loop;
@@ -81564,92 +83831,11 @@ int		loop;
 	}
 	else if((event == FL_MOVE) || (event == FL_DRAG))
 	{
-		if(dragging == 1)
-		{
-			int xx = Fl::event_x();
-			int yy = Fl::event_y();
-			int pyy = yy - my_window->use->y();
-			int py = pyy / 20;
-			int col_flag = 1;
-			if(x() < 100)
-			{
-				col_flag = 2;
-				my_window->available->box(FL_FRAME);
-				my_window->use->box(FL_NO_BOX);
-			}
-			else
-			{
-				my_window->available->box(FL_NO_BOX);
-				my_window->use->box(FL_FRAME);
-			}
-			my_window->Arrange(col_flag, py);
-			window()->add(this);
-			resize(xx - offset_x, yy - offset_y, w(), h());
-			redraw();
-			window()->redraw();
-		}
+		flag = OnMoveDrag();
 	}
 	else if(event == FL_RELEASE)
 	{
-		int yy = Fl::event_y();
-		int pyy = yy - my_window->use->y();
-		int py = pyy / 20;
-		if(x() > 100)
-		{
-			if(parent() == my_window)
-			{
-				my_window->use->insert(*this, py);
-				if(my_window->filter_type == FILTER_TYPE_VIDEO_BUILT_IN)
-				{
-					int cnt = my_window->available->children();
-					int do_not_add = 0;
-					for(loop = 0;loop < cnt;loop++)
-					{
-						Fl_Widget *b = my_window->available->child(loop);
-						if(b != NULL)
-						{
-							char *lbl = (char *)b->label();
-							if(lbl != NULL)
-							{
-								if(strcmp(label(), lbl) == 0)
-								{
-									do_not_add = 1;
-								}
-							}
-						}
-					}
-					if(do_not_add == 0)
-					{
-						FilterButton *filter_button = new FilterButton(my_window, my_window->available->x(), my_window->available->y() + (cnt * 20), 120, 20, (char *)label());
-						my_window->available->add(filter_button);
-					}
-				}
-			}
-		}
-		else
-		{
-			if(my_window->filter_type == FILTER_TYPE_VIDEO_BUILT_IN)
-			{
-				if(parent() == my_window)
-				{
-					my_window->use->remove(this);
-					hide();
-				}
-			}
-			else
-			{
-				if(parent() == my_window)
-				{
-					my_window->available->insert(*this, py);
-				}
-			}
-		}
-		my_window->Arrange();
-		my_window->available->box(FL_NO_BOX);
-		my_window->use->box(FL_NO_BOX);
-		window()->redraw();
-		dragging = 0;
-		flag = 1;
+		flag = OnRelease();
 	}
 	if(flag == 0)
 	{
@@ -83246,6 +85432,29 @@ PythonButton::~PythonButton()
 	}
 }
 
+void	PythonButton::RightClickMenu()
+{
+	if(popup == NULL)
+	{
+		popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
+		popup->browser->callback(python_button_popup_cb, this);
+	}
+	else
+	{
+		popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	}
+	if(popup != NULL)
+	{
+		popup->browser->clear();
+		popup->browser->add("Edit");
+		popup->browser->add("Delete");
+		popup->browser->add("Cancel");
+		popup->set_non_modal();
+		popup->Fit();
+		popup->show();
+	}
+}
+
 int	PythonButton::handle(int event)
 {
 	int flag = 0;
@@ -83253,25 +85462,7 @@ int	PythonButton::handle(int event)
 	{
 		if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
 		{
-			if(popup == NULL)
-			{
-				popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
-				popup->browser->callback(python_button_popup_cb, this);
-			}
-			else
-			{
-				popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-			}
-			if(popup != NULL)
-			{
-				popup->browser->clear();
-				popup->browser->add("Edit");
-				popup->browser->add("Delete");
-				popup->browser->add("Cancel");
-				popup->set_non_modal();
-				popup->Fit();
-				popup->show();
-			}
+			RightClickMenu();
 			flag = 1;
 		}
 	}
@@ -83727,7 +85918,6 @@ int	loop;
 	Camera *cam = tw->my_window->DisplayedCamera();
 	if(cam != NULL)
 	{
-		cam->record_trigger = 0;
 		if((button == tw->trigger[BUTTON_ON_RECORD_BUTTON])
 		&& (tw->trigger[BUTTON_ON_RECORD_BUTTON]->value()))
 		{
@@ -83740,51 +85930,98 @@ int	loop;
 				}
 			}
 		}
-		if((button == tw->trigger[BUTTON_ON_DETECT_OBJECT])
-		&& (tw->trigger[BUTTON_ON_DETECT_OBJECT]->value()))
+		if(button == tw->trigger[BUTTON_ON_DETECT_OBJECT])
 		{
-			cam->record_trigger |= ON_DETECT_OBJECT;
-			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			if(tw->trigger[BUTTON_ON_DETECT_OBJECT]->value())
+			{
+				cam->record_trigger |= ON_DETECT_OBJECT;
+				tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			}
+			else
+			{
+				cam->record_trigger &= ~ON_DETECT_OBJECT;
+			}
 		}
-		if((button == tw->trigger[BUTTON_ON_DETECT_MOTION])
-		&& (tw->trigger[BUTTON_ON_DETECT_MOTION]->value()))
+		if(button == tw->trigger[BUTTON_ON_DETECT_MOTION])
 		{
-			cam->record_trigger |= ON_DETECT_MOTION;
-			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			if(tw->trigger[BUTTON_ON_DETECT_MOTION]->value())
+			{
+				cam->record_trigger |= ON_DETECT_MOTION;
+				tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			}
+			else
+			{
+				cam->record_trigger &= ~ON_DETECT_MOTION;
+			}
 		}
-		if((button == tw->trigger[BUTTON_ON_DETECT_LIGHT])
-		&& (tw->trigger[BUTTON_ON_DETECT_LIGHT]->value()))
+		if(button == tw->trigger[BUTTON_ON_DETECT_LIGHT])
 		{
-			cam->record_trigger |= ON_DETECT_LIGHT;
-			cam->record_trigger &= ~ON_DETECT_DARK;
-			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
-			tw->trigger[BUTTON_ON_DETECT_DARK]->value(0);
+			if(tw->trigger[BUTTON_ON_DETECT_LIGHT]->value())
+			{
+				cam->record_trigger |= ON_DETECT_LIGHT;
+				cam->record_trigger &= ~ON_DETECT_DARK;
+				tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+				tw->trigger[BUTTON_ON_DETECT_DARK]->value(0);
+			}
+			else
+			{
+				cam->record_trigger &= ~ON_DETECT_LIGHT;
+			}
 		}
-		if((button == tw->trigger[BUTTON_ON_DETECT_DARK])
-		&& (tw->trigger[BUTTON_ON_DETECT_DARK]->value()))
+		if(button == tw->trigger[BUTTON_ON_DETECT_DARK])
 		{
-			cam->record_trigger |= ON_DETECT_DARK;
-			cam->record_trigger &= ~ON_DETECT_LIGHT;
-			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
-			tw->trigger[BUTTON_ON_DETECT_LIGHT]->value(0);
+			if(tw->trigger[BUTTON_ON_DETECT_DARK]->value())
+			{
+				cam->record_trigger |= ON_DETECT_DARK;
+				cam->record_trigger &= ~ON_DETECT_LIGHT;
+				tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+				tw->trigger[BUTTON_ON_DETECT_LIGHT]->value(0);
+			}
+			else
+			{
+				cam->record_trigger &= ~ON_DETECT_DARK;
+			}
 		}
-		if((button == tw->trigger[BUTTON_ON_TRIGGER_CAMERA])
-		&& (tw->trigger[BUTTON_ON_TRIGGER_CAMERA]->value()))
+		if(button == tw->trigger[BUTTON_ON_TRIGGER_CAMERA])
 		{
-			cam->record_trigger |= ON_TRIGGER_CAMERA;
-			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			if(tw->trigger[BUTTON_ON_TRIGGER_CAMERA]->value())
+			{
+				cam->record_trigger |= ON_TRIGGER_CAMERA;
+				tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			}
+			else
+			{
+				cam->record_trigger &= ~ON_TRIGGER_CAMERA;
+			}
 		}
-		if((button == tw->trigger[BUTTON_ON_SCHEDULE])
-		&& (tw->trigger[BUTTON_ON_SCHEDULE]->value()))
+		if(button == tw->trigger[BUTTON_ON_SCHEDULE])
 		{
-			cam->record_trigger |= ON_SCHEDULE;
-			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			if(tw->trigger[BUTTON_ON_SCHEDULE]->value())
+			{
+				cam->record_trigger |= ON_SCHEDULE;
+				tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			}
+			else
+			{
+				cam->record_trigger &= ~ON_SCHEDULE;
+			}
 		}
-		if((button == tw->trigger[BUTTON_ON_SOUND])
-		&& (tw->trigger[BUTTON_ON_SOUND]->value()))
+		if(button == tw->trigger[BUTTON_ON_SOUND])
 		{
-			cam->record_trigger |= ON_DETECT_SOUND;
-			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			if(tw->trigger[BUTTON_ON_SOUND]->value())
+			{
+				cam->record_trigger |= ON_DETECT_SOUND;
+				tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(0);
+			}
+			else
+			{
+				cam->record_trigger &= ~ON_DETECT_SOUND;
+			}
+		}
+		if(cam->record_trigger == 0)
+		{
+			cam->record_trigger = ON_RECORD_BUTTON;
+			tw->trigger[BUTTON_ON_RECORD_BUTTON]->value(1);
 		}
 	}
 	tw->redraw();
@@ -84296,6 +86533,45 @@ ImageWindow::~ImageWindow()
 		Fl::delete_widget(popup);
 		popup = NULL;
 	}
+}
+
+void	ImageWindow::AdaptToResolution(int old_image_sx, int old_image_sy, int old_w, int old_h, int new_image_sx, int new_image_sy, int new_w, int new_h)
+{
+	double use_sx = ((1.0 / old_w) * (double)(x() - old_image_sx));
+	double use_sy = ((1.0 / old_h) * (double)(y() - old_image_sy));
+	double use_sw = ((1.0 / old_w) * (double)w());
+	double use_sh = ((1.0 / old_h) * (double)h());
+
+	double use_width = ((1.0 / old_w) * width);
+	double use_height = ((1.0 / old_h) * height);
+	double use_orig_w = ((1.0 / old_w) * orig_w);
+	double use_orig_h = ((1.0 / old_h) * orig_h);
+	double use_crop_x = ((1.0 / old_w) * (double)(crop_x - old_image_sx));
+	double use_crop_y = ((1.0 / old_h) * (double)(crop_y - old_image_sy));
+	double use_crop_w = ((1.0 / old_w) * crop_w);
+	double use_crop_h = ((1.0 / old_h) * crop_h);
+	double use_trim_x = ((1.0 / old_w) * (double)(trim_x - old_image_sx));
+	double use_trim_y = ((1.0 / old_h) * (double)(trim_y - old_image_sy));
+
+	double new_sx = (use_sx * new_w) + new_image_sx;
+	double new_sy = (use_sy * new_h) + new_image_sy;
+	double new_sw = use_sw * new_w;
+	double new_sh = use_sh * new_h;
+
+	width = use_width * new_w;
+	height = use_height * new_h;
+	orig_w = use_orig_w * new_w;
+	orig_h = use_orig_h * new_h;
+	crop_x = (use_crop_x * new_w) + new_image_sx;
+	crop_y = (use_crop_y * new_h) + new_image_sy;
+	crop_w = use_crop_w * new_w;
+	crop_h = use_crop_h * new_h;
+	trim_x = (use_trim_x * new_w) + new_image_sx;
+	trim_y = (use_trim_y * new_h) + new_image_sy;
+
+	resize(new_sx, new_sy, new_sw, new_sh);
+	relative_x = x() - new_image_sx;
+	relative_y = y() - new_image_sy;
 }
 
 void	ImageWindow::resize(int xx, int yy, int ww, int hh)
@@ -85037,6 +87313,345 @@ void	ImageWindow::ShowCollected()
 	show();
 }
 
+void	ImageWindow::RightClickMenu()
+{
+	if(popup == NULL)
+	{
+		popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
+		popup->browser->callback(image_window_popup_cb, this);
+	}
+	else
+	{
+		popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
+	}
+	if(popup != NULL)
+	{
+		popup->browser->clear();
+		popup->browser->add("Restore");
+		popup->browser->add("Hide");
+		popup->browser->add("Delete");
+		popup->browser->add("");
+		popup->browser->add("Maximize");
+		popup->browser->add("Minimize");
+		popup->browser->add("");
+		popup->browser->add("Zip Left");
+		popup->browser->add("Grow Left");
+		popup->browser->add("Zip Right");
+		popup->browser->add("Grow Right");
+		popup->browser->add("Zip Up");
+		popup->browser->add("Grow Up");
+		popup->browser->add("Zip Down");
+		popup->browser->add("Grow Down");
+		popup->browser->add("");
+		popup->browser->add("Toggle Frame");
+		popup->browser->add("MW Frame");
+		popup->browser->add("MW Transparency");
+		popup->browser->add("MW Stacking Order");
+		popup->browser->add("MW Rotate");
+		popup->browser->add("Make Transparent");
+		popup->browser->add("Make Opaque");
+		popup->browser->add("Flip Horizontal");
+		popup->browser->add("Flip Vertical");
+		popup->browser->add("Fill Frame");
+		popup->browser->add("Mask");
+		popup->set_non_modal();
+		popup->Fit();
+		popup->show();
+	}
+}
+
+int		ImageWindow::OnPush()
+{
+	int flag = 0;
+	int xx = Fl::event_x();
+	int yy = Fl::event_y();
+	if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
+	{
+		if((xx >= displayed_x) && (xx < (displayed_x + displayed_w))
+		&& (yy >= displayed_y) && (yy < (displayed_y + displayed_h)))
+		{
+			RightClickMenu();
+			flag = 1;
+		}
+	}
+	else
+	{
+		if((drag_mode != DRAG_MODE_MOVE)
+		&& (drag_mode != DRAG_MODE_RESIZE))
+		{
+			dragging = 1;
+			start_drag_x = xx;
+			start_drag_y = yy;
+			flag = 1;
+		}
+	}
+	return(flag);
+}
+
+int		ImageWindow::OnRelease()
+{
+	int flag = 0;
+	int xx = Fl::event_x();
+	int yy = Fl::event_y();
+	fl_cursor(FL_CURSOR_DEFAULT);
+	dragging = 0;
+	int grid_sz = my_window->grid_size;
+	if(transform == MODE_MOVING)
+	{
+		if(grid_sz > 1)
+		{
+			Camera *cam = my_window->DisplayedCamera();
+			int cam_x = cam->image_sx;
+			int cam_y = cam->image_sy;
+			int use_x = x() - cam_x;
+			int use_y = y() - cam_y;
+			use_x = force_to_grid(grid_sz, use_x);
+			use_y = force_to_grid(grid_sz, use_y);
+			resize(use_x + cam_x, use_y + cam_y, w(), h());
+		}
+	}
+	else if(transform == MODE_TRIMMING)
+	{
+		Mat cropped;
+		int x1 = start_drag_x;
+		int x2 = xx;
+		if(start_drag_x > xx)
+		{
+			x1 = xx;
+			x2 = start_drag_x;
+		}
+		int y1 = start_drag_y;
+		int y2 = yy;
+		if(start_drag_y > yy)
+		{
+			y1 = yy;
+			y2 = start_drag_y;
+		}
+		crop_x = x1 - x();
+		crop_y = y1 - y();
+		crop_w = abs(x2 - x1);
+		crop_h = abs(y2 - y1);
+		flag = 1;
+	}
+	transform = 0;
+	return(flag);
+}
+
+int		ImageWindow::OnMoveDrag(Camera *cam, int event)
+{
+	int flag = 0;
+	int xx = Fl::event_x();
+	int yy = Fl::event_y();
+	if(my_window->resize_frame->use == this)
+	{
+		my_window->resize_frame->handle(event);
+	}
+	if(dragging == 1)
+	{
+		if(Fl::event_state(FL_BUTTON1) == FL_BUTTON1)
+		{
+			if(drag_mode == DRAG_MODE_CROP)
+			{
+				transform = MODE_TRIMMING;
+				trim_x = xx;
+				trim_y = yy;
+				flag = 1;
+			}
+			else if(drag_mode == DRAG_MODE_ROTATE)
+			{
+				if(yy > start_drag_y)
+				{
+					angle += 1.0;
+					if(angle >= 360.0)
+					{
+						angle = 0.0;
+					}
+				}
+				else
+				{
+					angle -= 1.0;
+					if(angle < 0.0)
+					{
+						angle = 359.0;
+					}
+				}
+				transform = MODE_ROTATING;
+				flag = 1;
+			}
+		}
+		else if(Fl::event_state(FL_BUTTON2) == FL_BUTTON2)
+		{
+			if((crop_w == 0) && (crop_h == 0))
+			{
+				if((xx > (x() + w() - 50))
+				&& (yy < (y() + h() - 50)))
+				{
+					Rescale(cam, xx, yy, 0);
+				}
+				else if((xx < (x() + w() - 50))
+				&& (yy > (y() + h() - 50)))
+				{
+					Rescale(cam, xx, yy, 0);
+				}
+				else
+				{
+					Rescale(cam, xx, yy, 1);
+				}
+				transform = MODE_RESIZING;
+				flag = 1;
+			}
+		}
+	}
+	return(flag);
+}
+
+int		ImageWindow::OnKeyboard(int key)
+{
+	int flag = 0;
+	if(key == FL_Delete)
+	{
+		Delete();
+		flag = 1;
+	}
+	else if(key == FL_Home)
+	{
+		Restore();
+		flag = 1;
+	}
+	else if(key == FL_End)
+	{
+		Buttonize();
+		flag = 1;
+	}
+	else if(key == FL_Left)
+	{
+		if(Fl::event_state(FL_SHIFT) == FL_SHIFT)
+		{
+			GrowLeft();
+		}
+		else
+		{
+			ZipLeft();
+		}
+		flag = 1;
+	}
+	else if(key == FL_Right)
+	{
+		if(Fl::event_state(FL_SHIFT) == FL_SHIFT)
+		{
+			GrowRight();
+		}
+		else
+		{
+			ZipRight();
+		}
+		flag = 1;
+	}
+	else if(key == FL_Up)
+	{
+		if(Fl::event_state(FL_SHIFT) == FL_SHIFT)
+		{
+			GrowUp();
+		}
+		else
+		{
+			ZipUp();
+		}
+		flag = 1;
+	}
+	else if(key == FL_Down)
+	{
+		if(Fl::event_state(FL_SHIFT) == FL_SHIFT)
+		{
+			GrowDown();
+		}
+		else
+		{
+			ZipDown();
+		}
+		flag = 1;
+	}
+	return(flag);
+}
+
+int		ImageWindow::OnMousewheel(Camera *cam)
+{
+	int flag = 0;
+	if(my_window->resize_frame->use == this)
+	{
+		if(mw_mode != MW_MODE_NONE)
+		{
+			int nn = Fl::event_dy();
+			if(nn > 0)
+			{
+				if(mw_mode == MW_MODE_ROTATION)
+				{
+					angle += 1.0;
+					if(angle >= 360.0)
+					{
+						angle = 0.0;
+					}
+				}
+				else if(mw_mode == MW_MODE_TRANSPARENCY)
+				{
+					if(overall_alpha < 1.0)
+					{
+						overall_alpha += 0.01;
+					}
+				}
+				else if(mw_mode == MW_MODE_STACKING_ORDER)
+				{
+					if(layer < 7)
+					{
+						layer++;
+						cam->edit_layer = layer;
+						for(int loop = 0;loop < 8;loop++)
+						{
+							my_window->immediate_drawing_window->layer_select_button[loop]->value(0);
+						}
+						my_window->immediate_drawing_window->layer_select_button[layer]->value(1);
+						my_window->immediate_drawing_window->redraw();
+					}
+				}
+			}
+			else
+			{
+				if(mw_mode == MW_MODE_ROTATION)
+				{
+					angle -= 1.0;
+					if(angle < 0.0)
+					{
+						angle = 359.0;
+					}
+				}
+				else if(mw_mode == MW_MODE_TRANSPARENCY)
+				{
+					if(overall_alpha > 0.0)
+					{
+						overall_alpha -= 0.01;
+					}
+				}
+				else if(mw_mode == MW_MODE_STACKING_ORDER)
+				{
+					if(layer > 0)
+					{
+						layer--;
+						cam->edit_layer = layer;
+						for(int loop = 0;loop < 8;loop++)
+						{
+							my_window->immediate_drawing_window->layer_select_button[loop]->value(0);
+						}
+						my_window->immediate_drawing_window->layer_select_button[layer]->value(1);
+						my_window->immediate_drawing_window->redraw();
+					}
+				}
+			}
+			flag = 1;
+		}
+	}
+	return(flag);
+}
+
 int	ImageWindow::handle(int event)
 {
 int	loop;
@@ -85055,113 +87670,12 @@ int	loop;
 				{
 					case(FL_PUSH):
 					{
-						if(Fl::event_state(FL_BUTTON3) == FL_BUTTON3)
-						{
-							if((xx >= displayed_x) && (xx < (displayed_x + displayed_w))
-							&& (yy >= displayed_y) && (yy < (displayed_y + displayed_h)))
-							{
-								if(popup == NULL)
-								{
-									popup = new PopupMenu(my_window, Fl::event_x_root(), Fl::event_y_root(), 160, 300);
-									popup->browser->callback(image_window_popup_cb, this);
-								}
-								else
-								{
-									popup->resize(Fl::event_x_root(), Fl::event_y_root(), popup->w(), popup->h());
-								}
-								if(popup != NULL)
-								{
-									popup->browser->clear();
-									popup->browser->add("Restore");
-									popup->browser->add("Hide");
-									popup->browser->add("Delete");
-									popup->browser->add("");
-									popup->browser->add("Maximize");
-									popup->browser->add("Minimize");
-									popup->browser->add("");
-									popup->browser->add("Zip Left");
-									popup->browser->add("Grow Left");
-									popup->browser->add("Zip Right");
-									popup->browser->add("Grow Right");
-									popup->browser->add("Zip Up");
-									popup->browser->add("Grow Up");
-									popup->browser->add("Zip Down");
-									popup->browser->add("Grow Down");
-									popup->browser->add("");
-									popup->browser->add("Toggle Frame");
-									popup->browser->add("MW Frame");
-									popup->browser->add("MW Transparency");
-									popup->browser->add("MW Stacking Order");
-									popup->browser->add("MW Rotate");
-									popup->browser->add("Make Transparent");
-									popup->browser->add("Make Opaque");
-									popup->browser->add("Flip Horizontal");
-									popup->browser->add("Flip Vertical");
-									popup->browser->add("Fill Frame");
-									popup->browser->add("Mask");
-									popup->set_non_modal();
-									popup->Fit();
-									popup->show();
-								}
-								flag = 1;
-							}
-						}
-						else
-						{
-							if((drag_mode != DRAG_MODE_MOVE)
-							&& (drag_mode != DRAG_MODE_RESIZE))
-							{
-								dragging = 1;
-								start_drag_x = xx;
-								start_drag_y = yy;
-								flag = 1;
-							}
-						}
+						flag = OnPush();
 					}
 					break;
 					case(FL_RELEASE):
 					{
-						fl_cursor(FL_CURSOR_DEFAULT);
-						dragging = 0;
-						int grid_sz = my_window->grid_size;
-						if(transform == MODE_MOVING)
-						{
-							if(grid_sz > 1)
-							{
-								Camera *cam = my_window->DisplayedCamera();
-								int cam_x = cam->image_sx;
-								int cam_y = cam->image_sy;
-								int use_x = x() - cam_x;
-								int use_y = y() - cam_y;
-								use_x = force_to_grid(grid_sz, use_x);
-								use_y = force_to_grid(grid_sz, use_y);
-								resize(use_x + cam_x, use_y + cam_y, w(), h());
-							}
-						}
-						else if(transform == MODE_TRIMMING)
-						{
-							Mat cropped;
-							int x1 = start_drag_x;
-							int x2 = xx;
-							if(start_drag_x > xx)
-							{
-								x1 = xx;
-								x2 = start_drag_x;
-							}
-							int y1 = start_drag_y;
-							int y2 = yy;
-							if(start_drag_y > yy)
-							{
-								y1 = yy;
-								y2 = start_drag_y;
-							}
-							crop_x = x1 - x();
-							crop_y = y1 - y();
-							crop_w = abs(x2 - x1);
-							crop_h = abs(y2 - y1);
-							flag = 1;
-						}
-						transform = 0;
+						flag = OnRelease();
 					}
 					break;
 					case(FL_ENTER):
@@ -85183,66 +87697,7 @@ int	loop;
 					case(FL_DRAG):
 					case(FL_MOVE):
 					{
-						if(my_window->resize_frame->use == this)
-						{
-							my_window->resize_frame->handle(event);
-						}
-						if(dragging == 1)
-						{
-							if(Fl::event_state(FL_BUTTON1) == FL_BUTTON1)
-							{
-								if(drag_mode == DRAG_MODE_CROP)
-								{
-									transform = MODE_TRIMMING;
-									trim_x = xx;
-									trim_y = yy;
-									flag = 1;
-								}
-								else if(drag_mode == DRAG_MODE_ROTATE)
-								{
-									if(yy > start_drag_y)
-									{
-										angle += 1.0;
-										if(angle >= 360.0)
-										{
-											angle = 0.0;
-										}
-									}
-									else
-									{
-										angle -= 1.0;
-										if(angle < 0.0)
-										{
-											angle = 359.0;
-										}
-									}
-									transform = MODE_ROTATING;
-									flag = 1;
-								}
-							}
-							else if(Fl::event_state(FL_BUTTON2) == FL_BUTTON2)
-							{
-								if((crop_w == 0) && (crop_h == 0))
-								{
-									if((xx > (x() + w() - 50))
-									&& (yy < (y() + h() - 50)))
-									{
-										Rescale(cam, xx, yy, 0);
-									}
-									else if((xx < (x() + w() - 50))
-									&& (yy > (y() + h() - 50)))
-									{
-										Rescale(cam, xx, yy, 0);
-									}
-									else
-									{
-										Rescale(cam, xx, yy, 1);
-									}
-									transform = MODE_RESIZING;
-									flag = 1;
-								}
-							}
-						}
+						flag = OnMoveDrag(cam, event);
 					}
 					break;
 					case(FL_FOCUS):
@@ -85254,145 +87709,12 @@ int	loop;
 					case(FL_KEYBOARD):
 					{
 						int key = Fl::event_key();
-						if(key == FL_Delete)
-						{
-							Delete();
-							flag = 1;
-						}
-						else if(key == FL_Home)
-						{
-							Restore();
-							flag = 1;
-						}
-						else if(key == FL_End)
-						{
-							Buttonize();
-							flag = 1;
-						}
-						else if(key == FL_Left)
-						{
-							if(Fl::event_state(FL_SHIFT) == FL_SHIFT)
-							{
-								GrowLeft();
-							}
-							else
-							{
-								ZipLeft();
-							}
-							flag = 1;
-						}
-						else if(key == FL_Right)
-						{
-							if(Fl::event_state(FL_SHIFT) == FL_SHIFT)
-							{
-								GrowRight();
-							}
-							else
-							{
-								ZipRight();
-							}
-							flag = 1;
-						}
-						else if(key == FL_Up)
-						{
-							if(Fl::event_state(FL_SHIFT) == FL_SHIFT)
-							{
-								GrowUp();
-							}
-							else
-							{
-								ZipUp();
-							}
-							flag = 1;
-						}
-						else if(key == FL_Down)
-						{
-							if(Fl::event_state(FL_SHIFT) == FL_SHIFT)
-							{
-								GrowDown();
-							}
-							else
-							{
-								ZipDown();
-							}
-							flag = 1;
-						}
+						flag = OnKeyboard(key);
 					}
 					break;
 					case(FL_MOUSEWHEEL):
 					{
-						if(my_window->resize_frame->use == this)
-						{
-							if(mw_mode != MW_MODE_NONE)
-							{
-								int nn = Fl::event_dy();
-								if(nn > 0)
-								{
-									if(mw_mode == MW_MODE_ROTATION)
-									{
-										angle += 1.0;
-										if(angle >= 360.0)
-										{
-											angle = 0.0;
-										}
-									}
-									else if(mw_mode == MW_MODE_TRANSPARENCY)
-									{
-										if(overall_alpha < 1.0)
-										{
-											overall_alpha += 0.01;
-										}
-									}
-									else if(mw_mode == MW_MODE_STACKING_ORDER)
-									{
-										if(layer < 7)
-										{
-											layer++;
-											cam->edit_layer = layer;
-											for(loop = 0;loop < 8;loop++)
-											{
-												my_window->immediate_drawing_window->layer_select_button[loop]->value(0);
-											}
-											my_window->immediate_drawing_window->layer_select_button[layer]->value(1);
-											my_window->immediate_drawing_window->redraw();
-										}
-									}
-								}
-								else
-								{
-									if(mw_mode == MW_MODE_ROTATION)
-									{
-										angle -= 1.0;
-										if(angle < 0.0)
-										{
-											angle = 359.0;
-										}
-									}
-									else if(mw_mode == MW_MODE_TRANSPARENCY)
-									{
-										if(overall_alpha > 0.0)
-										{
-											overall_alpha -= 0.01;
-										}
-									}
-									else if(mw_mode == MW_MODE_STACKING_ORDER)
-									{
-										if(layer > 0)
-										{
-											layer--;
-											cam->edit_layer = layer;
-											for(loop = 0;loop < 8;loop++)
-											{
-												my_window->immediate_drawing_window->layer_select_button[loop]->value(0);
-											}
-											my_window->immediate_drawing_window->layer_select_button[layer]->value(1);
-											my_window->immediate_drawing_window->redraw();
-										}
-									}
-								}
-								flag = 1;
-							}
-						}
+						flag = OnMousewheel(cam);
 					}
 					break;
 				}
@@ -86789,8 +89111,13 @@ void	show_help()
 	printf("dvptz --display_height=720\n\n");
 	printf("# Set the FPS to a specific value, avoiding testing\n");
 	printf("dvptz --fps=18\n\n");
-	printf("# Sets the interval between frames to a rigid length. Specified in seconds.\n");
+	printf("# Specify a JSON file to set the main menu order.\n");
+	printf("dvptz --menu_order=my_menu_order.json\n\n");
+	printf("# Set the interval between frames to a rigid length. Specified in seconds.\n");
 	printf("dvptz --interval=0.01\n\n");
+	printf("# Set a filename to use as the default setup JSON file to load and save system settings.\n");
+	printf("# This defaults to \"default_setup.json\"\n");
+	printf("dvptz --default_setup=my_defaults.json\n\n");
 	printf("# Split the main screen between all the video sources\n");
 	printf("dvptz --split\n\n");
 	printf("# Record audio and video to raw files (unmuxed) and mux as a separate step.\n");
@@ -86896,6 +89223,8 @@ void	show_help()
 	printf("dvptz --desktop_monitor=my_null_sink\n\n");
 	printf("# Do not query the system for available codecs and offer a menu of options.\n");
 	printf("dvptz --no_query_codecs\n\n");
+	printf("# Query and evaluate available codecs for usability and speed filtering out slow combination.\n");
+	printf("dvptz --evaluate_codecs\n\n");
 	printf("# Test the codecs found at current settings to determing if they are usable,\n");
 	printf("# eliminating those that are not from the offered options.\n");
 	printf("dvptz --test_codecs\n\n");
@@ -86932,6 +89261,11 @@ void	show_help()
 	printf("dvptz --retain_cameras\n");
 	printf("dvptz --retain_audio\n");
 	printf("dvptz --retain_ptz\n\n");
+	printf("# Force UI elements to hide.\n");
+	printf("dvptz --hide_commands\n");
+	printf("dvptz --hide_cameras\n");
+	printf("dvptz --hide_audio\n");
+	printf("dvptz --hide_ptz\n\n");
 	printf("# Force all UI elements to persist on the screen rather than appearing when the mouse approaches.\n");
 	printf("dvptz --lock_panels\n\n");
 	printf("# Animate (slide) the UI elements when the mouse approaches.\n");
@@ -87157,7 +89491,7 @@ char tmp[4092];
 
 MyWin *StartMain(int updates, int fast_start = 0)
 {
-void	enumerate_codecs();
+void	enumerate_codecs(int list_cnt = 0, char **list = NULL);
 void	enumerate_test(MyWin *in_win, void (*output_cb)(char *), int test_w, int test_h, int test_fps, int test_hz);
 int	xx, yy;
 int	loop;
@@ -87275,6 +89609,7 @@ char		local_buf[32768];
 	int use_detect = 0;
 	int test_codecs = 0;
 	int query_codecs = 1;
+	int evaluate_codecs = 0;
 	int timestamp = 0;
 	int frame_scaling = 1;
 	int crop_output = 0;
@@ -87315,6 +89650,9 @@ char		local_buf[32768];
 	int use_threaded_object_recognition = 0;
 	int use_tiled_object_recognition = 0;
 	int use_hide_menu = 0;
+	char *use_output_file = NULL;
+	char *use_default_setup_filename = "default_setup.json";
+	char *use_menu_order = NULL;
 	strcpy(use_encode_summary_file, "");
 	start_win->Update("Parsing Command Line Arguments...");
 	if(argc > 1)
@@ -87354,6 +89692,10 @@ char		local_buf[32768];
 				{
 					use_fullscreen = 1;
 				}
+				else if(strncmp(argv[loop], "--output_file=", strlen("--output_file=")) == 0)
+				{
+					use_output_file = argv[loop] + strlen("--output_file=");
+				}
 				else if(strncmp(argv[loop], "--width=", strlen("--width=")) == 0)
 				{
 					new_width = atoi(argv[loop] + strlen("--width="));
@@ -87388,6 +89730,10 @@ char		local_buf[32768];
 				{
 					new_interval = atof(argv[loop] + strlen("--interval="));
 				}
+				else if(strncmp(argv[loop], "--default_setup=", strlen("--default_setup=")) == 0)
+				{
+					use_default_setup_filename = argv[loop] + strlen("--default_setup=");
+				}
 				else if(strncmp(argv[loop], "--split", strlen("--split")) == 0)
 				{
 					new_split = 1;
@@ -87396,6 +89742,11 @@ char		local_buf[32768];
 				{
 					char *cp = argv[loop] + strlen("--container=");
 					strcpy(new_mux_format, cp);
+				}
+				else if(strncmp(argv[loop], "--menu_order=", strlen("--menu_order=")) == 0)
+				{
+					char *cp = argv[loop] + strlen("--menu_order=");
+					use_menu_order = cp;
 				}
 				else if(strncmp(argv[loop], "--borderless", strlen("--borderless")) == 0)
 				{
@@ -87769,6 +90120,10 @@ char		local_buf[32768];
 				{
 					query_codecs = 0;
 				}
+				else if(strncmp(argv[loop], "--evaluate_codecs", strlen("--evaluate_codecs")) == 0)
+				{
+					evaluate_codecs = 1;
+				}
 				else if(strncmp(argv[loop], "--timestamp", strlen("--timestamp")) == 0)
 				{
 					timestamp = 1;
@@ -87803,26 +90158,42 @@ char		local_buf[32768];
 				}
 				else if(strncmp(argv[loop], "--retain_commands", strlen("--retain_commands")) == 0)
 				{
-					use_retain_commands = 1;
+					use_retain_commands = PANEL_RETAIN;
 				}
 				else if(strncmp(argv[loop], "--retain_cameras", strlen("--retain_cameras")) == 0)
 				{
-					use_retain_cameras = 1;
+					use_retain_cameras = PANEL_RETAIN;
 				}
 				else if(strncmp(argv[loop], "--retain_audio", strlen("--retain_audio")) == 0)
 				{
-					use_retain_audio = 1;
+					use_retain_audio = PANEL_RETAIN;
 				}
 				else if(strncmp(argv[loop], "--retain_ptz", strlen("--retain_ptz")) == 0)
 				{
-					use_retain_ptz = 1;
+					use_retain_ptz = PANEL_RETAIN;
+				}
+				else if(strncmp(argv[loop], "--hide_commands", strlen("--hide_commands")) == 0)
+				{
+					use_retain_commands = PANEL_HIDE;
+				}
+				else if(strncmp(argv[loop], "--hide_cameras", strlen("--hide_cameras")) == 0)
+				{
+					use_retain_cameras = PANEL_HIDE;
+				}
+				else if(strncmp(argv[loop], "--hide_audio", strlen("--hide_audio")) == 0)
+				{
+					use_retain_audio = PANEL_HIDE;
+				}
+				else if(strncmp(argv[loop], "--hide_ptz", strlen("--hide_ptz")) == 0)
+				{
+					use_retain_ptz = PANEL_HIDE;
 				}
 				else if(strncmp(argv[loop], "--lock_panels", strlen("--lock_panels")) == 0)
 				{
-					use_retain_commands = 1;
-					use_retain_cameras = 1;
-					use_retain_audio = 1;
-					use_retain_ptz = 1;
+					use_retain_commands = PANEL_RETAIN;
+					use_retain_cameras = PANEL_RETAIN;
+					use_retain_audio = PANEL_RETAIN;
+					use_retain_ptz = PANEL_RETAIN;
 				}
 				else if(strncmp(argv[loop], "--animate_panels", strlen("--animate_panels")) == 0)
 				{
@@ -88105,7 +90476,7 @@ char		local_buf[32768];
 	if(load_state == 1)
 	{
 		start_win->Update("Loading state from default_setup.json");
-		if(access("default_setup.json", F_OK) == 0)
+		if(access(use_default_setup_filename, F_OK) == 0)
 		{
 			use_no_audio_scan = 1;
 			use_no_scan = 1;
@@ -88126,6 +90497,7 @@ char		local_buf[32768];
 		, new_display_width
 		, new_display_height
 		, new_fps
+		, use_output_file
 		, load_state
 		, new_interval
 		, new_split
@@ -88207,7 +90579,9 @@ char		local_buf[32768];
 		, use_threaded_object_recognition
 		, use_tiled_object_recognition
 		, use_hide_menu
+		, use_menu_order
 		, "DVPTZ");
+	win->default_setup_filename = use_default_setup_filename;
 	win->color(WHITE);
 	win->end();
 	if(use_fullscreen == 1)
@@ -88423,10 +90797,10 @@ char		local_buf[32768];
 	{
 		use_no_audio_scan = 1;
 		use_no_scan = 1;
-		if(access("default_setup.json", F_OK) == 0)
+		if(access(use_default_setup_filename, F_OK) == 0)
 		{
 			start_win->Update("Opening default JSON setup file");
-			win->LoadJSON("default_setup.json");
+			win->LoadJSON(use_default_setup_filename);
 		}
 	}
 	TriggerWindow *tw = new TriggerWindow(win);
@@ -88439,6 +90813,11 @@ char		local_buf[32768];
 	}
 	win->Transparent(win->transparent_interface);
 	Fl::add_timeout(0.1, my_window_cb, win);
+	if(evaluate_codecs == 1)
+	{
+		start_win->Update("Evaluating Codecs");
+		gather_codecs_cb(NULL, win);
+	}
 	start_win->Update("Creating onggoing threads and timeouts...");
 	if(win->record_all == 1)
 	{
@@ -88852,6 +91231,8 @@ struct tm	*tm;
 		Fl::set_color(BLUE, 0, 0, 200);
 		Fl::set_color(CYAN, 128, 128, 255);
 		Fl::set_color(DARK_GREEN, 0, 100, 0);
+		Fl::set_color(DARK_PURPLE, 10, 0, 28);
+		Fl::set_color(PURPLE, 64, 0, 64);
 
 		Fl::scrollbar_size(4);
 		int ww = Fl::w();

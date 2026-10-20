@@ -127,17 +127,20 @@ static int init = 0;
 
 void	python_run_frame_filter(void *in_function, cv::Mat mat)
 {
-	void *rr = NULL;
-	PyObject *function = (PyObject *)in_function;
-	PyObject *frame = python_prepare_mat(mat);
-	if(frame != NULL)
+	if(in_function != NULL)
 	{
-		PyObject *r = python_call_function(function, frame);
-		if(r != NULL)
+		void *rr = NULL;
+		PyObject *function = (PyObject *)in_function;
+		PyObject *frame = python_prepare_mat(mat);
+		if(frame != NULL)
 		{
-			Py_DECREF(r);
+			PyObject *r = python_call_function(function, frame);
+			if(r != NULL)
+			{
+				Py_DECREF(r);
+			}
+			Py_DECREF(frame);
 		}
-		Py_DECREF(frame);
 	}
 }
 

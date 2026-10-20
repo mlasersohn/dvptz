@@ -103,4 +103,5 @@ public:
 	char		*filename[64];
 	GenericPopupMenu	*popup;
 	double		volume;
+	int			paused;
 };

@@ -6,6 +6,10 @@
 #include <semaphore.h>
 #include <pthread.h>
 
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -35,11 +39,90 @@ void silent_log_callback(void *data, int level, const libvlc_log_t *ctx, const c
 {
 }
 
-VLC_Window::VLC_Window(char *in_path, int ww, int hh)
+
+enum MediaKind : unsigned {
+	MEDIA_NONE  = 0,
+	MEDIA_VIDEO = 1,
+	MEDIA_AUDIO = 2,
+	MEDIA_BOTH  = MEDIA_VIDEO | MEDIA_AUDIO
+};
+
+struct ParseCtx {
+	std::mutex m;
+	std::condition_variable cv;
+	bool done = false;
+};
+
+static void on_parsed(const libvlc_event_t *, void *data)
+{
+	auto *c = static_cast<ParseCtx *>(data);
+	std::lock_guard<std::mutex> lk(c->m);
+	c->done = true;
+	c->cv.notify_one();
+}
+
+// Returns a bitmask of MEDIA_VIDEO / MEDIA_AUDIO; MEDIA_NONE if unplayable.
+unsigned probe_media(libvlc_instance_t *vlc, const char *path, int timeout_ms = 5000)
+{
+	libvlc_media_t *media = libvlc_media_new_path(vlc, path);
+	if(!media) return MEDIA_NONE;
+
+	ParseCtx ctx;
+	libvlc_event_manager_t *em = libvlc_media_event_manager(media);
+	libvlc_event_attach(em, libvlc_MediaParsedChanged, on_parsed, &ctx);
+
+	unsigned kind = MEDIA_NONE;
+	if(libvlc_media_parse_with_options(media, libvlc_media_parse_local, timeout_ms) == 0) 
+	{
+		std::unique_lock<std::mutex> lk(ctx.m);
+		ctx.cv.wait_for(lk, std::chrono::milliseconds(timeout_ms + 500),
+						[&]{ return ctx.done; });
+		lk.unlock();
+
+		if(libvlc_media_get_parsed_status(media) == libvlc_media_parsed_status_done) 
+		{
+			libvlc_media_track_t **tracks = nullptr;
+			unsigned n = libvlc_media_tracks_get(media, &tracks);
+			for(unsigned i = 0; i < n; ++i) 
+			{
+				switch (tracks[i]->i_type) 
+				{
+					case libvlc_track_video:
+					{
+						if(tracks[i]->video->i_width > 0 && tracks[i]->video->i_height > 0)
+							kind |= MEDIA_VIDEO;
+					}
+					break;
+					case libvlc_track_audio:
+					{
+						if(tracks[i]->audio->i_channels > 0 && tracks[i]->audio->i_rate > 0)
+							kind |= MEDIA_AUDIO;
+					}
+					break;
+					default:
+					break;
+				}
+				if(kind == MEDIA_BOTH) break;
+			}
+			if(tracks) libvlc_media_tracks_release(tracks, n);
+		}
+	}
+	libvlc_event_detach(em, libvlc_MediaParsedChanged, on_parsed, &ctx);
+	libvlc_media_release(media);
+	return kind;
+}
+
+bool is_playable_media(libvlc_instance_t *vlc, const char *path)
+{
+	return probe_media(vlc, path) != MEDIA_NONE;
+}
+
+VLC_Window::VLC_Window(char *in_path, int in_repeats, int ww, int hh)
 {
 int	loop;
 
 	strcpy(path, in_path);
+	repeats = in_repeats;
 	volume = 0.5;
 	muted = 0;
 	stored_volume = volume;
@@ -87,37 +170,52 @@ int	loop;
 	  , (long long int)this
 	  , (long long int)this);
 
-    const char * const vlc_args[] = {
-          "-I", "dummy", // Don't use any interface
-          "--ignore-config", // Don't use VLC's config
-          "--quiet",
-          "--no-video-title-show",
-          "--no-xlib",
-          "--verbose=0" // Don't be verbose
-           };
+	const char * const vlc_args[] = {
+		  "-I", "dummy", // Don't use any interface
+		  "--ignore-config", // Don't use VLC's config
+		  "--quiet",
+		  "--no-video-title-show",
+		  "--no-xlib",
+		  "--verbose=0" // Don't be verbose
+		   };
 
 	// We launch VLC
+	creation_failed = 0;
 	vlcInstance = libvlc_new(sizeof(vlc_args) / sizeof(vlc_args[0]), vlc_args);
-	libvlc_log_set(vlcInstance, silent_log_callback, NULL);
-
-	media_player = libvlc_media_player_new(vlcInstance);
-
-	libvlc_event_manager_t *eventManager = libvlc_media_player_event_manager(media_player);
-	libvlc_event_attach(eventManager, libvlc_MediaPlayerTimeChanged, handleEvent, pUserData);
-	libvlc_event_attach(eventManager, libvlc_MediaPlayerEndReached, handleEvent, pUserData);
-	libvlc_event_attach(eventManager, libvlc_MediaPlayerPositionChanged, handleEvent, pUserData);
-
-	if(access(path, 0) == 0)
+	if(vlcInstance != NULL)
 	{
-		media = libvlc_media_new_path(vlcInstance, path);
+		if(is_playable_media(vlcInstance, path))
+		{
+			libvlc_log_set(vlcInstance, silent_log_callback, NULL);
+
+			media_player = libvlc_media_player_new(vlcInstance);
+
+			libvlc_event_manager_t *eventManager = libvlc_media_player_event_manager(media_player);
+			libvlc_event_attach(eventManager, libvlc_MediaPlayerTimeChanged, handleEvent, pUserData);
+			libvlc_event_attach(eventManager, libvlc_MediaPlayerEndReached, handleEvent, pUserData);
+			libvlc_event_attach(eventManager, libvlc_MediaPlayerPositionChanged, handleEvent, pUserData);
+
+			if(access(path, 0) == 0)
+			{
+				media = libvlc_media_new_path(vlcInstance, path);
+			}
+			else
+			{
+				media = libvlc_media_new_location(vlcInstance, path);
+			}
+			libvlc_media_add_option(media, smem_options);
+			libvlc_media_add_option(media, ":smem-options=#transcode{vcodec=RV32}:smem{no-time-sync}");
+			libvlc_media_player_set_media(media_player, media);
+		}
+		else
+		{
+			creation_failed = 1;
+		}
 	}
 	else
 	{
-		media = libvlc_media_new_location(vlcInstance, path);
+		creation_failed = 1;
 	}
-	libvlc_media_add_option(media, smem_options);
-	libvlc_media_add_option(media, ":smem-options=#transcode{vcodec=RV32}:smem{no-time-sync}");
-	libvlc_media_player_set_media(media_player, media);
 }
 
 VLC_Window::~VLC_Window()
@@ -127,24 +225,27 @@ void	play_cb(void *v);
 
 	done = 1;
 	Fl::remove_timeout(play_cb);
-	usleep(100000);
-	if(simple != NULL)
+	if(creation_failed == 0)
 	{
-		pa_simple_free(simple);
-	}
-	libvlc_media_release(media);
-	libvlc_media_player_release(media_player);
-	for(loop = 0;loop < BUFFER_LIMIT;loop++)
-	{
-		if(video_frame[loop] != NULL)
+		usleep(100000);
+		if(simple != NULL)
 		{
-			free(video_frame[loop]);
-			video_frame[loop] = NULL;
+			pa_simple_free(simple);
 		}
-		if(audio_frame[loop] != NULL)
+		libvlc_media_release(media);
+		libvlc_media_player_release(media_player);
+		for(loop = 0;loop < BUFFER_LIMIT;loop++)
 		{
-			free(audio_frame[loop]);
-			audio_frame[loop] = NULL;
+			if(video_frame[loop] != NULL)
+			{
+				free(video_frame[loop]);
+				video_frame[loop] = NULL;
+			}
+			if(audio_frame[loop] != NULL)
+			{
+				free(audio_frame[loop]);
+				audio_frame[loop] = NULL;
+			}
 		}
 	}
 }
@@ -152,7 +253,10 @@ void	play_cb(void *v);
 void	vlc_window_start_cb(void *v)
 {
 	VLC_Window *vlc = (VLC_Window *)v;
-	vlc->Start();
+	if(vlc->creation_failed == 0)
+	{
+		vlc->Start();
+	}
 }
 
 void	VLC_Window::Start()
@@ -160,36 +264,42 @@ void	VLC_Window::Start()
 int	play_audio(int *v);
 void	play_cb(void *v);
 
-	current_frame = 0;
-	Fl::add_timeout(0.03, play_cb, this);
-	create_task((int (*)(int *))play_audio, (void *)this);
-	libvlc_media_player_play(media_player);
+	if(creation_failed == 0)
+	{
+		current_frame = 0;
+		Fl::add_timeout(0.03, play_cb, this);
+		create_task((int (*)(int *))play_audio, (void *)this);
+		libvlc_media_player_play(media_player);
+	}
 }
 
 void	VLC_Window::ResetFrames()
 {
 int	loop;
 
-	current_frame = 0;
-	video_cnt = 0;
-	video_play_cnt = 0;
-	last_video_pts = 0;
-	audio_cnt = 0;
-	audio_play_cnt = 0;
-	audio_complete = 0;
-	last_audio_pts = 0;
-	old_pts = 0;
-	for(loop = 0;loop < BUFFER_LIMIT;loop++)
+	if(creation_failed == 0)
 	{
-		if(video_frame[loop] != NULL)
+		current_frame = 0;
+		video_cnt = 0;
+		video_play_cnt = 0;
+		last_video_pts = 0;
+		audio_cnt = 0;
+		audio_play_cnt = 0;
+		audio_complete = 0;
+		last_audio_pts = 0;
+		old_pts = 0;
+		for(loop = 0;loop < BUFFER_LIMIT;loop++)
 		{
-			free(video_frame[loop]);
-			video_frame[loop] = NULL;
-		}
-		if(audio_frame[loop] != NULL)
-		{
-			free(audio_frame[loop]);
-			audio_frame[loop] = NULL;
+			if(video_frame[loop] != NULL)
+			{
+				free(video_frame[loop]);
+				video_frame[loop] = NULL;
+			}
+			if(audio_frame[loop] != NULL)
+			{
+				free(audio_frame[loop]);
+				audio_frame[loop] = NULL;
+			}
 		}
 	}
 }
@@ -198,27 +308,100 @@ void	VLC_Window::Draw()
 {
 unsigned int local_w, local_h;
 
-	double pos = libvlc_media_player_get_position(media_player);
-	libvlc_video_get_size(media_player, 0, &local_w, &local_h);
-	int use_w = width;
-	int use_h = height;
-	int ran_loop = 0;
-	int cnt = 0;
-	while((video_frame[video_play_cnt] == NULL) && (cnt < 1024))
+	if(creation_failed == 0)
 	{
-		cnt++;
-		video_play_cnt++;
-		if(video_play_cnt >= BUFFER_LIMIT)
+		double pos = libvlc_media_player_get_position(media_player);
+		libvlc_video_get_size(media_player, 0, &local_w, &local_h);
+		int use_w = width;
+		int use_h = height;
+		int ran_loop = 0;
+		int cnt = 0;
+		while((video_frame[video_play_cnt] == NULL) && (cnt < 1024))
 		{
-			video_play_cnt = 0;
+			cnt++;
+			video_play_cnt++;
+			if(video_play_cnt >= BUFFER_LIMIT)
+			{
+				video_play_cnt = 0;
+			}
+		}
+		int start = video_play_cnt;
+		if(audio_tracks > 0)
+		{
+			while((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
+			{
+				ran_loop++;
+				if((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
+				{
+					free(video_frame[start]);
+					video_frame[start] = NULL;
+				}
+				start++;
+				if(start >= BUFFER_LIMIT)
+				{
+					start = 0;
+				}
+				current_frame++;
+			}
+			video_play_cnt = start;
+			if(video_frame[video_play_cnt] != NULL)
+			{
+				Mat src = Mat(local_h, local_w, CV_8UC3, video_frame[video_play_cnt]);
+				cv::cvtColor(src, mat, COLOR_RGB2RGBA);
+				cv::resize(mat, mat, Size(use_w, use_h));
+
+				free(video_frame[video_play_cnt]);
+				video_frame[video_play_cnt] = NULL;
+				video_play_cnt++;
+				if(video_play_cnt >= BUFFER_LIMIT)
+				{
+					video_play_cnt = 0;
+				}
+				current_frame++;
+			}
+		}
+		else
+		{
+			audio_complete = 1;
+			if(video_pts[video_play_cnt] <= last_video_pts)
+			{
+				if(video_frame[video_play_cnt] != NULL)
+				{
+					Mat src = Mat(local_h, local_w, CV_8UC3, video_frame[video_play_cnt]);
+					cvtColor(src, mat, COLOR_RGB2RGBA);
+					cv::resize(mat, mat, Size(use_w, use_h));
+					free(video_frame[video_play_cnt]);
+					video_frame[video_play_cnt] = NULL;
+					video_play_cnt++;
+					if(video_play_cnt >= BUFFER_LIMIT)
+					{
+						video_play_cnt = 0;
+					}
+					current_frame++;
+				}
+				else
+				{
+					video_play_cnt++;
+					if(video_play_cnt >= BUFFER_LIMIT)
+					{
+						video_play_cnt = 0;
+					}
+				}
+			}
+			else
+			{
+			}
 		}
 	}
-	int start = video_play_cnt;
-	if(audio_tracks > 0)
+}
+
+void	VLC_Window::Despool()
+{
+	if(creation_failed == 0)
 	{
+		int start = video_play_cnt;
 		while((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
 		{
-			ran_loop++;
 			if((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
 			{
 				free(video_frame[start]);
@@ -232,79 +415,16 @@ unsigned int local_w, local_h;
 			current_frame++;
 		}
 		video_play_cnt = start;
-		if(video_frame[video_play_cnt] != NULL)
-		{
-			Mat src = Mat(local_h, local_w, CV_8UC3, video_frame[video_play_cnt]);
-			cv::cvtColor(src, mat, COLOR_RGB2RGBA);
-			cv::resize(mat, mat, Size(use_w, use_h));
-
-			free(video_frame[video_play_cnt]);
-			video_frame[video_play_cnt] = NULL;
-			video_play_cnt++;
-			if(video_play_cnt >= BUFFER_LIMIT)
-			{
-				video_play_cnt = 0;
-			}
-			current_frame++;
-		}
 	}
-	else
-	{
-		audio_complete = 1;
-		if(video_pts[video_play_cnt] <= last_video_pts)
-		{
-			if(video_frame[video_play_cnt] != NULL)
-			{
-				Mat src = Mat(local_h, local_w, CV_8UC3, video_frame[video_play_cnt]);
-				cvtColor(src, mat, COLOR_RGB2RGBA);
-				cv::resize(mat, mat, Size(use_w, use_h));
-				free(video_frame[video_play_cnt]);
-				video_frame[video_play_cnt] = NULL;
-				video_play_cnt++;
-				if(video_play_cnt >= BUFFER_LIMIT)
-				{
-					video_play_cnt = 0;
-				}
-				current_frame++;
-			}
-			else
-			{
-				video_play_cnt++;
-				if(video_play_cnt >= BUFFER_LIMIT)
-				{
-					video_play_cnt = 0;
-				}
-			}
-		}
-		else
-		{
-		}
-	}
-}
-
-void	VLC_Window::Despool()
-{
-	int start = video_play_cnt;
-	while((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
-	{
-		if((video_pts[start] < last_audio_pts) && (video_frame[start] != NULL))
-		{
-			free(video_frame[start]);
-			video_frame[start] = NULL;
-		}
-		start++;
-		if(start >= BUFFER_LIMIT)
-		{
-			start = 0;
-		}
-		current_frame++;
-	}
-	video_play_cnt = start;
 }
 
 int	play_audio(int *v)
 {
 	VLC_Window *dw = (VLC_Window *)v;
+	while(dw->video_cnt < 5)
+	{
+		usleep(10000);
+	}
 	dw->PlayAudio();
 	return(0);
 }
@@ -314,49 +434,52 @@ void	VLC_Window::PlayAudio()
 int	error;
 int	loop;
 
-	while((done == 0) && (audio_tracks != 0))
+	if(creation_failed == 0)
 	{
-		audio_complete = 0;
-		if(simple != NULL)
+		while((done == 0) && (audio_tracks != 0))
 		{
-			if(audio_frame[audio_play_cnt] != NULL)
+			audio_complete = 0;
+			if(simple != NULL)
 			{
-				if(paused == 0)
+				if(audio_frame[audio_play_cnt] != NULL)
 				{
-					last_audio_pts = audio_pts[audio_play_cnt];
-					short int *cc = (short int *)audio_frame[audio_play_cnt];
-					for(loop = 0;loop < (audio_sz / 2);loop++)
+					if(paused == 0)
 					{
-						short int val = *cc;
-						val = (short int)((double)val * volume);
-						*cc = val;
-						cc++;
+						last_audio_pts = audio_pts[audio_play_cnt];
+						short int *cc = (short int *)audio_frame[audio_play_cnt];
+						for(loop = 0;loop < (audio_sz / 2);loop++)
+						{
+							short int val = *cc;
+							val = (short int)((double)val * volume);
+							*cc = val;
+							cc++;
+						}
+						if(pa_simple_write(simple, audio_frame[audio_play_cnt], (size_t)audio_sz, &error) < 0) 
+						{
+							fprintf(stderr, "pa_simple_write() failed: %s\n", pa_strerror(error));
+						}
+						free(audio_frame[audio_play_cnt]);
+						audio_frame[audio_play_cnt] = NULL;
+						audio_play_cnt++;
+						if(audio_play_cnt >= BUFFER_LIMIT)
+						{
+							audio_play_cnt = 0;
+						}
 					}
-					if(pa_simple_write(simple, audio_frame[audio_play_cnt], (size_t)audio_sz, &error) < 0) 
+					else
 					{
-						fprintf(stderr, "pa_simple_write() failed: %s\n", pa_strerror(error));
-					}
-					free(audio_frame[audio_play_cnt]);
-					audio_frame[audio_play_cnt] = NULL;
-					audio_play_cnt++;
-					if(audio_play_cnt >= BUFFER_LIMIT)
-					{
-						audio_play_cnt = 0;
+						usleep(100000);
 					}
 				}
 				else
 				{
-					usleep(100000);
+					usleep(10000);
 				}
 			}
 			else
 			{
 				usleep(10000);
 			}
-		}
-		else
-		{
-			usleep(10000);
 		}
 	}
 	audio_complete = 1;
@@ -500,7 +623,7 @@ libvlc_time_t time;
 
 void	play_cb(void *v)
 {
-long int precise_time(void);
+extern long int	precise_time();
 static long int start = 0;
 
 	VLC_Window *dw = (VLC_Window *)v;
@@ -520,35 +643,41 @@ static long int start = 0;
 	else
 	{
 		Fl::remove_timeout(play_cb);
-		while(dw->audio_complete == 0)
-		{
-			usleep(100000);
-		}
-		dw->ResetFrames();
-		dw->done = 0;
-		sleep(1);
-		libvlc_media_player_set_media(dw->media_player, dw->media);
-		libvlc_media_player_set_time(dw->media_player, 0);
-		libvlc_media_player_play(dw->media_player);
-		while(dw->video_cnt < 5)
+		int cnt = 0;
+		while((dw->audio_complete == 0) && (cnt < 100))
 		{
 			usleep(10000);
+			cnt++;
 		}
-		create_task((int (*)(int *))play_audio, (void *)dw);
-		Fl::repeat_timeout(0.03, play_cb, dw);
+		dw->ResetFrames();
+		if(dw->repeats == 1)
+		{
+			dw->done = 0;
+			libvlc_media_player_set_media(dw->media_player, dw->media);
+			libvlc_media_player_set_time(dw->media_player, 0);
+			libvlc_media_player_play(dw->media_player);
+			create_task((int (*)(int *))play_audio, (void *)dw);
+			Fl::repeat_timeout(0.03, play_cb, dw);
+		}
 	}
 }
 
 void	VLC_Window::Pause()
 {
 	paused = 1;
-	libvlc_media_player_pause(media_player);
+	if(creation_failed == 0)
+	{
+		libvlc_media_player_pause(media_player);
+	}
 }
 
 void	VLC_Window::Resume()
 {
 	paused = 0;
-	libvlc_media_player_play(media_player);
+	if(creation_failed == 0)
+	{
+		libvlc_media_player_play(media_player);
+	}
 }
 
 void	VLC_Window::Volume(double val)
@@ -560,7 +689,10 @@ void	VLC_Window::Volume(double val)
 
 void	VLC_Window::Mute()
 {
-	stored_volume = volume;
+	if(muted == 0)
+	{
+		stored_volume = volume;
+	}
 	volume = 0.0;
 	muted = 1;
 }
@@ -573,72 +705,87 @@ void	VLC_Window::UnMute()
 
 double	VLC_Window::Position()
 {
-	double pos = libvlc_media_player_get_position(media_player);
+	double pos = 0.0;
+	if(creation_failed == 0)
+	{
+		pos = libvlc_media_player_get_position(media_player);
+	}
 	return(pos);
 }
 
 void VLC_Window::Position(double new_position) 
 {
-	libvlc_media_player_t *mp = media_player;
-	libvlc_audio_set_mute(mp, 1);
-	int was_paused = 0;
-	if(libvlc_media_player_is_playing(mp)) 
+	if(creation_failed == 0)
 	{
+		libvlc_media_player_t *mp = media_player;
+		libvlc_audio_set_mute(mp, 1);
+		int was_paused = 0;
+		if(libvlc_media_player_is_playing(mp)) 
+		{
+			libvlc_media_player_set_pause(mp, 1);
+			was_paused = 1;
+		}
+		libvlc_media_player_set_position(mp, new_position);
+		libvlc_media_player_next_frame(mp);
+		if(!libvlc_media_player_is_playing(mp))
+		{
+			libvlc_media_player_play(mp);
+			usleep(50000);
+		}
 		libvlc_media_player_set_pause(mp, 1);
-		was_paused = 1;
-	}
-	libvlc_media_player_set_position(mp, new_position);
-	libvlc_media_player_next_frame(mp);
-	if(!libvlc_media_player_is_playing(mp))
-	{
+		libvlc_audio_set_mute(mp, 0);
+		int cnt = 0;
+		while((video_play_cnt != video_cnt) && (cnt < 1024))
+		{
+			Draw();
+			cnt++;
+		}
+		libvlc_media_player_set_pause(mp, 0);
 		libvlc_media_player_play(mp);
-		usleep(50000);
 	}
-	libvlc_media_player_set_pause(mp, 1);
-	libvlc_audio_set_mute(mp, 0);
-	int cnt = 0;
-	while((video_play_cnt != video_cnt) && (cnt < 1024))
-	{
-		Draw();
-		cnt++;
-	}
-	libvlc_media_player_set_pause(mp, 0);
-	libvlc_media_player_play(mp);
 }
 
 void VLC_Window::QuickPosition(double new_position) 
 {
-	libvlc_media_player_t *mp = media_player;
-	libvlc_audio_set_mute(mp, 1);
-	libvlc_media_player_set_position(mp, new_position);
-	if(!libvlc_media_player_is_playing(mp))
+	if(creation_failed == 0)
 	{
+		libvlc_media_player_t *mp = media_player;
+		libvlc_audio_set_mute(mp, 1);
+		libvlc_media_player_set_position(mp, new_position);
+		if(!libvlc_media_player_is_playing(mp))
+		{
+			libvlc_media_player_play(mp);
+			usleep(100);
+		}
+		libvlc_media_player_set_pause(mp, 1);
+		libvlc_audio_set_mute(mp, 0);
+		int cnt = 0;
+		while((video_play_cnt != video_cnt) && (cnt < 1024))
+		{
+			Despool();
+			cnt++;
+		}
+		Draw();
+		libvlc_media_player_set_pause(mp, 0);
 		libvlc_media_player_play(mp);
-		usleep(100);
 	}
-	libvlc_media_player_set_pause(mp, 1);
-	libvlc_audio_set_mute(mp, 0);
-	int cnt = 0;
-	while((video_play_cnt != video_cnt) && (cnt < 1024))
-	{
-		Despool();
-		cnt++;
-	}
-	Draw();
-	libvlc_media_player_set_pause(mp, 0);
-	libvlc_media_player_play(mp);
 }
 
 void	VLC_Window::Stop()
 {
 	Fl::remove_timeout(play_cb);
-	done = 1;
-	if(audio_tracks > 0)
+	if(creation_failed == 0)
 	{
-		while(audio_complete == 0)
+		done = 1;
+		if(audio_tracks > 0)
 		{
-			usleep(10000);
+			int cnt = 0;
+			while((audio_complete == 0) && (cnt < 100))
+			{
+				usleep(10000);
+				cnt++;
+			}
 		}
+		libvlc_media_player_stop(media_player);
 	}
-	libvlc_media_player_stop(media_player);
 }

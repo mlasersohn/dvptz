@@ -147,9 +147,11 @@ public:
 	char	extensions[1024];
 	char	*video_codec[1024];
 	int		video_id[1024];
+	int		video_bad[1024];
 	int		video_codec_cnt;
 	char	*audio_codec[1024];
 	int		audio_id[1024];
+	int		audio_bad[1024];
 	int		audio_codec_cnt;
 };
 
@@ -209,7 +211,6 @@ public:
 	ReviewWin	*review;
 	char		filename[4096];
 	Camera		*camera;
-	int	number_of_audio_samples;
 	int	encode_audio;
 	int	encode_video;
 	int	current_frame;
@@ -261,4 +262,8 @@ public:
 	time_t		time_to_write_frame;
 	double		average_time_to_write_frame;
 	int			in_simple_record;
+
+	int			fast_close;
 };
+
+int	 simple_record(int *flag);
